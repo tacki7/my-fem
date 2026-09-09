@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roll FEM Lab — 金属圧延 剛塑性FEM</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='14' r='11' fill='none' stroke='%2358d5ff' stroke-width='3'/><rect x='2' y='27' width='28' height='3' fill='%23ffc46b'/></svg>" />
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <div class="brand-text">
+        <strong>Roll&nbsp;FEM&nbsp;Lab</strong>
+        <span>2D 剛塑性流れ解析 ／ 弾性ロール連成 圧延シミュレータ</span>
+      </div>
+    </div>
+    <div id="topbar-presets"></div>
+    <div id="topbar-actions"></div>
+    <div id="topbar-badges"></div>
+  </header>
+
+  <aside id="common" class="panel"></aside>
+
+  <section id="millline" class="panel">
+    <div class="chart-head">
+      <span class="chart-title">ミルライン</span>
+      <span class="chart-sub" id="millline-sub">クリックでスタンド選択</span>
+    </div>
+    <canvas id="millcanvas"></canvas>
+    <div id="standgrid" class="stand-grid"></div>
+  </section>
+
+  <aside id="left" class="panel"></aside>
+
+  <main id="stage">
+    <canvas id="gl"></canvas>
+    <div id="legend">
+      <div class="legend-title"><span id="legend-name">相当塑性ひずみ</span><span id="legend-unit">—</span></div>
+      <div class="legend-bar"><div id="legend-grad"></div></div>
+      <div class="legend-scale"><span id="legend-min">0</span><span id="legend-mid">0</span><span id="legend-max">0</span></div>
+    </div>
+    <div id="hud"></div>
+    <div id="neutral-label" hidden>中立点</div>
+    <div id="stage-hint">ドラッグ=移動 ／ ホイール=ズーム ／ Space=一時停止 ／ R=リセット ／ F=表示リセット ／ 1–8・←→=スタンド選択</div>
+  </main>
+
+  <footer id="bottom" class="panel">
+    <div id="chart-nip" class="chart-cell">
+      <div class="chart-head">
+        <span class="chart-title">摩擦丘 — 界面面圧と せん断分布</span>
+        <span class="chart-sub">FEM 面圧 p <i class="sw sw-fem"></i> ／ せん断 τ <i class="sw sw-tau"></i> ／ 理論基準線 <i class="sw sw-hz"></i></span>
+      </div>
+      <canvas id="nip"></canvas>
+    </div>
+    <div id="chart-agc" class="chart-cell" hidden>
+      <div class="chart-head">
+        <span class="chart-title">制御軌跡</span>
+        <span class="chart-sub">制御中の全スタンド ／ 目盛固定 h₁ 0.15–2.0 mm ／ 圧下率 10–55% <i class="sw sw-fem"></i> ／ 荷重 600–2400 tonf <i class="sw sw-tau"></i></span>
+      </div>
+      <canvas id="agcscatter"></canvas>
+    </div>
+  </footer>
+
+  <aside id="right" class="panel"></aside>
+</div>
+<div id="fatal" hidden></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

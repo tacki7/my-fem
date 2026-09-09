@@ -1,0 +1,638 @@
+/* ── motion ──────────────────────────────────────────────────────────────── */
+/* Honour the system setting. Everything that moves here is feedback, not
+   content, so removing the movement removes nothing. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── design tokens ───────────────────────────────────────────────────────── */
+:root {
+  --bg:        #05070c;
+  --bg-panel:  #0a0e17;
+  --bg-raise:  #111826;
+  --bg-sunken: #060910;
+  --line:      rgba(140, 170, 210, 0.11);
+  --line-soft: rgba(140, 170, 210, 0.06);
+  --fg:        #dce6f5;
+  --fg-dim:    #8ea0bd;
+  --fg-faint:  #5d6c86;
+  --accent:    #58d5ff;
+  --accent-dk: #1d7ea3;
+  --amber:     #ffc46b;
+  --green:     #6ee7a5;
+  --red:       #ff6b81;
+  --violet:    #a99bff;
+  --radius:    10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Inter", system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(140,170,210,.16); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(140,170,210,.3); }
+
+/* Keyboard focus is visible everywhere; a mouse click never draws a ring.
+   Set once here rather than per widget, so a control added later inherits it. */
+:focus-visible {
+  outline: 2px solid rgba(88, 213, 255, .75);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+.ctrl-value:focus-visible { outline-offset: 0; }
+
+/* ── layout ──────────────────────────────────────────────────────────────── */
+#app {
+  height: 100%;
+  display: grid;
+  /* The four movable tracks are custom properties so a drag can set one
+     without the layout being rewritten from script. Defaults are the sizes the
+     app shipped with; `resetLayout` puts them back. */
+  --col-left: 292px;
+  --col-right: 332px;
+  --row-line: 424px;
+  --row-charts: 196px;
+  grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
+  /* topbar / mill line / stage / charts. The line is always visible: it is the
+     only view of the whole machine, and it doubles as the stand selector. */
+  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  gap: 10px;
+  padding: 10px;
+}
+
+/* ── drag handles on the panel boundaries ────────────────────────────────── */
+/* Laid over the grid gap rather than inside a panel: the gap is the boundary,
+   and a handle that took space of its own would move the thing it is meant to
+   measure. Hit area is wider than the line it draws, because a 10px gap is not
+   a target anyone can hit reliably. */
+.gutter {
+  position: absolute; z-index: 30;
+  background: none; border: none; padding: 0;
+  opacity: 0; transition: opacity .12s;
+}
+.gutter::after {
+  content: ''; position: absolute; inset: 0;
+  margin: auto; border-radius: 3px;
+  background: var(--accent);
+}
+.gutter:hover, .gutter.dragging { opacity: .55; }
+.gutter.dragging { opacity: .9; }
+.gutter-v { cursor: col-resize; width: 13px; }
+.gutter-v::after { width: 3px; height: 42px; }
+.gutter-h { cursor: row-resize; height: 13px; }
+.gutter-h::after { height: 3px; width: 42px; }
+/* While a drag is live the pointer owns the whole window: without this a fast
+   drag lands on the canvas underneath and pans the view instead. */
+body.resizing { user-select: none; }
+body.resizing * { cursor: inherit !important; }
+/* the handles are positioned against this box */
+#app { position: relative; }
+#topbar   { grid-column: 1 / -1; }
+/* Line-common inputs sit top-left, above the per-stand dials and beside the
+   machine they apply to: one strip, one gauge, one material for the whole line. */
+#common   { grid-column: 1; grid-row: 2; overflow-y: auto; }
+#millline { grid-column: 2 / -1; grid-row: 2; display: flex; flex-direction: column; }
+#left     { grid-column: 1; grid-row: 3 / 5; overflow-y: auto; }
+#stage    { grid-column: 2; grid-row: 3; position: relative; }
+#bottom   { grid-column: 2; grid-row: 4; display: flex; flex-direction: row; gap: 12px; }
+#right    { grid-column: 3; grid-row: 3 / 5; overflow-y: auto; }
+/* Explicit height, not a flex basis: a canvas carries an intrinsic size from
+   its width/height attributes and will happily grow past a basis. */
+/* Sized for the schedule block under each stand - target against actual for
+   reduction, load, tension, kf and (when the heating model is on) temperature
+   - with a strip band left over that is still worth looking at. Allowed to
+   shrink, because the row it lives in is draggable now: the drawing drops the
+   lower-priority rows as the space goes rather than overflowing. */
+#millcanvas { flex: 0 1 264px; min-height: 118px; width: 100%; display: block; }
+#standgrid { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+@media (max-width: 1280px) {
+  #app { grid-template-columns: 258px minmax(0,1fr) 292px; }
+}
+
+.panel {
+  background: linear-gradient(180deg, var(--bg-panel), #070b12);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 34px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03);
+}
+
+/* ── topbar ──────────────────────────────────────────────────────────────── */
+#topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; overflow: hidden;
+  background: linear-gradient(180deg, #0c1220, #080c14);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0,0,0,.4);
+}
+.brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.brand-mark {
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
+  background:
+    radial-gradient(circle at 34% 30%, #9fe9ff 0%, #2aa5d8 40%, #124b68 78%, #0b2b3c 100%);
+  box-shadow: 0 0 0 2px rgba(88,213,255,.18), 0 0 18px rgba(88,213,255,.35);
+  position: relative;
+}
+.brand-mark::after {
+  content: ''; position: absolute; left: -5px; right: -5px; bottom: -5px; height: 3px;
+  border-radius: 2px; background: linear-gradient(90deg, transparent, var(--amber), transparent);
+}
+.brand-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.brand-text strong { font-size: 13.5px; letter-spacing: .3px; white-space: nowrap; }
+/* The strapline is the one thing here that may be cut: everything else in the
+   bar is a control, and a bar that wraps to a second row breaks the layout. */
+.brand-text span {
+  font-size: 10.5px; color: var(--fg-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Nothing in the bar wraps. Presets shrink first (they are one click from the
+   panels anyway), then the strapline; the action buttons and the badges keep
+   their size, because a half-drawn number is worse than no number. */
+#topbar-presets {
+  display: flex; gap: 6px; flex: 0 1 auto; min-width: 0;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+#topbar-presets::-webkit-scrollbar { height: 0; }
+#topbar-presets .btn-row { flex-wrap: nowrap; }
+#topbar-actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
+#topbar-actions .btn-row { flex-wrap: nowrap; }
+#topbar-badges  { display: flex; gap: 8px; align-items: center; flex: none; }
+#topbar .btn { white-space: nowrap; }
+.badge { white-space: nowrap; }
+
+.badge {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 4px 9px; border-radius: 7px;
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11px;
+}
+.badge b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.badge span { color: var(--fg-faint); font-size: 10px; }
+.badge.ok b   { color: var(--green); }
+.badge.warn b { color: var(--amber); }
+.badge.bad b  { color: var(--red); }
+
+/* ── buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+  appearance: none; cursor: pointer;
+  padding: 6px 11px; border-radius: 7px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-family: var(--sans); font-size: 11.5px; font-weight: 500;
+  transition: background .14s, color .14s, border-color .14s, transform .08s;
+}
+.btn:hover { background: #182233; color: var(--fg); border-color: rgba(140,170,210,.22); }
+.btn:active { transform: translateY(1px); }
+.btn.active, .btn-primary {
+  background: linear-gradient(180deg, rgba(88,213,255,.20), rgba(88,213,255,.08));
+  border-color: rgba(88,213,255,.42);
+  color: #cbefff;
+}
+.btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ── panels adapt to their own width ─────────────────────────────────────── */
+/* The side panels are draggable now, so their contents have to answer to the
+   width they were given rather than to the window's. A container query does
+   that directly - the alternative, a media query, asks the wrong question and
+   would get it wrong the moment a boundary moves. */
+#left, #right, #common { container-type: inline-size; container-name: panel; }
+
+@container panel (max-width: 250px) {
+  /* Stack the label above the value: side by side they collide at this width,
+     and a truncated label is worse than a taller row. */
+  .stat-row { flex-direction: column; align-items: stretch; gap: 1px; padding: 3px 6px; }
+  .stat-vwrap { justify-content: flex-end; }
+  .stat-label { white-space: normal; }
+  /* The readout keeps its arrows; it is the slider that gives up width. */
+  .ctrl-value { width: 6.4em; }
+  .panel-body { padding: 0 9px 11px; gap: 9px; }
+  .panel-head-btn { padding: 9px 9px; }
+}
+
+/* ── panel sections ──────────────────────────────────────────────────────── */
+.panel-section { border-bottom: 1px solid var(--line-soft); }
+.panel-section:last-child { border-bottom: none; }
+/* Skip layout and paint for sections scrolled out of view. The right panel is
+   eight sections and ninety rows deep and only a screenful is ever visible, so
+   the rest costs nothing until it is scrolled to. `contain-intrinsic-size`
+   gives the skipped section a placeholder height, without which the scrollbar
+   would jump as sections are realised. */
+.panel-section {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+/* A collapsed section is a heading and nothing else, and its body must not be
+   allowed to claim a placeholder height it does not have. */
+.panel-section.collapsed { content-visibility: visible; }
+/* The heading stays put while its own rows scroll under it, so a number read
+   halfway down a long panel still says what it belongs to. Sections are
+   `content-visibility: auto`, which establishes containment - the heading is
+   given an explicit background for that reason, or the rows would show
+   through it. */
+.panel-head {
+  display: flex; align-items: center; gap: 7px; padding-right: 13px;
+  position: sticky; top: 0; z-index: 4;
+  background: linear-gradient(180deg, #0b1019 78%, rgba(11, 16, 25, .82));
+  backdrop-filter: blur(6px);
+}
+.panel-head-btn {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 13px; background: none; border: none; cursor: pointer;
+  color: var(--fg-dim); font-family: var(--sans); text-align: left;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+}
+.panel-head-btn:hover { color: var(--fg); }
+.panel-head-caret { font-size: 9px; transition: transform .16s; color: var(--accent); }
+.panel-section.collapsed .panel-head-caret { transform: rotate(-90deg); }
+.panel-head .help-mark { width: 14px; height: 14px; font-size: 9.5px; }
+.panel-body { padding: 0 13px 13px; display: flex; flex-direction: column; gap: 11px; }
+.panel-section.collapsed .panel-body { display: none; }
+
+/* ── sliders ─────────────────────────────────────────────────────────────── */
+.ctrl { display: flex; flex-direction: column; gap: 5px; }
+.ctrl.disabled,
+.ctrl-toggle.disabled { opacity: .38; pointer-events: none; }
+.ctrl-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ctrl-label { font-size: 11.5px; color: var(--fg-dim); display: inline-flex; align-items: center; gap: 5px; }
+/* The readout is the entry field: click it and type an exact value. It only
+   looks like a box on hover or focus, so a panel of them still reads as a
+   column of numbers rather than a form. */
+.ctrl-value {
+  font-family: var(--mono); font-size: 11.5px; color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  width: 7.6em; flex: none; text-align: right;
+  background: none; border: 1px solid transparent; border-radius: 5px;
+  padding: 1px 4px; margin: -1px -4px;
+  cursor: text;
+}
+.ctrl-value:hover { border-color: var(--line); background: rgba(255,255,255,.04); }
+/* Stacked arrows beside the readout, the way the stand table's number fields
+   have them - the same gesture works on both halves of the app. */
+.ctrl-spin { display: flex; flex-direction: column; flex: none; gap: 1px; margin-left: 4px; }
+.ctrl-spin-btn {
+  appearance: none; cursor: pointer;
+  width: 15px; height: 9px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line);
+  color: var(--fg-faint); font-size: 7px; line-height: 1;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.ctrl-spin-btn:first-child { border-radius: 4px 4px 1px 1px; }
+.ctrl-spin-btn:last-child { border-radius: 1px 1px 4px 4px; }
+.ctrl-spin-btn:hover {
+  background: rgba(120,190,255,.16); border-color: rgba(120,190,255,.55); color: var(--fg);
+}
+.ctrl-spin-btn:active { background: rgba(120,190,255,.28); }
+.ctrl.disabled .ctrl-spin-btn { cursor: default; }
+.ctrl-value:focus {
+  outline: none; border-color: rgba(120,190,255,.7);
+  background: rgba(120,190,255,.10); color: #eaf6ff;
+}
+.ctrl.disabled .ctrl-value { cursor: default; }
+.ctrl-hint { font-size: 10px; color: var(--fg-faint); line-height: 1.4; }
+
+/* ── help markers ────────────────────────────────────────────────────────── */
+.help { display: inline-flex; flex: none; }
+.help-mark {
+  appearance: none; cursor: help;
+  width: 13px; height: 13px; padding: 0; border-radius: 50%;
+  background: rgba(140,170,210,.13); border: 1px solid var(--line);
+  color: var(--fg-faint); font-family: var(--sans); font-size: 9px; font-weight: 700;
+  line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  transition: background .14s, color .14s, border-color .14s;
+}
+.help-mark:hover, .help-mark:focus-visible {
+  background: rgba(88,213,255,.20); border-color: rgba(88,213,255,.5); color: #cbefff;
+  outline: none;
+}
+/* On the body, not in the panel: a panel is a scroll box and would clip it. */
+.help-bubble {
+  position: fixed; z-index: 60; width: 260px;
+  padding: 8px 10px; border-radius: 8px;
+  background: rgba(10,15,25,.97); backdrop-filter: blur(10px);
+  border: 1px solid rgba(140,170,210,.22);
+  box-shadow: 0 12px 30px rgba(0,0,0,.6);
+  color: var(--fg-dim); font-family: var(--sans); font-size: 10.5px; line-height: 1.5;
+  pointer-events: none;
+}
+
+.ctrl-range {
+  --fill: 50%;
+  appearance: none; width: 100%; height: 18px; background: none; cursor: grab; margin: 0;
+}
+.ctrl-range:active { cursor: grabbing; }
+.ctrl-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 3px;
+  background:
+    linear-gradient(90deg, var(--accent-dk) 0 var(--fill), rgba(140,170,210,.14) var(--fill) 100%);
+}
+.ctrl-range::-webkit-slider-thumb {
+  appearance: none; width: 13px; height: 13px; margin-top: -4.5px;
+  border-radius: 50%; background: #dff4ff;
+  border: 2px solid #0a0e17;
+  box-shadow: 0 0 0 1px rgba(88,213,255,.7), 0 2px 6px rgba(0,0,0,.6);
+  transition: transform .1s;
+}
+.ctrl-range:hover::-webkit-slider-thumb { transform: scale(1.18); }
+.ctrl-range::-moz-range-track { height: 4px; border-radius: 3px; background: rgba(140,170,210,.14); }
+.ctrl-range::-moz-range-progress { height: 4px; border-radius: 3px; background: var(--accent-dk); }
+.ctrl-range::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%; background: #dff4ff; border: 2px solid #0a0e17;
+}
+
+.ctrl-select {
+  width: 100%; padding: 6px 8px; border-radius: 7px;
+  background: var(--bg-sunken); color: var(--fg);
+  border: 1px solid var(--line); font-family: var(--sans); font-size: 11.5px;
+}
+.ctrl-select:focus { outline: none; border-color: rgba(88,213,255,.5); }
+
+/* ── toggles ─────────────────────────────────────────────────────────────── */
+.ctrl-toggle { display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.ctrl-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  width: 30px; height: 17px; border-radius: 9px; flex: none;
+  background: rgba(140,170,210,.14); border: 1px solid var(--line);
+  transition: background .16s, border-color .16s; position: relative;
+}
+.toggle-knob {
+  position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--fg-faint); transition: transform .16s, background .16s;
+}
+.ctrl-toggle input:checked + .toggle-track {
+  background: rgba(88,213,255,.28); border-color: rgba(88,213,255,.5);
+}
+.ctrl-toggle input:checked + .toggle-track .toggle-knob {
+  transform: translateX(13px); background: #cfefff;
+}
+.toggle-label { font-size: 11.5px; color: var(--fg-dim); }
+.ctrl-toggle:hover .toggle-label { color: var(--fg); }
+
+/* ── stat grid ───────────────────────────────────────────────────────────── */
+.stat-grid { display: flex; flex-direction: column; gap: 1px; }
+.stat-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  padding: 4px 7px; border-radius: 5px;
+}
+.stat-row:nth-child(odd) { background: rgba(255,255,255,.017); }
+.stat-label { font-size: 11px; color: var(--fg-dim); white-space: nowrap; }
+.stat-vwrap { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.stat-value {
+  font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.stat-value.tone-ok   { color: var(--green); }
+.stat-value.tone-warn { color: var(--amber); }
+.stat-value.tone-bad  { color: var(--red); }
+.stat-unit { font-size: 9.5px; color: var(--fg-faint); }
+
+/* ── stage ───────────────────────────────────────────────────────────────── */
+#stage {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; background: #05070c;
+  box-shadow: 0 12px 34px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.03);
+}
+#gl { display: block; width: 100%; height: 100%; cursor: grab; }
+#gl:active { cursor: grabbing; }
+
+#legend {
+  position: absolute; left: 14px; bottom: 14px; width: 208px;
+  padding: 9px 11px 8px; border-radius: 9px;
+  background: rgba(8,12,20,.72); backdrop-filter: blur(9px);
+  border: 1px solid var(--line);
+}
+.legend-title {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 10.5px; color: var(--fg-dim); margin-bottom: 6px;
+}
+.legend-title span:last-child { font-family: var(--mono); color: var(--fg-faint); font-size: 9.5px; }
+.legend-bar { height: 9px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
+#legend-grad { width: 100%; height: 100%; }
+.legend-scale {
+  display: flex; justify-content: space-between; margin-top: 4px;
+  font-family: var(--mono); font-size: 9.5px; color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+#hud {
+  position: absolute; right: 14px; top: 14px;
+  display: flex; flex-direction: column; gap: 5px; align-items: flex-end;
+  pointer-events: none;
+}
+.hud-chip {
+  padding: 4px 9px; border-radius: 7px;
+  background: rgba(8,12,20,.72); backdrop-filter: blur(9px);
+  border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.hud-chip b { color: var(--fg); font-weight: 600; }
+.hud-chip.accent b { color: var(--accent); }
+.hud-chip.amber b  { color: var(--amber); }
+
+#neutral-label {
+  position: absolute; transform: translate(-50%, -100%);
+  padding: 2px 7px; border-radius: 6px; white-space: nowrap;
+  background: rgba(8, 12, 20, .78); backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 110, 140, .45);
+  color: #ff8ea3; font-family: var(--mono); font-size: 10px;
+  font-variant-numeric: tabular-nums; pointer-events: none;
+}
+#neutral-label[hidden] { display: none; }
+
+#stage-hint {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 10px;
+  font-size: 10px; color: var(--fg-faint); pointer-events: none;
+  background: rgba(6,9,16,.6); padding: 3px 10px; border-radius: 6px;
+  opacity: .85;
+}
+
+/* ── bottom chart ────────────────────────────────────────────────────────── */
+/* The head is one line, always. The canvas below it is a flex child with a
+   fixed row height to share, so a title or legend that wraps to a second line
+   is taken straight out of the plot. */
+.chart-head {
+  display: flex; align-items: baseline; gap: 10px; padding: 9px 13px 5px; min-width: 0;
+}
+.chart-title {
+  flex: none; white-space: nowrap;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.chart-sub {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; color: var(--fg-faint);
+}
+.sw { display: inline-block; width: 14px; height: 2px; border-radius: 2px; vertical-align: middle; margin: 0 2px; }
+.sw-fem { background: #7fe4ff; }
+.sw-tau { background: #ffb26e; }
+.sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
+#nip, #agcscatter { flex: 1; width: 100%; min-height: 0; display: block; }
+
+/* Two charts share the bottom row; the scatter only appears under gap control,
+   and the friction hill keeps the whole width whenever it is hidden. */
+.chart-cell { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.chart-cell[hidden] { display: none; }
+#chart-nip { flex: 1.45; }
+#chart-agc { flex: 1; border-left: 1px solid var(--line); padding-left: 12px; }
+
+/* ── budget chart ────────────────────────────────────────────────────────── */
+.spark { width: 100%; height: 66px; display: block; border-radius: 7px; overflow: hidden; }
+.spark-legend { display: flex; flex-wrap: wrap; gap: 4px 11px; margin-top: 6px; }
+.spark-legend span { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--fg-faint); }
+.spark-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+.meter { height: 5px; border-radius: 3px; background: rgba(140,170,210,.12); overflow: hidden; }
+.meter > div { height: 100%; border-radius: 3px; transition: width .2s; }
+
+/* ── toast ───────────────────────────────────────────────────────────────── */
+/* Bottom centre, over everything, gone on its own. A save or a load leaves no
+   other mark on the screen, and neither is worth a dialog to dismiss. */
+.toast {
+  position: fixed; z-index: 80; left: 50%; bottom: 26px;
+  transform: translate(-50%, 14px);
+  max-width: min(560px, 84vw);
+  padding: 9px 16px; border-radius: 9px;
+  background: rgba(12, 18, 30, .96); backdrop-filter: blur(10px);
+  border: 1px solid rgba(88, 213, 255, .38);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .6);
+  color: var(--fg); font-family: var(--sans); font-size: 11.5px; line-height: 1.5;
+  opacity: 0; transition: opacity .28s, transform .28s;
+  pointer-events: none;
+}
+.toast.in { opacity: 1; transform: translate(-50%, 0); }
+.toast.bad { border-color: rgba(255, 107, 129, .55); color: #ffd6dd; }
+
+/* One row per stand, with the tag as a chip in its own column - so the eye
+   lands on "which stand" before reading anything else, and several stands'
+   messages stay legible instead of running into one sentence. */
+.toast-body { display: flex; flex-direction: column; gap: 5px; }
+/* No `text-transform: uppercase` here, unlike the panel headings: it turns a
+   lowercase mu into a capital Mu, which reads as a Latin M and makes the
+   heading of the friction back-calculation say the wrong symbol. */
+.toast-head {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  color: var(--fg-faint);
+}
+.toast-row { display: flex; align-items: baseline; gap: 8px; }
+.toast-tag {
+  flex: none; min-width: 30px; text-align: center;
+  padding: 1px 6px; border-radius: 5px;
+  background: rgba(140, 170, 210, .16); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--fg);
+}
+.toast.bad .toast-tag {
+  background: rgba(255, 110, 140, .20); border-color: rgba(255, 110, 140, .45);
+  color: #ffd6dd;
+}
+.toast-text { font-family: var(--mono); font-size: 11px; }
+
+#fatal {
+  position: fixed; inset: 0; display: grid; place-items: center; padding: 40px;
+  background: #05070c; color: var(--fg); font-family: var(--mono); font-size: 13px;
+  line-height: 1.7; white-space: pre-wrap; text-align: center;
+}
+#fatal[hidden] { display: none; }
+
+/* ── scroll shadows ──────────────────────────────────────────────────────── */
+/* A panel cut off mid-slider reads as broken rather than as scrollable. The two
+   cover layers are pinned to the content (`local`) and the two shadow layers to
+   the box (`scroll`), so a cover slides away exactly as far as the content has
+   scrolled: an end that has nothing more past it shows no shadow. Layer 5 is
+   the panel's own gradient, kept identical to `.panel`. */
+#left, #right, #common {
+  background-image:
+    linear-gradient(var(--bg-panel), rgba(10, 14, 23, 0)),
+    linear-gradient(rgba(7, 11, 18, 0), #070b12),
+    linear-gradient(rgba(0, 0, 0, .62), rgba(0, 0, 0, 0)),
+    linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, .62)),
+    linear-gradient(180deg, var(--bg-panel), #070b12);
+  background-position: 0 0, 0 100%, 0 0, 0 100%, 0 0;
+  background-repeat: no-repeat;
+  background-size: 100% 26px, 100% 26px, 100% 14px, 100% 14px, 100% 100%;
+  background-attachment: local, local, scroll, scroll, scroll;
+}
+
+/* ── per-stand table in the mill line panel ──────────────────────────────── */
+.stand-grid {
+  display: grid; gap: 2px 8px; padding: 4px 13px 9px;
+  font-size: 11px; font-family: var(--mono); align-items: center;
+  position: relative;
+}
+/* The selected stand is tinted down the whole column, not just at its heading:
+   the table, the mill line diagram and the left panel are all showing the same
+   stand, and that is worth saying once loudly rather than in one small caption.
+   Absolutely positioned rather than a grid item, so it cannot displace a cell. */
+.sg-colsel {
+  position: absolute; top: 2px; pointer-events: none; border-radius: 7px;
+  background: rgba(88, 213, 255, .05);
+  box-shadow: inset 0 0 0 1px rgba(88, 213, 255, .17);
+  transition: left .16s ease, width .16s ease;
+}
+.stand-grid .sg-head {
+  font-weight: 700; text-align: center; color: var(--fg-dim);
+  padding: 2px 0 4px; letter-spacing: .04em;
+}
+.stand-grid .sg-head.sel { color: #cbefff; text-shadow: 0 0 10px rgba(88,213,255,.35); }
+.stand-grid .sg-label { color: var(--fg-faint); white-space: nowrap; }
+.stand-grid .sg-unit { color: var(--fg-faint); font-size: 10px; }
+.stand-grid .sg-now {
+  text-align: right; padding-right: 4px; font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.stand-grid .sg-now.ok { color: #6ee7a5; }
+.stand-grid .sg-now.warn { color: #ffc46b; }
+.stand-grid .sg-now.bad { color: #ff6e8c; }
+.num-field {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line);
+  border-radius: 5px; padding: 2px 5px; color: var(--fg);
+  font: inherit; font-variant-numeric: tabular-nums; text-align: right;
+}
+.num-field:focus { outline: none; border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.10); }
+.num-field::-webkit-inner-spin-button { opacity: .35; }
+
+.stand-grid .sg-select {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line);
+  border-radius: 5px; padding: 2px 4px; color: var(--fg);
+  font: inherit; text-align: center;
+}
+.stand-grid .sg-select:focus {
+  outline: none; border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.10);
+}
+.stand-grid .sg-btn {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line);
+  border-radius: 5px; padding: 3px 6px; color: var(--fg-dim);
+  font: inherit; cursor: pointer;
+}
+.stand-grid .sg-btn:hover {
+  border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.12); color: var(--fg);
+}
+.stand-grid .sg-btn:active { background: rgba(120,190,255,.22); }
+.stand-grid .sg-btn.busy {
+  border-color: rgba(255,196,107,.8); background: rgba(255,196,107,.16);
+  color: var(--fg); pointer-events: none;
+}

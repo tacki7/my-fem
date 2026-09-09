@@ -1,0 +1,16 @@
+node_modules
+dist
+.DS_Store
+
+# Machine-local Claude Code settings. Records absolute paths of this machine's
+# scratchpad, so it is both useless to anyone else and a directory-structure
+# leak.
+.claude/settings.local.json
+
+# Reference photographs of published textbooks. Kept locally for working from,
+# not redistributed - they are someone else's copyrighted pages, and a private
+# repository is still an upload to a third party.
+pic/
+
+# Build and tool noise
+*.log

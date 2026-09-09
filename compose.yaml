@@ -1,0 +1,23 @@
+services:
+  # Hot-reloading dev server: http://localhost:5173
+  dev:
+    build:
+      context: .
+      target: dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      # keep container node_modules, never shadow them with the host copy
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+
+  # Optimised static build served by nginx: http://localhost:8080
+  serve:
+    build:
+      context: .
+      target: serve
+    ports:
+      - "8080:80"
+    profiles: ["prod"]

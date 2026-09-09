@@ -1,0 +1,2645 @@
+/**
+ * Coupled model of a two-high rolling stand.
+ *
+ *   strip : steady rigid-viscoplastic flow through the roll gap (flow.ts)
+ *   roll  : linear elastic annulus on a rigid hub, loaded by the interface
+ *           tractions, whose flattened barrel profile defines the gap
+ *
+ * The two are coupled once per frame: the flow solve produces an interface
+ * pressure distribution, the roll solve turns it into a flattened barrel
+ * profile, and the next flow solve runs in that gap. That loop is roll
+ * flattening - the reason a cold mill quotes a deformed radius R' rather than
+ * the ground radius R, and the reason thin strip gets progressively harder to
+ * reduce.
+ *
+ * Only the upper half is modelled; y = 0 is the strip centre line.
+ */
+
+import { buildRollMesh, type RollMesh } from './mesh';
+import { precomputeElements, assembleStiffness, type ElementGeometry } from './element';
+import {
+  buildCsrPattern, makePcgWorkspace, pcgFiltered, patternBytes, workspaceBytes,
+  type CsrPattern, type PcgWorkspace,
+} from './sparse';
+import { BandPreconditioner } from './band';
+import { FlowSolver, type FlowInput } from './flow';
+
+/* Mill-spring loop constants. Not exposed: they are numerics, not process
+   settings, and the one knob a stand actually has is its modulus. */
+/** frames between revisions of the housing stretch */
+const MILL_EVERY = 3;
+/** damping on the Newton step */
+const MILL_GAIN = 0.7;
+/**
+ * Largest single move of the barrel, as a fraction of the *current separation*
+ * rather than of h0.
+ *
+ * What the flow solve has to absorb is a change relative to the gap it is
+ * solving in, not to the incoming thickness - and once the stand stretches by
+ * a good fraction of h0 those two stop being the same number. Scaling this to
+ * h0 puts a step of a tenth of the strip's own thickness through the bite on
+ * thin gauge, which is what tore the solve apart.
+ */
+const MILL_MAX_STEP = 0.05;
+/** the stand counts as settled below this residual, relative to h0 */
+const MILL_SETTLED = 1e-3;
+/**
+ * How far past its own deadband the free-running speed loop may be before the
+ * gap loop refuses to act on what it is measuring.
+ *
+ * A screw move is only as good as the state it was computed from, and the feed
+ * loop is the slowest and loosest of the inner loops. Left ungated it can be
+ * two orders of magnitude outside its deadband - which happens for real, after
+ * a path through a target above the load ceiling, where the bite condition
+ * fails and a free-running speed does not exist - and the gap loop will then
+ * confidently optimise against a velocity field that means nothing.
+ */
+const FEED_SETTLED = 3;
+
+export interface RollingParams {
+  /* work roll */
+  R: number;
+  hubRatio: number;
+  rollNt: number;
+  rollNr: number;
+  rollRadialGrade: number;
+  biteGrade: number;
+  /** element rings inside the refined barrel surface layer; 0 disables it */
+  rollSkinRings: number;
+  /** refined layer thickness [m], used when rollSkinAuto is off */
+  rollSkinThickness: number;
+  /**
+   * Size the refined layer from the contact arc instead.
+   *
+   * The contact stress in the barrel decays over a depth of order the contact
+   * length, so a few arc lengths of fine elements resolve everything that
+   * matters and the rest of the wall can be coarse.
+   */
+  rollSkinAuto: boolean;
+  /** auto mode: refined element size = contact arc / rollSkinFactor */
+  rollSkinFactor: number;
+  Eroll: number;
+  nuRoll: number;
+  omega: number;
+
+  /* strip */
+  h0: number;
+  reduction: number;
+  stripNx: number;
+  stripNy: number;
+  windowIn: number;
+  windowOut: number;
+  /**
+   * Size the analysis window and the circumferential grading from the contact
+   * arc instead of using the fixed values above.
+   *
+   * The bite scales as sqrt(R*dh) while a fixed window does not, so thin gauge
+   * on a small roll ends up with a contact arc shorter than one element column
+   * and element aspect ratios in the hundreds. That is what makes thin-strip
+   * runs oscillate: the pressure is being sampled off a bite nothing resolves.
+   */
+  autoFit: boolean;
+  /**
+   * LMN hardening law, in the plane-strain deformation resistance a mill is
+   * quoted in:
+   *
+   *     kf = L * (eps + M)^N        [Pa]
+   *
+   * `M` is the pre-strain offset, so kf is finite at eps = 0 rather than zero,
+   * and `N` the hardening exponent. The solve itself carries the uniaxial flow
+   * stress, so everything below converts with sigma_f = kf * sqrt(3)/2.
+   */
+  lmnL: number;
+  lmnM: number;
+  lmnN: number;
+  /**
+   * Deformation heating.
+   *
+   * Nearly all the work of rolling ends up as heat in the strip, and the strip
+   * has no time to give it away: a 2 mm gauge crosses an 8 mm bite in about a
+   * millisecond, over which heat diffuses some 0.1 mm. So the bite is treated
+   * as adiabatic - each particle keeps the heat it makes - and the temperature
+   * rides the same streamlines the strain does, with the plastic power
+   * `beta * sigma_f * eps_dot` as its source. Cold rolling steel at 25 % comes
+   * out 40-50 K hotter this way, which is what a mill measures.
+   *
+   * The heat then feeds back: the flow stress is softened by the Johnson-Cook
+   * thermal term over the homologous temperature, so `heatOn` couples strength
+   * to the work already done rather than only to the strain.
+   *
+   * Off by default. Every figure in docs/validation.md was measured isothermal
+   * and the switch is a clean A/B against them.
+   */
+  heatOn: boolean;
+  /** strip temperature entering the line [degC]; the datum softening is 1 at */
+  tempEntry: number;
+  /** Taylor-Quinney coefficient: the fraction of plastic work that is heat */
+  taylorQuinney: number;
+  /** strip density [kg/m3] */
+  rhoStrip: number;
+  /** strip specific heat capacity [J/(kg K)] */
+  cpStrip: number;
+  /** melting point [degC] - the top of the homologous temperature scale */
+  tempMelt: number;
+  /** thermal softening exponent m in (1 - T*^m) */
+  softenExp: number;
+  /** strip elastic constants, used for the entry/exit elastic zones */
+  Estrip: number;
+  nuStrip: number;
+  /**
+   * Model the elastic entry and exit zones.
+   *
+   * A rigid-plastic body has no elastic strain, so the strip would enter and
+   * leave the bite perfectly rigid. Real cold rolling does neither: ahead of
+   * the plastic zone the strip is elastically compressed (typically the first
+   * 7-10 % of the contact arc), and on leaving it springs back by roughly
+   * kf / E', a tenth of a percent of the thickness. On thin gauge both matter.
+   *
+   * With this on, the viscosity ceiling becomes the material's own elastic
+   * response over the bite transit time, G*t, and the volumetric term becomes
+   * the true bulk modulus times the same time - so the non-plastic regions
+   * deform elastically instead of being arbitrarily rigid.
+   */
+  elasticZones: boolean;
+
+  /* interface */
+  mu: number;
+  /** friction regularisation velocity as a fraction of the roll speed */
+  slipFrac: number;
+
+  /* process */
+  backTension: number;
+  frontTension: number;
+  /** 0 = solve for the free-running feed speed, otherwise prescribe it [m/s] */
+  feedSpeed: number;
+
+  /* numerics */
+  incompPenalty: number;
+  normalPenalty: number;
+  /** strain rate regulariser as a fraction of the nominal bite strain rate */
+  eps0Frac: number;
+  picardIters: number;
+  relax: number;
+  cgIter: number;
+  cgTol: number;
+  rollCoupling: boolean;
+  rollRelax: number;
+  /** frames between revisions of the free-running feed speed */
+  feedEvery: number;
+  /** proportional gain of the feed speed loop, as a relative step */
+  feedGain: number;
+  /** stop adjusting once |R| / (mu*P) is below this */
+  feedDeadband: number;
+  /** run the roll elastic solve every N frames; it changes slowly */
+  rollEvery: number;
+
+  /* automatic gap control */
+  /**
+   * What the screws are asked to hold.
+   *
+   *  'off'   - the screw position stays where the commanded reduction put it.
+   *            What leaves the mill is that gap plus the mill spring, so the
+   *            stand always under-reduces; the shortfall is `reductionRatio`.
+   *  'ratio' - drive the *measured* exit thickness onto h0*(1-r). What is held
+   *            is the ratio: the setpoint is tied to this stand's own entry
+   *            gauge, so on a tandem line it follows the stand upstream and a
+   *            disturbance is passed along the line rather than absorbed.
+   *  'gauge' - drive it onto `agcTargetGauge`, an absolute thickness that owes
+   *            nothing to the entry. The stand then absorbs whatever its
+   *            upstream sends it, which is what the last stand of a line is
+   *            for: the coil is sold on its gauge, not on its reduction.
+   *  'force' - hold the roll separating force on `agcTargetForce` and let the
+   *            reduction come out wherever that puts it.
+   *
+   * The two gauge loops are the same controller pointed at different
+   * setpoints; only `agcSetpoint` differs.
+   */
+  agcMode: AgcMode;
+  /** load target per unit width [N/m], used by agcMode = 'force' */
+  agcTargetForce: number;
+  /** exit thickness target [m], used by agcMode = 'gauge' */
+  agcTargetGauge: number;
+  /**
+   * How the gap loop searches for the screw position that hits its target.
+   *
+   * The loop is a one-dimensional root find on a monotone plant - the exit
+   * gauge rises with the gap, the load falls with it - so every classical
+   * root-finder applies, and they trade the same way here as anywhere: speed
+   * against the guarantee of not running away. What makes the choice
+   * interesting on a mill rather than academic is that an evaluation is not
+   * free. Every trial screw position has to wait for the flattening and feed
+   * loops to relax before the measurement means anything, so a method is
+   * judged on *evaluations*, not on arithmetic.
+   *
+   * See `AGC_METHODS` for what each one does and where it wins.
+   */
+  agcMethod: AgcMethod;
+  /** damping on the Newton step; 1 takes the full identified step */
+  agcGain: number;
+  /** frames between screw revisions - the gap needs time to relax in between */
+  agcEvery: number;
+  /** stop once the relative error is inside this */
+  agcDeadband: number;
+  /** largest single screw move, as a fraction of h0 */
+  agcMaxStep: number;
+
+  /* mill spring */
+  /**
+   * Let the stand outside the barrel give under load.
+   *
+   * With this off the screws, the housing and the hub are rigid, and the only
+   * spring in the mill is the roll surface flattening plus the strip's own
+   * recovery - tens of microns. A real stand gives far more than that.
+   */
+  millSpringOn: boolean;
+  /**
+   * Mill modulus per unit width [N/m of separation per m of width, i.e. Pa].
+   *
+   * The stand is quoted as a total stiffness, typically 4-10 MN/mm for a cold
+   * mill; divide by the strip width to get this. The barrels separate by P/M
+   * under load, on top of the flattening.
+   */
+  millModulus: number;
+
+  /**
+   * Closed end of the screw travel, as a fraction of h0.
+   *
+   * Not a numerical limit - nothing breaks below it - but a validity one. The
+   * volume the solve conserves degrades as the reduction climbs: at 0.30 the
+   * mass balance is 0.988, at 0.20 it is 0.925 and at 0.10 it is 0.683. Below
+   * the default the numbers still come out, they are just no longer the answer
+   * to the question that was asked, so the UI says so.
+   */
+  sepFloorFrac: number;
+}
+
+export type AgcMode = 'off' | 'ratio' | 'gauge' | 'force';
+
+export type AgcMethod =
+  | 'secant' | 'newton' | 'gaugemeter' | 'fixed'
+  | 'bisect' | 'falsi' | 'illinois' | 'ridders' | 'brent';
+
+/**
+ * The search methods, in the order they belong in a menu: open methods first,
+ * then the bracketed family from plainest to cleverest.
+ *
+ * "Bracketed" is the property that matters most here. Once a gap that is too
+ * small and a gap that is too large are both in hand, the answer is trapped
+ * between them and no iterate can leave - which is worth a great deal on this
+ * plant, because the load is a *staircase* in the gap (the contact set gains
+ * and loses whole element columns as the barrel moves) and any method that
+ * extrapolates from a local slope can be thrown a long way by one bad step.
+ */
+export const AGC_METHODS: { value: AgcMethod; label: string; note: string }[] = [
+  {
+    value: 'secant', label: '割線法（同定ゲイン）',
+    note: '直前の 1 手から実際の感度 d(測定値)/d(ギャップ) を同定し、その逆数を'
+      + '掛けて動かす。プラントの素性を測りながら進むので手数が少ない。'
+      + '区間で挟まないので、階段状の応答で感度を読み違えると行き過ぎる。既定。',
+  },
+  {
+    value: 'newton', label: 'ニュートン法（差分近似）',
+    note: '毎回わざと小さく揺さぶって、その場で傾き Δ(測定値)/Δ(ギャップ) を測り直し、'
+      + 'ニュートン歩幅で動く。割線法が「前回動いたついでの傾き」を使い回すのに対し、'
+      + 'こちらは常に新鮮な傾きを使うので、収束間際に前回の移動量が小さくなって'
+      + '傾きが荒れる問題がない。ただし 1 反復に評価が 2 回要る。'
+      + '揺さぶり幅が接触列 1 本ぶんより小さいと段差の中に収まって傾きが 0 に見え、'
+      + '歩幅が発散するので、幅は「1 回の最大移動量」に合わせてある。',
+  },
+  {
+    value: 'gaugemeter', label: 'ニュートン法（ゲージメータ解析式）',
+    note: '傾きを測らずミルの式から出す。板厚制御は dh₁/dS = 圧下量/(圧下量+スプリング)、'
+      + '荷重制御は dP/dS = −P/(圧下量+スプリング)。どちらもこの場で測れている量だけで'
+      + '書けるので材料定数が要らない。評価は 1 回だけで揺さぶりも不要だが、'
+      + '式が実機とずれているぶんは残る。',
+  },
+  {
+    value: 'fixed', label: '固定ゲイン（同定なし）',
+    note: '感度を同定せず、初手の推定値のまま比例制御する。最も単純で、'
+      + '同定が悪さをする条件でも壊れない代わりに、推定が外れているぶん遅い。'
+      + '他手法の基準線として置いてある。',
+  },
+  {
+    value: 'bisect', label: '二分法',
+    note: '解を挟む区間を作り、毎回その中点へ動く。1 手で区間が必ず半分になるので'
+      + '発散しようがない。収束は線形（1 手 = 1 ビット）なので手数は多い。'
+      + '応答が階段状で他手法が暴れるときの保険。',
+  },
+  {
+    value: 'falsi', label: 'はさみうち法（regula falsi）',
+    note: '区間の両端を直線で結び、その零点へ動く。素直な条件では二分法より'
+      + 'ずっと速い。一方の端が更新されないまま片側から寄り続けて失速することがある。',
+  },
+  {
+    value: 'illinois', label: 'Illinois 法',
+    note: 'はさみうち法の失速を潰した版。同じ端が 2 回連続で残ったら、その端の'
+      + '値を半分にして直線を傾ける。区間法の安全さを保ったまま超線形。'
+      + '実装が軽い割に速く、実務での既定に向く。',
+  },
+  {
+    value: 'ridders', label: 'Ridders 法',
+    note: '区間の中点を測り、指数関数を当てはめて零点を推定する。'
+      + '1 反復に 2 回の評価が要るが 1 反復あたりの次数が高い。'
+      + 'このアプリでは 1 回の評価が数秒なので、その 2 回分が効くかは条件による。',
+  },
+  {
+    value: 'brent', label: 'Brent 法',
+    note: '逆 2 次補間・割線法・二分法を状況で切り替える定番。'
+      + '補間が信用できない場面では自動的に二分法へ落ちるので、'
+      + '「速いのに絶対に外れない」を 1 つで満たす。',
+  },
+];
+
+export interface RollingDiagnostics {
+  /** roll separating force per unit width [N/m] */
+  rollForce: number;
+  /** roll torque per unit width [N*m/m] */
+  torque: number;
+  /** mill power per unit width [W/m] */
+  power: number;
+  peakPressure: number;
+  meanPressure: number;
+  /** measured contact arc length [m] */
+  arcLength: number;
+  arcIn: number;
+  arcOut: number;
+  contactNodes: number;
+  /** x of the neutral point [m] */
+  neutralX: number;
+  neutralFound: boolean;
+  entrySpeed: number;
+  exitSpeed: number;
+  /** forward slip (v1 - vR)/vR, the mill's 先進率 */
+  forwardSlip: number;
+  /** backward slip (vR - v0)/vR, its entry-side counterpart */
+  backwardSlip: number;
+  /** neutral angle measured from the exit plane [rad] */
+  neutralAngle: number;
+  /**
+   * Forward slip the neutral point implies under the slab assumption,
+   * f = x_n^2 / (R' h1). It comes from equating the strip's *mean* speed to the
+   * barrel speed; the FEM equates the strip's *surface* speed, which friction
+   * drags behind the mean, so the two need not agree.
+   */
+  forwardSlipTheory: number;
+  /** neutral point the measured forward slip implies, sqrt(f R' h1) [m] */
+  neutralTheory: number;
+  /** v1*h1 / (v0*h0); volume constancy, 1 in an exactly incompressible solution */
+  massBalance: number;
+  /** thicknesses actually achieved [m] */
+  entryThickness: number;
+  exitThickness: number;
+  /** equivalent plastic strain leaving the bite (thickness mean) */
+  exitStrain: number;
+  peakStrain: number;
+  exitFlowStress: number;
+  /**
+   * Mean deformation resistance through the bite [Pa], volume weighted.
+   *
+   * This, not the exit value, is what a rolling load formula wants: the
+   * material enters at the virgin yield stress and only reaches the exit value
+   * at the very end, so using the exit value overstates the load.
+   */
+  meanFlowStress: number;
+  /** the same in plane strain, 1.155 * mean flow stress [Pa] */
+  meanPlaneStrainStress: number;
+  /**
+   * Strain-averaged Ludwik value, sigma_Y0 + K*eps1^n/(n+1) [Pa]. The textbook
+   * mean deformation resistance, for comparison with the volume weighted one.
+   */
+  meanFlowStressTheory: number;
+  peakStrainRate: number;
+  /** length of the elastic compression zone at the bite entry [m] */
+  elasticEntryLen: number;
+  /** length of the elastic recovery zone at the exit [m] */
+  elasticExitLen: number;
+  /** plastic part of the contact arc [m] */
+  plasticArcLen: number;
+  /** geometric estimate of the elastic entry length, dh_e * R / |x_entry| [m] */
+  elasticEntryTheory: number;
+  /** textbook isolated-contact estimate sqrt(R' * dh_e) [m] */
+  elasticEntryHertz: number;
+  /** thickness strain recovered on leaving the roll */
+  springback: number;
+  /** elastic compression taken up ahead of yielding [m], h0 * kf / E' */
+  elasticEntryCompression: number;
+  /** exit thickness before the elastic recovery is applied [m] */
+  exitThicknessGap: number;
+  /** elastic flattening of the barrel at the bite [m] */
+  rollFlattening: number;
+  /** Hitchcock deformed radius [m] */
+  hitchcockR: number;
+  /**
+   * Stone's minimum rollable thickness [m], C*mu*R*(kf - sigma_mean) with the
+   * same roll compliance C the Hitchcock radius uses.
+   *
+   * Below it the barrel flattens faster than the gap closes and the strip
+   * stops thinning however hard the screws are driven - which also puts a
+   * ceiling on the load, because load needs reduction. `exitThickness/hMin` is
+   * the useful number: far above 1 the stand has room, near 1 it does not.
+   */
+  stoneHMin: number;
+  /**
+   * Thinnest exit gauge the bite condition still allows [m].
+   *
+   * Friction can only drag the strip in while mu >= tan(alpha), so the bite
+   * angle is capped at atan(mu) and with it the draft:
+   *
+   *     dh_max = 2 R' (1 - cos(atan mu)),   h1_bite = h0 - dh_max
+   *
+   * That is the criterion for *catching* the strip. Once rolling is going the
+   * resultant acts around the middle of the arc and the condition relaxes to
+   * mu >= tan(alpha/2), i.e. twice the angle and a much thinner reachable
+   * gauge - `biteLimitH1Cont`. Between the two the bite is marginal, and that
+   * is exactly where this model is equivocal: at mu = 0.10 and 0.12 (r = 25%,
+   * h0 = 8 mm) the strict criterion says no and the solve still finds a
+   * neutral point, while at 0.05 neither does. Report the band, not a verdict.
+   *
+   * Not clamped at zero: on thin gauge the bite-angle-limited draft
+   * 2 R' (1 - cos alpha) is larger than the whole strip, so the limit comes out
+   * negative and the honest reading is "does not constrain anything here" - a
+   * clamped 0.0000 mm just looks like a broken readout.
+   */
+  biteLimitH1: number;
+  /** the same for the continuation condition mu >= tan(alpha/2) [m] */
+  biteLimitH1Cont: number;
+  rollPeakVm: number;
+  /** net longitudinal reaction at the feed face [N/m]; zero when free running */
+  feedReaction: number;
+  picardDelta: number;
+  cgIterations: number;
+  cgResidual: number;
+  /** |dh1| / h1 per frame; how settled the roll flattening loop is */
+  couplingResidual: number;
+  /** current adaptive damping factor on rollRelax, 1 = undamped */
+  relaxScale: number;
+  /** |feed reaction| / (mu * rolling load); the free-running convergence measure */
+  feedResidual: number;
+  /**
+   * The best that residual has managed lately - the noise floor the plant
+   * imposes, not a target. The gap loop waits for the feed to reach *this*,
+   * not an arbitrary deadband it may be unable to get under.
+   */
+  feedFloor: number;
+  /**
+   * Fraction of the *commanded* reduction actually achieved, h0*r being the
+   * command. Well below 1 with the screws fixed means the barrel is flattening
+   * faster than the gap closes - Stone's minimum rollable thickness, not a
+   * numerical failure. Gauge control exists to drive it back to 1.
+   */
+  reductionRatio: number;
+  /** unloaded roll gap the screws are holding [m]; the AGC's actuator */
+  gapCommand: number;
+  /** mill spring: how much thicker the strip leaves than the screws are set [m] */
+  millSpring: number;
+  /** the housing/screw part of that spring, P/M [m]; 0 with a rigid stand */
+  millStretch: number;
+  /** |stretch - P/M| / h0; how far the stand is from its own equilibrium */
+  millResidual: number;
+  /** screw travel the loop is allowed, given the stretch it currently has [m] */
+  gapLimitLo: number;
+  gapLimitHi: number;
+  /**
+   * The low-passed measurement the gap loop is acting on - exit thickness [m]
+   * under gauge control, roll force [N/m] under load control, 0 when off.
+   *
+   * Not the same as the instantaneous `exitThickness` / `rollForce`: the loop
+   * deliberately works on a filtered value, and during a transient the two can
+   * be tens of percent apart. Report this one next to `agcError`, or the error
+   * shown will not be the error the numbers next to it imply.
+   */
+  agcMeasured: number;
+  /** signed relative error the gap loop is working on; 0 when it is off */
+  agcError: number;
+  /** the loop is inside its deadband */
+  agcSettled: boolean;
+  /** the loop is asking for screw travel the model will not give it */
+  agcSaturated: boolean;
+  /**
+   * Absolute-gauge target at or above the entry gauge, so this stand has
+   * nothing to roll and has been parked. Not an error - a pass schedule can
+   * legitimately arrive at size before its last stand.
+   */
+  agcIdle: boolean;
+  /**
+   * The gap loop is holding station because an inner loop has not converged,
+   * so what it would be measuring is not a steady state. Not the same as
+   * settled: nothing is being achieved, the screws are simply not moving on
+   * information that would be wrong.
+   */
+  agcStalled: boolean;
+  /** identified loop gain d(measurement)/d(gap), both non-dimensionalised */
+  agcSensitivity: number;
+  /** equivalent strain the strip arrived with; 0 unless fed by another stand */
+  entryStrain: number;
+  /** temperature it arrived at [degC] */
+  entryTemp: number;
+  /** thickness-averaged strip temperature at the exit plane [degC] */
+  exitTemp: number;
+  /** what the plastic work added to it [K]; 0 with the heating model off */
+  tempRise: number;
+  /** hottest node anywhere in the strip [degC] - the surface, under the bite */
+  peakTemp: number;
+  /** flow stress lost to that heat at the exit, 1 - kf(T)/kf(T_entry) */
+  thermalSoftening: number;
+}
+
+export type FieldKind =
+  | 'strain' | 'strainRate' | 'flowStress' | 'temperature'
+  | 'pressure' | 'speed' | 'shear' | 'vonMises'
+  | 'rollDisp' | 'rollRadial';
+
+const FIELD_UNITS: Record<FieldKind, { unit: string; scale: number }> = {
+  strain:     { unit: '—',   scale: 1 },
+  strainRate: { unit: '1/s', scale: 1 },
+  flowStress: { unit: 'MPa', scale: 1e-6 },
+  temperature: { unit: '°C', scale: 1 },
+  pressure:   { unit: 'MPa', scale: 1e-6 },
+  speed:      { unit: 'm/s', scale: 1 },
+  shear:      { unit: 'MPa', scale: 1e-6 },
+  vonMises:   { unit: 'MPa', scale: 1e-6 },
+  rollDisp:   { unit: 'µm',  scale: 1e6 },
+  rollRadial: { unit: 'µm',  scale: 1e6 },
+};
+export function fieldUnit(k: FieldKind) { return FIELD_UNITS[k]; }
+
+export class RollingSim {
+  params: RollingParams;
+  roll!: RollMesh;
+  flow!: FlowSolver;
+
+  /* roll elastic problem (constant stiffness, hub clamped) */
+  /**
+   * Only the geometry, never the stiffness: the 64-double element matrices are
+   * consumed by assembly and dropped there, so on a fine mesh across eight
+   * stands they are not carried for the life of the run.
+   */
+  private rollElem!: ElementGeometry;
+  private rollPat!: CsrPattern;
+  private rollWs!: PcgWorkspace;
+  private rollPre!: BandPreconditioner;
+  private rollVals!: Float64Array;
+  private rollFree!: Uint8Array;
+  private rollF!: Float64Array;
+  private rollU!: Float64Array;
+  /** relaxed elastic displacement of the roll nodes, exposed for rendering */
+  rollUrel!: Float64Array;
+  private rollTmp!: Float64Array;
+
+  /** deformed roll surface y at each strip column, updated by the coupling */
+  private gapY!: Float64Array;
+  /** fraction of each column's tributary that lies inside the contact arc */
+  private contactW!: Float64Array;
+  /** low-passed, unclamped barrel height at each strip column [m] */
+  private barrelY!: Float64Array;
+  /** exact x where the barrel first interferes with the incoming strip [m] */
+  biteEntryX = 0;
+  /**
+   * The condition of the strip arriving at this stand.
+   *
+   * Owned by the chain, not by this solve: on a tandem line stand k receives
+   * what stand k-1 delivered, work-hardened and warm, and on a reverse mill
+   * each pass receives what the pass before it left. Only the first element of
+   * the chain sees virgin material. Held here rather than in `params` because
+   * `Mill.sync` assigns the shared parameter block wholesale and would clobber
+   * anything the chain had written into it.
+   *
+   * Getting this wrong is not a rounding error: cold rolling to 25 % takes kf
+   * from 371 to 869 MPa, so a downstream stand fed virgin material is being
+   * asked for less than half the resistance it really meets.
+   */
+  entryStrain = 0;
+  entryTemp = 20;
+  /** equivalent plastic strain and flow stress at strip nodes */
+  strain!: Float64Array;
+  /** strip temperature at the same nodes [degC]; entry temperature everywhere
+   *  when the heating model is off, so the field view stays meaningful */
+  temp!: Float64Array;
+  sigmaF!: Float64Array;
+  private strainRateNode!: Float64Array;
+  private accR!: Float64Array;
+  private wR!: Float64Array;
+  private accS!: Float64Array;
+  private wS!: Float64Array;
+  private rateW!: Float64Array;
+
+  /** per node scalar for rendering: roll nodes then strip nodes */
+  nodeField!: Float32Array;
+
+  /** analysis window actually in use [m] (auto-fitted when autoFit is on) */
+  winIn = 0;
+  winOut = 0;
+  /** circumferential grading actually in use */
+  biteGradeEff = 0;
+  /** refined barrel surface layer actually in use [m] */
+  skinThicknessEff = 0;
+  /** radial size of the outermost barrel element [m] */
+  skinElementSize = 0;
+
+  cy = 0;
+  /** accumulated barrel rotation, for the surface markings */
+  phase = 0;
+  time = 0;
+  private vIn = 0;
+  private contactFrom = 0;
+  private contactTo = 0;
+  private rollTick = 0;
+  /** exit half thickness of the previous frame, for the oscillation detector */
+  private lastExitHalf = 0;
+  private lastGapDelta = 0;
+  /** adaptive multiplier on rollRelax, cut when the coupling starts hunting */
+  private relaxScale = 1;
+  /** low-passed thickness strain recovered on leaving the roll */
+  private springbackFilt = 0;
+  /** low-passed feed reaction, and the multi-rate tick for the speed loop */
+  private reactFilt = 0;
+  private reactSeen = false;
+  private feedTick = 0;
+  /**
+   * Best feed residual seen lately.
+   *
+   * The reaction never stops moving: the flattening loop and the gap keep
+   * nudging it, and measurement lands on a floor of a few times 1e-3 whatever
+   * the controller does. Waiting for a fixed deadband below that floor means
+   * waiting forever, which is what left stands sitting in "inner loop wait".
+   * The floor is allowed to creep back up so it tracks a changing condition
+   * rather than pinning itself to one lucky sample.
+   */
+  private feedFloor = 0;
+  /**
+   * Hold the screws where they are, set from outside.
+   *
+   * On a tandem line a stand's entry gauge is the stand in front of it, and
+   * while that is still moving there is nothing steady to control against -
+   * the same reason the gap loop waits for the stand and the feed loop. The
+   * chain converges far faster held this way than with every stand chasing a
+   * target that its neighbour keeps moving.
+   */
+  holdGap = false;
+  /** commanded, unloaded roll gap [m]: where the screws are */
+  private gap = 0;
+  /** low-passed housing stretch under load [m]; 0 with a rigid stand */
+  private stretch = 0;
+  /**
+   * The mill spring last measured while this stand was actually rolling [m].
+   *
+   * Held separately from `diag.millSpring` because a parked stand reports zero
+   * spring - it is not touching the strip - and the test that decides whether
+   * to park reads this. Taking it from the live diagnostics would latch: park
+   * once, spring reads zero, floor rises to h0, and the stand stays parked
+   * however far the target is lowered.
+   */
+  private springHeld = 0;
+  /** mill-spring loop: identified plastic-curve slope and its secant memory */
+  private millQ = 0;
+  private millTick = 0;
+  private millPrevSep = 0;
+  private millPrevP = 0;
+  private millHavePrev = false;
+  /** loaded barrel separation the mesh is currently built around [m] */
+  private placedSep = 0;
+  /** gap loop: low-passed measurement, secant memory, multi-rate tick */
+  private agcTick = 0;
+  private agcFilt = 0;
+  private agcSeen = false;
+  private agcSens = 0;
+  private agcPrevGap = 0;
+  private agcPrevMeas = 0;
+  private agcHavePrev = false;
+  /*
+   * Bracket and per-method state for the gap search.
+   *
+   * Everything below works on `g(S)`, defined so that it *increases* with the
+   * screw gap whatever is being held: g = (measured - target) under gauge
+   * control, and its negative under load control, since closing the gap raises
+   * the load. One sign flip at the top and every method downstream sees the
+   * same monotone increasing function, with its root where g = 0.
+   */
+  /** lower end of the bracket: the largest gap known to give g < 0 */
+  private agcLo = NaN;
+  private agcGlo = NaN;
+  /** upper end: the smallest gap known to give g > 0 */
+  private agcHi = NaN;
+  private agcGhi = NaN;
+  /** step used while hunting for the missing end, as a fraction of h0 */
+  private agcHunt = 0;
+  /** entry gauge the bracket was formed at; it goes stale when that moves */
+  private agcBrH0 = 0;
+  /** Illinois: which end the last update retained, so a stall can be detected */
+  private agcSide = 0;
+  /** Ridders: the midpoint probe and which half of the evaluation pair we are in */
+  private agcRidM = NaN;
+  private agcRidPhase = 0;
+  /** finite-difference Newton: the probe pair, and which half we are in */
+  private agcNwPhase = 0;
+  private agcNwGap = NaN;
+  private agcNwErr = NaN;
+  /** Brent: its own triple, which is not ordered the way the bracket is */
+  private brA = NaN; private brFa = NaN;
+  private brB = NaN; private brFb = NaN;
+  private brC = NaN; private brFc = NaN;
+  private brD = 0; private brE = 0;
+  private brReady = false;
+
+
+  diag: RollingDiagnostics = emptyDiag();
+
+  lastStepMs = 0;
+  lastFlowMs = 0;
+  lastRollMs = 0;
+  lastStrainMs = 0;
+
+  constructor(p: RollingParams) {
+    this.params = { ...p };
+    this.rebuild();
+  }
+
+  /**
+   * The unloaded roll gap currently set. With the screws fixed that is the
+   * commanded h0*(1-r); under gap control it is wherever the loop has driven
+   * them, which is *not* the gauge that leaves the mill - see `exitThickness`.
+   */
+  get h1(): number { return this.gap; }
+  /**
+   * The gauge the *reduction command* implies [m].
+   *
+   * Not the same thing as the loop's setpoint - see `agcSetpoint`. This one is
+   * where the screws sit with the loop off, and it is the nominal scale that
+   * the analysis window, the seed feed speed and the strain-rate regulariser
+   * are all written against, so it stays tied to the reduction even when the
+   * loop is holding an absolute gauge instead.
+   */
+  get h1Command(): number { return this.params.h0 * (1 - this.params.reduction); }
+  /**
+   * The exit thickness the gauge loop is driving towards [m].
+   *
+   * Clamped into the range the stand can physically reach: a target above the
+   * entry gauge is not rolling at all, and one at the floor asks the screws
+   * for travel the rails will not give. A target outside that band is an
+   * operator error, and the honest response is to hold the nearest gauge that
+   * exists and let `agcSaturated` say so, rather than to chase a number the
+   * mill cannot make.
+   */
+  get agcSetpoint(): number {
+    const p = this.params;
+    if (p.agcMode !== 'gauge') return this.h1Command;
+    const want = Number.isFinite(p.agcTargetGauge) ? p.agcTargetGauge : this.h1Command;
+    return Math.max(0.05 * p.h0, Math.min(0.995 * p.h0, want));
+  }
+
+  /**
+   * The absolute gauge target asks for no rolling at all.
+   *
+   * A stand cannot make the strip thicker, so a target at or above the entry
+   * gauge is not a hard pass - it is not a pass. This happens for real on a
+   * tandem line: hold the last stand at 1.5 mm, then back the stands ahead of
+   * it off until they deliver 1.5 mm themselves, and the last stand is being
+   * asked to roll a strip that has already arrived at size.
+   *
+   * The loop's response would be to open the screws until the bite empties,
+   * at which point there is no contact set, no measurement, and the numbers on
+   * screen are the residue of a solve with nothing to solve. Better to say the
+   * pass is idle and hold the stand still - see `Mill.advance`, which parks it.
+   *
+   * The test is against the gauge the stand can actually deliver, not against
+   * the entry gauge. A stand cannot roll to its own entry: the barrel flattens
+   * and the strip springs back, so the thinnest it can make is entry minus
+   * nothing plus a mill spring - i.e. the spring it is already measuring is
+   * the floor. Asking for 1.5 mm from a 1.4998 mm entry is not "almost
+   * possible", it is as impossible as asking for 1.6, and testing against the
+   * entry alone let exactly that case through to chase a target it could never
+   * reach. Include the spring and it is caught.
+   *
+   * A margin on top, because a draft of a fraction of a percent of h0 is
+   * inside the flattening loop's own noise and a stand there is not rolling in
+   * any meaningful sense either.
+   */
+  get gaugeIdle(): boolean {
+    const p = this.params;
+    if (p.agcMode !== 'gauge') return false;
+    const floor = Math.min(p.h0 - this.springHeld, 0.999 * p.h0);
+    return this.agcSetpoint >= floor;
+  }
+  /*
+   * Note on `h1Command` below: several nominal-scale estimates - the contact
+   * arc used to size the window, the seed feed speed, the strain-rate
+   * regulariser - are written against the *commanded* gauge, and must stay
+   * that way. They were, back when the screw position and the command were the
+   * same number. They are not any more: under gap control the screws move, and
+   * with a stretching stand they can legitimately sit at or below zero, where
+   * `log(h0 / S)` takes the whole solve out with it.
+   */
+  get stripOff(): number { return this.roll.nn; }
+  get dofCount(): number { return this.flow.pattern.n + this.rollPat.n; }
+  get nominalArc(): number {
+    return Math.sqrt(this.params.R * (this.params.h0 - this.h1Command));
+  }
+
+  memoryBytes(): number {
+    const m = this.memorySplit();
+    return m.flow + m.roll + m.field;
+  }
+
+  /**
+   * Where this stand's memory actually goes.
+   *
+   * Split three ways because they scale on different dials: the flow block on
+   * the strip mesh, the roll block on the barrel mesh (and much harder - the
+   * elastic stiffness and its band preconditioner are the largest arrays in
+   * the app), and the field block on the two together. Told apart, the mesh
+   * panel's numbers stop being a single figure that only ever goes up.
+   */
+  memorySplit(): { flow: number; roll: number; field: number } {
+    let roll = this.rollPre.byteLength()
+      + patternBytes(this.rollPat) + workspaceBytes(this.rollWs);
+    for (const a of [this.rollVals, this.rollF, this.rollU, this.rollUrel, this.rollTmp,
+      this.rollFree, this.rollElem.dN, this.rollElem.area,
+      this.roll.X, this.roll.quads, this.roll.tris, this.roll.edges,
+      this.gapY, this.contactW, this.barrelY]) roll += a.byteLength;
+    let field = 0;
+    for (const a of [this.strain, this.temp, this.sigmaF, this.nodeField,
+      this.strainRateNode, this.accR, this.wR, this.accS, this.wS,
+      this.rateW]) field += a.byteLength;
+    return { flow: this.flow.byteLength(), roll, field };
+  }
+
+  /**
+   * Choose a window and a circumferential grading that resolve the bite.
+   *
+   * Upstream needs a rigid run-in of a couple of arc lengths (or a few
+   * thicknesses, whichever is longer) for the entry boundary condition to stop
+   * mattering; downstream only needs enough to let the exit velocity profile
+   * even out. The grading is set so the barrel carries roughly 40 nodes across
+   * the arc whatever the radius.
+   */
+  private fitToArc(): void {
+    const p = this.params;
+    if (!p.autoFit) {
+      this.winIn = p.windowIn;
+      this.winOut = p.windowOut;
+      this.biteGradeEff = p.biteGrade;
+      return;
+    }
+    const Lc = Math.max(this.nominalArc, 1e-9);
+    this.winIn = -(Lc + Math.max(3 * p.h0, 2 * Lc));
+    this.winOut = Math.max(2 * p.h0, 1.5 * Lc);
+    const target = Lc / 40;
+    const uniform = (2 * Math.PI * p.R) / p.rollNt;
+    this.biteGradeEff = Math.max(0, Math.min(0.99, 1 - target / uniform));
+  }
+
+  /** Refined-layer thickness, sized from the contact arc when auto. */
+  private fitSkin(): void {
+    const p = this.params;
+    const wall = p.R * (1 - p.hubRatio);
+    // Keep at least three rings for the core: the barrel's flattening is
+    // dominated by the wall compressing back to the hub, and starving that of
+    // elements costs more accuracy than the refined skin buys.
+    const rings = Math.max(0, Math.min(Math.max(1, p.rollNr - 3), Math.round(p.rollSkinRings)));
+    // Element size the plain power law would put at the barrel surface. The
+    // outermost element of r = Rhub + wall*(1-(1-j/nr)^g) is wall*(1/nr)^g.
+    const hGraded = wall * Math.pow(1 / p.rollNr, p.rollRadialGrade);
+
+    if (rings < 1) {
+      this.skinThicknessEff = 0;
+      this.skinElementSize = hGraded;
+      return;
+    }
+    // Auto mode targets an element size, not a layer thickness: the sub-surface
+    // stress decays over the contact length, so what matters is how many
+    // elements sit inside that depth. Thickness then follows from the ring
+    // count, capped so the layer cannot eat the whole wall.
+    const raw = p.rollSkinAuto
+      ? rings * (Math.max(this.nominalArc, 1e-9) / Math.max(p.rollSkinFactor, 1))
+      : p.rollSkinThickness;
+    this.skinThicknessEff = Math.max(0, Math.min(raw, wall * 0.5));
+    this.skinElementSize = this.skinThicknessEff > 0
+      ? this.skinThicknessEff / rings
+      : hGraded;
+  }
+
+  rebuild(): void {
+    const p = this.params;
+    this.gap = this.h1Command;
+    this.stretch = 0;
+    this.placedSep = this.gap;
+    this.cy = this.gap / 2 + p.R;
+    this.fitToArc();
+    this.fitSkin();
+    this.roll = buildRollMesh({
+      R: p.R, Rhub: p.R * p.hubRatio, nt: p.rollNt, nr: p.rollNr,
+      radialGrade: p.rollRadialGrade, biteGrade: this.biteGradeEff, cx: 0, cy: this.cy,
+      skinThickness: this.skinThicknessEff,
+      skinRings: p.rollSkinRings,
+    });
+    this.rollPat = buildCsrPattern(this.roll.nn, this.roll.quads);
+    this.rollWs = makePcgWorkspace(this.rollPat.n);
+    this.rollPre = new BandPreconditioner(this.rollPat.n, 2 * (this.roll.rows + 1) + 1);
+    this.rollVals = new Float64Array(this.rollPat.nnz);
+    this.rollElem = assembleStiffness(
+      precomputeElements(this.roll.X, this.roll.quads,
+        { E: p.Eroll, nu: p.nuRoll, rho: 7850 }),
+      this.rollPat.scatter, this.rollVals);
+    this.rollFree = new Uint8Array(this.rollPat.n).fill(1);
+    for (const nd of this.roll.hubNodes) {
+      this.rollFree[2 * nd] = 0;
+      this.rollFree[2 * nd + 1] = 0;
+    }
+    this.rollPre.factor(this.rollPat, this.rollVals, this.rollFree);
+    this.rollF = new Float64Array(this.rollPat.n);
+    this.rollU = new Float64Array(this.rollPat.n);
+    this.rollUrel = new Float64Array(this.rollPat.n);
+    this.rollTmp = new Float64Array(this.rollPat.n);
+
+    this.flow = new FlowSolver(p.stripNx, p.stripNy);
+    this.gapY = new Float64Array(p.stripNx + 1);
+    this.contactW = new Float64Array(p.stripNx + 1);
+    this.barrelY = new Float64Array(p.stripNx + 1);
+    this.strain = new Float64Array(this.flow.mesh.nn);
+    this.temp = new Float64Array(this.flow.mesh.nn);
+    this.sigmaF = new Float64Array(this.flow.mesh.nn);
+    this.strainRateNode = new Float64Array(this.flow.mesh.nn);
+    this.nodeField = new Float32Array(this.roll.nn + this.flow.mesh.nn);
+    this.accR = new Float64Array(this.roll.nn);
+    this.wR = new Float64Array(this.roll.nn);
+    this.accS = new Float64Array(this.flow.mesh.nn);
+    this.wS = new Float64Array(this.flow.mesh.nn);
+    this.rateW = new Float64Array(this.flow.mesh.nn);
+
+    this.resetState();
+  }
+
+  /** Rebuild only what a material change touches. */
+  refreshMaterial(): void {
+    const p = this.params;
+    this.rollElem = assembleStiffness(
+      precomputeElements(this.roll.X, this.roll.quads,
+        { E: p.Eroll, nu: p.nuRoll, rho: 7850 }),
+      this.rollPat.scatter, this.rollVals);
+    this.rollPre.factor(this.rollPat, this.rollVals, this.rollFree);
+  }
+
+  resetState(): void {
+    const p = this.params;
+    this.time = 0;
+    this.phase = 0;
+    this.stretch = 0;
+    this.millQ = 0;
+    this.millTick = 0;
+    this.millHavePrev = false;
+    this.releaseGap();
+    this.rollU.fill(0);
+    this.rollUrel.fill(0);
+    this.gapY.fill(0);
+    this.barrelY.fill(0);
+    this.lastExitHalf = 0;
+    this.lastGapDelta = 0;
+    this.relaxScale = 1;
+    this.springbackFilt = 0;
+    this.springHeld = 0;
+    this.reactFilt = 0;
+    this.reactSeen = false;
+    this.feedTick = 0;
+    this.feedFloor = 0;
+    this.strain.fill(this.entryStrain);
+    this.temp.fill(this.entryTemp);
+    this.flow.ifPressure.fill(0);
+    this.flow.ifShear.fill(0);
+    this.vIn = p.feedSpeed > 0 ? p.feedSpeed : (p.omega * p.R * this.h1Command) / p.h0;
+    this.updateGap();
+    for (let i = 0; i < this.sigmaF.length; i++) {
+      this.sigmaF[i] = uniaxial(p, this.entryStrain, this.entryTemp);
+    }
+    this.flow.seed(this.vIn, p.h0 / 2);
+    this.diag = emptyDiag();
+  }
+
+  /**
+   * Lay the strip mesh into the current roll gap. Upstream of the bite the
+   * surface is flat at h0/2, through the bite it follows the (possibly
+   * flattened) barrel, and downstream it holds the exit thickness - a
+   * rigid-plastic body has no elastic recovery to spring back with.
+   */
+  private updateGap(): void {
+    const p = this.params;
+    const m = this.flow.mesh;
+    const half0 = p.h0 / 2;
+
+    // deformed barrel profile near the bite, as a function of x
+    const surfX: number[] = [];
+    const surfY: number[] = [];
+    for (let k = 0; k < this.roll.nt; k++) {
+      const nd = this.roll.surfNodes[k];
+      const bx = this.roll.X[2 * nd] + this.rollUrel[2 * nd];
+      const by = this.roll.X[2 * nd + 1] + this.rollUrel[2 * nd + 1];
+      if (by > this.cy) continue;               // lower half of the barrel only
+      surfX.push(bx); surfY.push(by);
+    }
+    const order = surfX.map((_, i) => i).sort((a2, b2) => surfX[a2] - surfX[b2]);
+    const sx = order.map((i) => surfX[i]);
+    const sy = order.map((i) => surfY[i]);
+    const FAR = half0 * 1e3;
+    const barrelAt = (x: number): number => {
+      if (sx.length < 2 || x <= sx[0] || x >= sx[sx.length - 1]) return FAR;
+      let lo = 0, hi = sx.length - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (sx[mid] <= x) lo = mid; else hi = mid;
+      }
+      const f = (x - sx[lo]) / Math.max(sx[hi] - sx[lo], 1e-15);
+      return sy[lo] + f * (sy[hi] - sy[lo]);
+    };
+
+    // Adaptive damping: if the exit thickness reversed direction since the last
+    // frame the loop is hunting, so pull the gain down hard and let it creep
+    // back only while the motion stays one-way. Thin gauge on a small roll sits
+    // close to the flattening limit where the fixed point is barely stable.
+    const relax = this.params.rollRelax * this.relaxScale;
+    const dx = (this.winOut - this.winIn) / m.nx;
+
+    // Pass 1: low-pass the *unclamped* barrel height. Everything downstream -
+    // where contact starts, how much of a column it covers, where the mesh
+    // surface sits - is then read off one consistent, continuously moving
+    // curve. Deriving the contact set from the raw profile while meshing the
+    // relaxed one lets the two disagree, and the arc end then snaps between
+    // columns once per frame.
+    for (let i = 0; i <= m.nx; i++) {
+      const x = this.winIn + (this.winOut - this.winIn) * (i / m.nx);
+      m.xs[i] = x;
+      const raw = barrelAt(x);
+      const prev = this.barrelY[i];
+      this.barrelY[i] = prev !== 0 ? prev + relax * (raw - prev) : raw;
+    }
+
+    // Pass 2: the strip surface follows the barrel through the bite and then
+    // holds the exit thickness - a rigid-plastic body has no elastic recovery
+    // to spring back with. The channel has to close monotonically: a flattened
+    // barrel can rise again before the exit plane, and a gap that reopens would
+    // ask an incompressible material to expand.
+    let exitHalf = half0;
+    let running = half0;
+    this.contactFrom = -1;
+    this.contactTo = -1;
+    for (let i = 0; i <= m.nx; i++) {
+      const x = m.xs[i];
+      let top: number;
+      if (x <= 0) {
+        const b = this.barrelY[i];
+        running = Math.min(running, Math.min(half0, b));
+        top = running;
+        if (b < half0 - 1e-12) {
+          if (this.contactFrom < 0) this.contactFrom = i;
+          this.contactTo = i;
+          exitHalf = top;
+        }
+      } else {
+        // Downstream the strip springs back: the contact pressure is gone but
+        // the elastic thickness strain it caused is not, so the gauge leaving
+        // the mill is thicker than the roll gap. The recovery is spread over a
+        // distance of order the thickness rather than applied as a step.
+        const rec = Math.max(exitHalf * 2, dx);
+        const t = Math.min(1, x / rec);
+        top = exitHalf * (1 + this.springbackFilt * t);
+      }
+      this.gapY[i] = top;
+      for (let j = 0; j < m.rows; j++) {
+        const nd = i * m.rows + j;
+        m.X[2 * nd] = x;
+        m.X[2 * nd + 1] = (top * j) / m.ny;
+      }
+    }
+    // Nothing interferes: the barrel is clear of the incoming strip and there
+    // is no bite at all. The indices still have to point somewhere, but the
+    // coverage below must not - clamping them to column 0 and then giving that
+    // column full weight puts a contact at the upstream boundary against a
+    // barrel a thousand thicknesses away, and the penalty force that implies
+    // is what turns the whole solve into NaN.
+    const touching = this.contactFrom >= 0;
+    if (!touching) { this.contactFrom = 0; this.contactTo = 0; }
+
+    // Exact bite entry, from the *unclamped* barrel crossing h0/2. Using the
+    // clamped height here would put the crossing exactly on a column every
+    // time, which is what made the coverage weights degenerate to 0 or 1.
+    let xEntry = m.xs[this.contactFrom];
+    if (this.contactFrom > 0) {
+      const bPrev = this.barrelY[this.contactFrom - 1];
+      const bHere = this.barrelY[this.contactFrom];
+      if (bPrev > half0 && bHere < half0) {
+        const f = (bPrev - half0) / (bPrev - bHere);
+        xEntry = m.xs[this.contactFrom - 1] + f * dx;
+      }
+    }
+    this.biteEntryX = xEntry;
+
+    // Fraction of each column's tributary that sits inside [xEntry, 0].
+    //
+    // The sweep starts one column upstream of the first column whose barrel
+    // height is below h0/2: when the entry crosses a column centre, that
+    // column's own tributary still reaches into the arc, and dropping it would
+    // throw away half a column of contact in a single frame - which is exactly
+    // the jump the coverage weighting exists to remove.
+    const first = Math.max(0, this.contactFrom - 1);
+    this.contactW.fill(0);
+    if (touching) {
+      for (let i = first; i <= this.contactTo; i++) {
+        const a2 = m.xs[i] - dx / 2, b2 = m.xs[i] + dx / 2;
+        const lo = Math.max(a2, xEntry), hi = Math.min(b2, 0);
+        this.contactW[i] = Math.max(0, Math.min(1, (hi - lo) / dx));
+      }
+      while (this.contactFrom > first && this.contactW[this.contactFrom - 1] > 1e-6) {
+        this.contactFrom--;
+      }
+    }
+
+    const delta = exitHalf - this.lastExitHalf;
+    if (this.lastExitHalf > 0) {
+      if (delta * this.lastGapDelta < 0) {
+        this.relaxScale = Math.max(0.08, this.relaxScale * 0.55);
+      } else {
+        this.relaxScale = Math.min(1, this.relaxScale * 1.03);
+      }
+      this.diag.couplingResidual = Math.abs(delta) / Math.max(exitHalf, 1e-15);
+      this.diag.relaxScale = this.relaxScale;
+    }
+    this.lastGapDelta = delta;
+    this.lastExitHalf = exitHalf;
+  }
+
+  /** Advance one frame: flow solve, strain transport, roll coupling. */
+  /**
+   * Hold a stand that has nothing to roll.
+   *
+   * Not the same as pausing: the strip is still moving, it simply leaves at
+   * the gauge it arrived at. So the diagnostics are written as a pass-through
+   * - no load, no torque, exit equal to entry - rather than left as whatever
+   * the last real solve produced, which would report a load for a stand that
+   * is not touching the strip.
+   *
+   * The velocity field, the strain and the flattening are all left untouched,
+   * so re-entering the schedule costs nothing: lower the target back below the
+   * entry gauge and the stand resumes from where it was, rather than
+   * re-converging from a seed.
+   */
+  passThrough(): void {
+    const d = this.diag;
+    const p = this.params;
+    // Do not disturb `springHeld`. It is what `gaugeIdle` tests against, and
+    // the pass-through below writes millSpring = 0 - so reading the spring
+    // from the live diagnostics would make the idle test true by virtue of
+    // being idle, and the stand could never come back when its target moved.
+    d.agcIdle = true;
+    d.agcSettled = true;
+    d.agcStalled = false;
+    d.agcSaturated = false;
+    d.agcError = 0;
+    d.exitThickness = p.h0;
+    d.exitThicknessGap = p.h0;
+    d.entryThickness = p.h0;
+    d.rollForce = 0;
+    d.torque = 0;
+    d.power = 0;
+    d.meanPressure = 0;
+    d.peakPressure = 0;
+    d.contactNodes = 0;
+    d.arcLength = 0;
+    d.reductionRatio = 1;
+    d.millSpring = 0;
+    d.exitSpeed = p.omega * p.R;
+    d.entrySpeed = d.exitSpeed;
+    d.agcMeasured = p.h0;
+    this.lastStepMs = 0;
+  }
+
+  advance(frameDt: number): void {
+    const t0 = performance.now();
+    const p = this.params;
+    this.time += frameDt;
+    this.phase += p.omega * frameDt;
+
+    const vRoll = p.omega * p.R;
+    // Scale the viscosity regularisation off the *current* throughput, not the
+    // roll speed. A rigid-plastic material is rate independent; tying the
+    // regulariser to a speed the strip is not actually running at would make
+    // the answer drift with the feed.
+    const vThrough = (this.vIn * p.h0)
+      / Math.max(this.diag.exitThickness || this.h1Command, 1e-9);
+    const nominalRate = Math.max(
+      (Math.max(vThrough, 1e-6) * Math.log(p.h0 / this.h1Command))
+        / Math.max(this.nominalArc, 1e-6), 1e-4);
+    void vRoll;
+
+    // Transit time through the bite. Everything elastic is expressed as a
+    // viscosity over this time: a point that spends t inside the roll can at
+    // most respond with its elastic stiffness times t.
+    const tRef = Math.max(this.nominalArc / Math.max(vThrough, 1e-6), 1e-6);
+    const Gs = p.Estrip / (2 * (1 + p.nuStrip));
+    const Ks = p.Estrip / (3 * (1 - 2 * p.nuStrip));
+    const muRef = uniaxial(p, 0) / (3 * nominalRate);
+
+    const inp: FlowInput = {
+      sigmaF: this.sigmaF,
+      vIn: this.vIn,
+      vRoll: p.omega * p.R,
+      rollCx: this.roll.cx,
+      rollCy: this.cy,
+      contactFrom: this.contactFrom,
+      contactTo: this.contactTo,
+      contactWeight: this.contactW,
+      mu: p.mu,
+      vSlip0: Math.max(p.slipFrac * Math.abs(vRoll), 1e-6),
+      normalPenalty: p.normalPenalty,
+      eps0: p.eps0Frac * nominalRate,
+      muRef,
+      muCap: p.elasticZones ? Gs * tRef : muRef * 150,
+      kBulk: p.elasticZones ? Ks * tRef : p.incompPenalty * muRef,
+      backTension: p.backTension,
+      frontTension: p.frontTension,
+      maxIter: p.cgIter,
+      tol: p.cgTol,
+    };
+
+    const tf = performance.now();
+    let res = { iterations: 0, residual: 0, picardDelta: 0 };
+    for (let k = 0; k < Math.max(1, p.picardIters | 0); k++) {
+      res = this.flow.solve(inp, p.relax);
+    }
+    this.lastFlowMs = performance.now() - tf;
+    this.diag.cgIterations = res.iterations;
+    this.diag.cgResidual = res.residual;
+    this.diag.picardDelta = res.picardDelta;
+
+    const ts = performance.now();
+    this.transportStrain();
+    this.lastStrainMs = performance.now() - ts;
+
+    this.collectDiagnostics(inp);
+
+    const tr = performance.now();
+    if (p.rollCoupling && ++this.rollTick >= Math.max(1, p.rollEvery | 0)) {
+      this.rollTick = 0;
+      this.solveRoll();
+    }
+    // The stand gives first, then the screws move to answer it, and only then
+    // is the strip re-laid into the gap the pair leaves behind.
+    this.updateMillStretch();
+    this.updateAgc();
+    this.updateGap();
+    this.lastRollMs = performance.now() - tr;
+
+    if (p.feedSpeed > 0) {
+      this.vIn = p.feedSpeed;
+    } else {
+      this.updateFeedSpeed();
+    }
+
+    this.lastStepMs = performance.now() - t0;
+  }
+
+  /** Forget what the gap loop has learned; its target or its mode has moved. */
+  resetAgc(): void {
+    this.agcTick = 0;
+    this.agcFilt = 0;
+    this.agcSeen = false;
+    this.agcSens = 0;
+    this.agcPrevGap = 0;
+    this.agcPrevMeas = 0;
+    this.agcHavePrev = false;
+    this.forgetBracket();
+  }
+
+  /**
+   * The gap sensitivity written straight from the mill, with no identification.
+   *
+   * Both modes fall out of the gaugemeter relation with nothing but quantities
+   * already being measured here - no material constant, no fitted gain.
+   *
+   * The strip leaves at `h1 = S + spring`, and the plastic curve gives the
+   * load its draft costs, so with `M = P/spring` the mill modulus and
+   * `Q = P/draft` the secant plastic slope,
+   *
+   *     dh1/dS = M/(M+Q) = draft/(draft+spring)
+   *     dP/dS  = -QM/(Q+M) = -P/(draft+spring)
+   *
+   * The two loads cancel in the first and survive in the second, which is why
+   * gauge control gets a dimensionless number near one while load control
+   * needs the scaling the loop applies to its error.
+   */
+  private analyticSens(force: boolean): number {
+    const p = this.params;
+    const d = this.diag;
+    const draft = Math.max(p.h0 - d.exitThickness, 1e-9);
+    const spring = Math.max(d.millSpring, 1e-12);
+    if (!force) return Math.max(0.15, Math.min(1, draft / (draft + spring)));
+    const scale = Math.max(Math.abs(p.agcTargetForce), 1e3);
+    const raw = (d.rollForce * p.h0) / ((draft + spring) * scale);
+    return -Math.max(0.4, Math.min(60, raw));
+  }
+
+  /** Drop everything the search has learned about where the root is. */
+  private forgetBracket(): void {
+    this.agcLo = NaN; this.agcGlo = NaN;
+    this.agcHi = NaN; this.agcGhi = NaN;
+    this.agcHunt = 0;
+    this.agcBrH0 = 0;
+    this.agcSide = 0;
+    this.agcRidM = NaN; this.agcRidPhase = 0;
+    this.agcNwPhase = 0; this.agcNwGap = NaN; this.agcNwErr = NaN;
+    this.brReady = false;
+  }
+
+  /**
+   * Where to move the screws next, by whichever bracketed method is selected.
+   *
+   * `g` is the monotone-increasing error described on the bracket fields, and
+   * the return value is an absolute gap. Called once per screw revision, so
+   * each branch below is *one* step of its algorithm rather than a loop - the
+   * plant supplies the function evaluations in between, at a cost of seconds
+   * each. That is the whole reason the choice matters.
+   */
+  private nextGap(g: number): number {
+    const p = this.params;
+    const S = this.gap;
+
+    // A bracket describes one operating point. On a tandem line the entry
+    // gauge walks while the chain settles, which moves the root out from under
+    // the stored ends - so they are dropped rather than trusted.
+    if (this.agcBrH0 > 0 && Math.abs(p.h0 - this.agcBrH0) > 5e-3 * this.agcBrH0) {
+      this.forgetBracket();
+    }
+    this.agcBrH0 = p.h0;
+
+    // Record which side of the root this position turned out to be on.
+    if (g < 0) {
+      this.agcLo = S; this.agcGlo = g;
+      // Illinois: a second consecutive hit on the same side means the far end
+      // is stale and holding the chord flat. Bend it.
+      if (p.agcMethod === 'illinois' && this.agcSide === -1
+        && Number.isFinite(this.agcGhi)) this.agcGhi *= 0.5;
+      this.agcSide = -1;
+    } else {
+      this.agcHi = S; this.agcGhi = g;
+      if (p.agcMethod === 'illinois' && this.agcSide === 1
+        && Number.isFinite(this.agcGlo)) this.agcGlo *= 0.5;
+      this.agcSide = 1;
+    }
+
+    const bracketed = Number.isFinite(this.agcLo) && Number.isFinite(this.agcHi)
+      && this.agcHi > this.agcLo;
+    if (!bracketed) {
+      // Hunt outwards for the missing end, doubling the reach each time. The
+      // first step is the same clamp the secant uses, so choosing a method
+      // does not also change how boldly the loop starts.
+      const base = Math.max(this.agcHunt, p.agcMaxStep);
+      this.agcHunt = Math.min(base * 2, 0.5);
+      return g < 0 ? S + base * p.h0 : S - base * p.h0;
+    }
+    this.agcHunt = 0;
+
+    const lo = this.agcLo, hi = this.agcHi;
+    const glo = this.agcGlo, ghi = this.agcGhi;
+    const mid = 0.5 * (lo + hi);
+    /** Keep a proposal off the ends, so a flat chord cannot stall the search. */
+    const inside = (x: number) => {
+      const pad = 0.02 * (hi - lo);
+      return Number.isFinite(x) && x > lo + pad && x < hi - pad ? x : mid;
+    };
+
+    switch (p.agcMethod) {
+      case 'bisect':
+        return mid;
+
+      case 'falsi':
+      case 'illinois':
+        // One step; the two differ only in the halving applied above, which is
+        // what stops false position creeping in from one side forever.
+        return inside(ghi > glo ? lo - glo * ((hi - lo) / (ghi - glo)) : mid);
+
+      case 'ridders': {
+        // Two evaluations per iteration: the midpoint, then the point the
+        // exponential fit picks. `agcRidPhase` says which half we are in.
+        if (this.agcRidPhase === 0) {
+          this.agcRidM = mid;
+          this.agcRidPhase = 1;
+          return mid;
+        }
+        this.agcRidPhase = 0;
+        // The midpoint's value is the one measured on the previous revision,
+        // which is this call's own `g`.
+        const gm = g;
+        const disc = gm * gm - glo * ghi;
+        if (!(disc > 0)) return mid;
+        // sign(glo - ghi) is negative for an increasing g, which is the
+        // direction that walks from the midpoint towards the root.
+        return inside(this.agcRidM
+          + (this.agcRidM - lo) * ((glo - ghi < 0 ? -1 : 1) * gm) / Math.sqrt(disc));
+      }
+
+      case 'brent':
+        return inside(this.brentStep(S, g, lo, hi, glo, ghi));
+
+      default:
+        return mid;
+    }
+  }
+
+  /**
+   * One step of Brent's method.
+   *
+   * Inverse quadratic interpolation when three usable points are in hand, the
+   * secant when only two are, and a bisection whenever either would step
+   * outside the bracket or fail to make progress. That last clause is the
+   * whole trick: as fast as interpolation where interpolation works, and
+   * exactly as safe as bisection where it does not.
+   */
+  private brentStep(
+    S: number, g: number, lo: number, hi: number, glo: number, ghi: number,
+  ): number {
+    if (!this.brReady) {
+      // Seed from the bracket, with `b` - Brent's running best - at whichever
+      // end is closer to the root.
+      const bAtLo = Math.abs(glo) <= Math.abs(ghi);
+      this.brB = bAtLo ? lo : hi; this.brFb = bAtLo ? glo : ghi;
+      this.brC = bAtLo ? hi : lo; this.brFc = bAtLo ? ghi : glo;
+      this.brA = this.brC; this.brFa = this.brFc;
+      this.brD = this.brE = hi - lo;
+      this.brReady = true;
+    } else {
+      this.brA = this.brB; this.brFa = this.brFb;
+      this.brB = S; this.brFb = g;
+    }
+    let a = this.brA, fa = this.brFa;
+    let b = this.brB, fb = this.brFb;
+    let c = this.brC, fc = this.brFc;
+    let d = this.brD, e = this.brE;
+
+    if (fb * fc > 0) { c = a; fc = fa; d = b - a; e = d; }
+    if (Math.abs(fc) < Math.abs(fb)) {
+      a = b; b = c; c = a; fa = fb; fb = fc; fc = fa;
+    }
+    const tol1 = 1e-12 * Math.abs(b) + 1e-9;
+    const xm = 0.5 * (c - b);
+    if (Math.abs(e) >= tol1 && Math.abs(fa) > Math.abs(fb)) {
+      const sc = fb / fa;
+      let num: number, den: number;
+      if (a === c) { num = 2 * xm * sc; den = 1 - sc; }
+      else {
+        const q = fa / fc, r = fb / fc;
+        num = sc * (2 * xm * q * (q - r) - (b - a) * (r - 1));
+        den = (q - 1) * (r - 1) * (sc - 1);
+      }
+      if (num > 0) den = -den;
+      num = Math.abs(num);
+      const min1 = 3 * xm * den - Math.abs(tol1 * den);
+      const min2 = Math.abs(e * den);
+      if (2 * num < Math.min(min1, min2)) { e = d; d = num / den; }
+      else { d = xm; e = d; }
+    } else { d = xm; e = d; }
+    const step = Math.abs(d) > tol1 ? d : (xm >= 0 ? tol1 : -tol1);
+
+    this.brA = a; this.brFa = fa; this.brB = b; this.brFb = fb;
+    this.brC = c; this.brFc = fc; this.brD = d; this.brE = e;
+    return b + step;
+  }
+
+  /** Put the screws back on the commanded reduction and drop the loop state. */
+  releaseGap(): void {
+    this.setGap(this.h1Command);
+    this.resetAgc();
+  }
+
+  /**
+   * Point the gauge loop at a new setpoint without throwing away what it has
+   * already worked out about the stand.
+   *
+   * `releaseGap` puts the screws *on* the commanded gauge, which is where they
+   * belong when nothing is driving them - with the loop off, the command is
+   * the screw position. Under gauge control it is not: the strip leaves a
+   * whole mill spring thicker than the screws are set, and the loop's entire
+   * job is to find that offset. Re-commanding through `releaseGap` discarded
+   * it and made the loop rediscover the same 100 um from scratch.
+   *
+   * So the screws are placed by the gaugemeter relation instead,
+   *
+   *     S = h1* - (h1 - S)_measured
+   *
+   * which is the industrial AGC feed-forward: the spring measured at the old
+   * operating point is very nearly the spring at the new one, so this lands
+   * within a trim of the answer in a single move - and one move is worth
+   * several seconds here, because the loop waits for the mill-spring and feed
+   * loops to settle between them. On the default cold pass it puts the screws
+   * within 0.8 % of h0 of the converged position, against 5.8 % for the raw
+   * command.
+   *
+   * The identified gain and its trust are kept: the plant has not changed,
+   * only the number being asked of it. The secant *pair* goes, because it
+   * would straddle a jump the plant never made.
+   */
+  retarget(): void {
+    const spring = Number.isFinite(this.diag.millSpring)
+      ? Math.max(this.diag.millSpring, 0) : 0;
+    this.setGap(this.agcSetpoint - spring);
+    this.agcTick = 0;
+    this.agcHavePrev = false;
+    // The bracket describes where the *old* root was. The setpoint has moved,
+    // so its ends are statements about a question nobody is asking any more.
+    this.forgetBracket();
+  }
+
+  /**
+   * Bounds on the *loaded* barrel separation - what the strip mesh actually
+   * has to live inside.
+   *
+   * The open end stops short of h0 on purpose: with the barrel exactly on the
+   * incoming surface the bite degenerates to a point, the contact set empties
+   * and the flow solve has nothing to stand on. The closed end is where a
+   * rigid-plastic strip stops meaning anything.
+   */
+  private sepLo(): number {
+    // Defended against a non-finite value. This bound feeds every screw clamp,
+    // so one bad number here does not throw an error - it quietly makes the
+    // gap NaN, `setGap` then refuses every move, and the mill runs on looking
+    // healthy with its screws welded shut.
+    const f = Number.isFinite(this.params.sepFloorFrac) ? this.params.sepFloorFrac : 0.30;
+    return Math.max(0.02, Math.min(0.9, f)) * this.params.h0;
+  }
+  private sepHi(): number { return 0.98 * this.params.h0; }
+
+  /**
+   * Screw travel, which is the separation bounds shifted down by the stretch.
+   *
+   * This is why a real stand is set to a *negative* unloaded gap when rolling
+   * thin: what has to stay positive is the loaded separation, and the mill
+   * spring is what opens it back up. With a rigid stand the stretch is zero
+   * and the screw bounds collapse onto the separation bounds, as before.
+   */
+  private gapLo(): number { return this.sepLo() - this.stretch; }
+  private gapHi(): number { return this.sepHi() - this.stretch; }
+
+  /**
+   * Move the screws to a new unloaded gap.
+   *
+   * The roll is a linear elastic body on a rigid hub, so a rigid vertical
+   * translation leaves its stiffness alone - only the coordinates move, and
+   * the factorised operator stays valid. Everything else that carries an
+   * absolute y (the low-passed barrel profile, the oscillation detector's
+   * memory of the last exit height) is carried along with it, so the coupling
+   * loop does not read the screw move as a physical change and clamp itself.
+   */
+  private setGap(h: number): void {
+    // A non-finite gap would translate the roll mesh into nothing and there is
+    // no way back from that, so refuse it here rather than anywhere upstream.
+    if (!Number.isFinite(h)) return;
+    this.gap = Math.max(this.gapLo(), Math.min(this.gapHi(), h));
+    this.placeRoll();
+  }
+
+  /**
+   * Put the barrel where the screw position plus the housing stretch says it
+   * belongs, translating the roll rigidly to get there.
+   *
+   * Both the gap loop and the mill-spring loop move the barrel, and they must
+   * not each keep their own idea of where it is - so the placement is derived
+   * from the pair every time and applied as a delta against what is actually
+   * on screen.
+   */
+  private placeRoll(): void {
+    const sep = Math.max(this.sepLo(), Math.min(this.sepHi(), this.gap + this.stretch));
+    const dy = (sep - this.placedSep) / 2;
+    if (dy === 0 || !Number.isFinite(dy)) return;
+    this.placedSep = sep;
+    this.cy += dy;
+    this.roll.cy = this.cy;
+    const X = this.roll.X;
+    for (let i = 0; i < this.roll.nn; i++) X[2 * i + 1] += dy;
+    for (let i = 0; i < this.barrelY.length; i++) {
+      if (this.barrelY[i] !== 0) this.barrelY[i] += dy;
+    }
+    if (this.lastExitHalf > 0) this.lastExitHalf += dy;
+  }
+
+  /**
+   * Housing stretch under load.
+   *
+   * The screws hold a position; the stand around them does not hold still. The
+   * housing, the screw column and the bearings all give, and the barrels
+   * separate by P/M on top of whatever the roll surface itself flattens. That
+   * is the mill modulus - and on a real stand it dominates: a few MN/mm of
+   * stiffness against a few kN/mm of load is millimetres of stretch, where the
+   * flattening modelled here is tens of microns.
+   *
+   * It is relaxed rather than applied outright because it is the other half of
+   * the same fixed point as the flattening: more load opens the gap, which
+   * takes load back off. That loop is stabilising, but it still has to settle.
+   */
+  private updateMillStretch(): void {
+    const p = this.params;
+    const d = this.diag;
+    if (!p.millSpringOn || !(p.millModulus > 0)) {
+      if (this.stretch !== 0) { this.stretch = 0; this.placeRoll(); }
+      d.millStretch = 0;
+      d.millResidual = 0;
+      this.millHavePrev = false;
+      return;
+    }
+    const P = d.rollForce;
+    if (!Number.isFinite(P)) return;
+    d.millResidual = Math.abs(this.stretch - Math.max(P, 0) / p.millModulus) / p.h0;
+
+    // Multi-rate, for the same reason the gap loop is: moving the barrel is a
+    // large perturbation to the flattening loop, and it needs frames to relax
+    // before the load it reports means anything again.
+    if (++this.millTick < MILL_EVERY) { d.millStretch = this.stretch; return; }
+    this.millTick = 0;
+
+    // Newton on the mill equation  sep = S + P(sep)/M.
+    //
+    //   f(sep) = sep - S - P(sep)/M      f'(sep) = 1 + Q/M,   Q = -dP/dsep
+    //
+    // Relaxing straight onto P/M instead is a fixed-point iteration of gain
+    // Q/M, and Q is of the same order as M for a real stand - so that diverges
+    // exactly where the model is most interesting. Dividing by (1 + Q/M)
+    // cannot: the factor is above one for every Q >= 0, so the step is always
+    // a contraction. Q is identified from the last move rather than assumed,
+    // because it is the slope of the plastic curve and depends on everything.
+    const sep = this.gap + this.stretch;
+    if (this.millHavePrev) {
+      const dSep = sep - this.millPrevSep;
+      const dP = P - this.millPrevP;
+      if (Math.abs(dSep) > 1e-9) {
+        const raw = -dP / dSep;                      // Q, positive when rolling
+        if (Number.isFinite(raw) && raw > 0 && raw < 500 * p.millModulus) {
+          this.millQ = this.millQ > 0 ? this.millQ + 0.4 * (raw - this.millQ) : raw;
+        }
+      }
+    }
+    if (!(this.millQ > 0)) this.millQ = p.millModulus;   // first move: Q ~ M
+    this.millPrevSep = sep;
+    this.millPrevP = P;
+    this.millHavePrev = true;
+
+    const residual = this.stretch - Math.max(P, 0) / p.millModulus;
+    const step = -(residual / (1 + this.millQ / p.millModulus)) * MILL_GAIN;
+    const lim = MILL_MAX_STEP * Math.max(this.placedSep, 0.05 * p.h0);
+    // The pair (screw position, stretch) must stay inside the separation
+    // bounds on its own, not get silently clipped when the barrel is placed:
+    // once the two disagree with where the barrel actually is, `millSpring`,
+    // the screw rails and everything the gap loop reads are fiction.
+    const hi = Math.max(0, this.sepHi() - this.gap);
+    const lo = Math.max(0, this.sepLo() - this.gap);
+    const next = Math.max(lo, Math.min(hi,
+      this.stretch + Math.max(-lim, Math.min(lim, step))));
+    if (Number.isFinite(next) && next !== this.stretch) {
+      this.stretch = next;
+      this.placeRoll();
+    }
+    d.millStretch = this.stretch;
+  }
+
+  /**
+   * Automatic gap control.
+   *
+   * The screws set the *unloaded* gap. What leaves the mill is that gap plus
+   * the mill spring - the barrel flattens under load, the strip springs back
+   * on release - so a stand with its screws parked always under-reduces. A
+   * real stand closes the loop around the measurement instead: it drives the
+   * screws until the gauge (or the load) sits on target, and the spring is
+   * simply paid for in advance. Same thing here, on either measurement.
+   *
+   * The loop is a damped secant. Its plant gain is the mill's own
+   *
+   *     dh1/dS = M / (M + Q)
+   *
+   * with M the mill modulus and Q the slope of the plastic curve - well below
+   * one, and a function of gauge, radius, friction and hardening, so rather
+   * than assume a value the loop identifies it from the last move it made and
+   * inverts it. Three things keep that stable: the measurement is low-passed,
+   * the screws are only revised every few frames so the flattening loop has
+   * time to relax in between, and a deadband stops the controller before it
+   * starts chasing its own noise. The step is clamped as well, because the
+   * first move is made on a guessed gain.
+   */
+  private updateAgc(): void {
+    const p = this.params;
+    const d = this.diag;
+    if (p.agcMode === 'off') {
+      d.agcMeasured = 0;
+      d.agcStalled = false;
+      d.agcError = 0;
+      d.agcSettled = false;
+      d.agcSaturated = false;
+      d.agcIdle = false;
+      d.agcSensitivity = 0;
+      return;
+    }
+
+    // Nothing to roll: the target is at or above what arrives. Park the
+    // screws on it and stop, rather than opening them until the bite empties.
+    d.agcIdle = this.gaugeIdle;
+    if (d.agcIdle) {
+      d.agcStalled = false;
+      d.agcSettled = true;
+      d.agcSaturated = false;
+      d.agcError = 0;
+      d.agcMeasured = d.exitThickness;
+      return;
+    }
+
+    const force = p.agcMode === 'force';
+    // Measurement, target and a scale to divide both by, so one set of gains
+    // and clamps covers gauge control and load control alike.
+    const meas = force ? d.rollForce : d.exitThickness;
+    const target = force ? p.agcTargetForce : this.agcSetpoint;
+    const scale = force ? Math.max(Math.abs(target), 1e3) : p.h0;
+    // Nothing is rolling yet. Until the bite carries load the exit thickness
+    // is just the gap it was meshed into, so the error reads as zero and the
+    // loop would declare victory before the mill has sprung at all.
+    if (!(meas > 0) || d.rollForce <= 0 || d.contactNodes === 0) return;
+
+    this.agcFilt = this.agcSeen ? this.agcFilt + 0.25 * (meas - this.agcFilt) : meas;
+    this.agcSeen = true;
+    d.agcMeasured = this.agcFilt;
+    const err = (this.agcFilt - target) / scale;
+    d.agcError = err;
+    d.agcSettled = Math.abs(err) < p.agcDeadband;
+
+    if (this.holdGap) {
+      d.agcStalled = true;
+      return;
+    }
+    if (++this.agcTick < Math.max(1, p.agcEvery | 0)) return;
+    this.agcTick = 0;
+
+    // Wait for the stand. The screws and the housing both move the barrel, and
+    // if they revise on the same cadence with the same step they simply cancel
+    // - the loop walks the screw position and the stretch apart forever while
+    // the separation, and therefore the measurement, never moves at all. The
+    // stand is the inner loop: let it reach its own equilibrium first.
+    if (d.millResidual > MILL_SETTLED) return;
+
+    // Same for the free-running speed - but against what that loop can
+    // actually reach. Its residual bottoms out on plant jitter a few times its
+    // own deadband, so holding out for the deadband alone is holding out for
+    // something that will not arrive.
+    if (p.feedSpeed <= 0
+      && d.feedResidual > Math.max(FEED_SETTLED * p.feedDeadband, 2 * d.feedFloor)) {
+      d.agcStalled = true;
+      return;
+    }
+    d.agcStalled = false;
+
+    // Identify the gain from the previous move. The screw travel is in units
+    // of h0 and the measurement in units of `scale`, so the slope comes out
+    // non-dimensional and the sane range for it is known a priori: closing the
+    // gap thins the strip (positive) and raises the load (negative).
+    //
+    // The bounds matter more than they look. The step taken below is err/sens,
+    // so a slope identified near zero asks for an unbounded move - and the
+    // load is *not* a smooth function of the gap at this discretisation,
+    // because the contact set gains and loses whole columns as the barrel
+    // moves. Bounding the slope away from zero is what keeps a staircase in
+    // the plant from throwing the screws across the strip. A move too small to
+    // clear that staircase carries no information either, so it is not used.
+    const gapN = this.gap / p.h0;
+    if (this.agcHavePrev) {
+      const dS = gapN - this.agcPrevGap;
+      const dM = (this.agcFilt - this.agcPrevMeas) / scale;
+      // Not for the fixed-gain method: its whole definition is that it never
+      // learns the plant, which is what makes it the baseline the others are
+      // read against.
+      if (Math.abs(dS) > 1e-3 && p.agcMethod !== 'fixed') {
+        const slope = dM / dS;
+        const sane = force ? slope < -0.4 && slope > -60 : slope > 0.1 && slope < 2;
+        if (sane) {
+          this.agcSens = this.agcSens !== 0
+            ? this.agcSens + 0.4 * (slope - this.agcSens) : slope;
+        }
+      }
+    }
+    /*
+     * The first move, seeded from the stand rather than from a constant.
+     *
+     * The gaugemeter relation dh1/dS = M/(M+Q) wants the mill modulus M and
+     * the slope Q of the plastic curve. Both are already measured here, and
+     * without any material constant: M is the load divided by the spring it
+     * produced, and the secant plastic slope across the pass is the load
+     * divided by the draft it took. The two loads cancel,
+     *
+     *     dh1/dS  ~  (1/spring) / (1/spring + 1/draft)
+     *             =  draft / (draft + spring)
+     *
+     * which on the default cold pass is 0.84 against an identified 0.75. The
+     * constant it replaces was 0.5 - a third low, and a gain guessed low makes
+     * the step err/sens correspondingly too large, which is exactly where the
+     * overshoot on a setpoint change was coming from.
+     *
+     * Load control keeps its constant: dP/dS has no such cancellation, and the
+     * clamps below are what carry it until the secant takes over.
+     */
+    if (this.agcSens === 0) {
+      if (force) {
+        this.agcSens = -2;
+      } else {
+        const draft = Math.max(p.h0 - d.exitThickness, 1e-9);
+        const spring = Math.max(d.millSpring, 1e-12);
+        this.agcSens = Math.max(0.15, Math.min(1, draft / (draft + spring)));
+      }
+    }
+    d.agcSensitivity = p.agcMethod === 'gaugemeter' ? this.analyticSens(force) : this.agcSens;
+
+    if (d.agcSettled) {
+      d.agcSaturated = false;
+      return;
+    }
+
+    /*
+     * The step clamp stays fixed, and deliberately so.
+     *
+     * Opening it once the gain has been identified was tried - the reasoning
+     * being that the clamp exists only to survive a guessed first move, and
+     * that a large setpoint change needs several clamped moves to cover the
+     * travel. Measured, it was worse: 6.3 s to settle against 4.0 s, because
+     * a step sized by the full error overshoots and every overshoot costs a
+     * trim cycle, and a trim cycle here means waiting for the mill-spring and
+     * feed loops all over again.
+     *
+     * The travel is not what a setpoint change should be spending moves on
+     * anyway. `retarget` puts the screws within a trim of the answer in one
+     * jump, which leaves this clamp doing the only job it is good at: keeping
+     * the trimming small.
+     */
+    /*
+     * The move itself, by the selected method.
+     *
+     * The open methods - the identified secant and the fixed-gain fallback -
+     * step from the current position and keep the clamp, because nothing else
+     * stops them. The bracketed family proposes an absolute gap instead: once
+     * the root is trapped, clamping the step would only slow the bracket down
+     * without making anything safer.
+     */
+    let raw: number;
+    if (p.agcMethod === 'newton') {
+      /*
+       * Finite-difference Newton: measure the slope on purpose, then step.
+       *
+       * The secant reuses whatever move happened last, which near convergence
+       * is a move so small that the slope it implies is mostly noise - the
+       * guard `|dS| > 1e-3` exists precisely because of that. Probing on
+       * purpose keeps the difference well conditioned all the way in.
+       *
+       * The probe is a full-size move, not a small one, and aimed at the root
+       * rather than away from it. Both of those are forced by the plant: the
+       * load is a staircase in the gap, because the contact set gains and
+       * loses whole element columns as the barrel moves, and a probe shorter
+       * than one tread measures a slope of zero and asks for an infinite step.
+       * Aiming it at the root means the probe is also progress rather than a
+       * wasted evaluation.
+       */
+      const lim = Math.max(1e-6, p.agcMaxStep);
+      if (this.agcNwPhase === 0) {
+        this.agcNwGap = this.gap;
+        this.agcNwErr = err;
+        this.agcNwPhase = 1;
+        const probe = Math.max(-lim, Math.min(lim, -Math.sign(err / this.agcSens) * lim));
+        raw = this.gap + probe * p.h0;
+      } else {
+        this.agcNwPhase = 0;
+        const dS = (this.gap - this.agcNwGap) / p.h0;
+        const dE = err - this.agcNwErr;
+        // Fall back to the identified sensitivity if the probe landed inside
+        // one tread of the staircase and produced no usable difference.
+        const slope = Math.abs(dS) > 1e-4 && Math.abs(dE) > 1e-9
+          ? dE / (dS * scale) : this.agcSens;
+        const use = Math.abs(slope) > 1e-6 ? slope : this.agcSens;
+        const step = Math.max(-lim, Math.min(lim, -(err / use) * p.agcGain));
+        raw = this.gap + step * p.h0;
+      }
+    } else if (p.agcMethod === 'secant' || p.agcMethod === 'fixed'
+      || p.agcMethod === 'gaugemeter') {
+      const sens = p.agcMethod === 'gaugemeter' ? this.analyticSens(force) : this.agcSens;
+      const lim = Math.max(1e-6, p.agcMaxStep);
+      const step = Math.max(-lim, Math.min(lim, -(err / sens) * p.agcGain));
+      raw = this.gap + step * p.h0;
+    } else {
+      // g increases with the gap whichever quantity is held: opening the
+      // screws lets the strip out thicker, and takes load off.
+      raw = this.nextGap(force ? -err : err);
+    }
+
+    this.agcPrevGap = gapN;
+    this.agcPrevMeas = this.agcFilt;
+    this.agcHavePrev = true;
+
+    // The rails in `setGap` are on the *unloaded* gap, but what has to stay
+    // inside h0 is the loaded thickness: gap plus mill spring. Under load
+    // control with a target below what the stand can make, the loop keeps
+    // opening, and a screw position still short of its rail can already put
+    // the strip through untouched - the bite collapses, the contact set
+    // empties, and there is no measurement left to close the loop on. The
+    // measured spring is the only thing that knows where that point is.
+    const openCap = 0.995 * p.h0 - Math.max(d.millSpring, 0);
+    const want = Math.min(raw, openCap);
+    this.setGap(want);
+    d.gapCommand = this.gap;
+    d.agcSaturated = want < this.gapLo() - 1e-15
+      || want > this.gapHi() + 1e-15
+      || raw > want + 1e-15;
+  }
+
+  /**
+   * Free-running speed control.
+   *
+   * With the entry face prescribed, whatever longitudinal force the mill cannot
+   * supply through friction shows up as a reaction there; a real stand has
+   * nothing to push against, so the feed speed is driven until that reaction
+   * vanishes.
+   *
+   * Near the roll flattening limit this loop is coupled to the flattening loop
+   * and the load is stiff in the feed speed - a tenth of a percent on v moves
+   * the load several percent - so the two hunt against each other. Three things
+   * keep it settled: the reaction is low-passed, the speed is only revised every
+   * few frames so the gap has time to relax in between, and a deadband stops the
+   * controller once the residual is inside its own noise.
+   */
+  private updateFeedSpeed(): void {
+    const R = this.diag.feedReaction;
+    this.reactFilt = this.reactSeen ? this.reactFilt + 0.2 * (R - this.reactFilt) : R;
+    this.reactSeen = true;
+    const ref = Math.max(Math.abs(this.diag.rollForce) * this.params.mu, 1e3);
+    this.diag.feedResidual = Math.abs(this.reactFilt) / ref;
+    this.feedFloor = this.feedFloor > 0
+      ? Math.min(this.diag.feedResidual, this.feedFloor * 1.0005)
+      : this.diag.feedResidual;
+    this.diag.feedFloor = this.feedFloor;
+
+    if (++this.feedTick < Math.max(1, this.params.feedEvery | 0)) return;
+    this.feedTick = 0;
+    if (this.diag.feedResidual < this.params.feedDeadband) return;
+
+    // Fixed proportional, deliberately. An identified-secant version of this
+    // loop was tried and lost: it reached the deadband faster on the easy case
+    // (7 frames against 51) and was slower on every hard one (188 against 89,
+    // 212 against 151, 207 against 98), with a worse steady residual. The
+    // reason is `feedFloor` below - the residual here is dominated by jitter
+    // the controller cannot remove, so a sharper controller only chases noise.
+    const v = this.vIn;
+    const rel = Math.max(-1, Math.min(1, this.reactFilt / ref));
+    const step = Math.max(-0.005, Math.min(0.005, -this.params.feedGain * rel));
+    this.vIn = Math.max(1e-5,
+      Math.min(5 * this.params.omega * this.params.R + 1e-3, v * (1 + step)));
+  }
+
+  /**
+   * Transport the equivalent strain and the temperature along the streamlines.
+   *
+   * The flow is steady and strongly downstream dominated, so a column-by-column
+   * upwind sweep with a back-trace to the previous column is both exact enough
+   * and unconditionally stable - no SUPG needed.
+   *
+   * Temperature rides the same trace because it obeys the same equation: both
+   * are carried by the material and both have a source proportional to the
+   * strain rate. Strain integrates `eps_dot`; temperature integrates the
+   * plastic power `beta * sigma_f * eps_dot / (rho c)`. No conduction term -
+   * see `heatOn` for why the bite is adiabatic - so the two sweep together at
+   * the cost of one.
+   */
+  private transportStrain(): void {
+    const p = this.params;
+    const m = this.flow.mesh;
+    const rows = m.rows;
+    // Heat capacity per unit volume. Guarded: a zero here is a division by
+    // zero straight into the temperature field, and from there into the flow
+    // stress the whole solve stands on.
+    const rc = Math.max(p.rhoStrip * p.cpStrip, 1);
+    const beta = Math.max(0, Math.min(1, p.taylorQuinney));
+
+    // nodal strain rate, area averaged from the Gauss points
+    this.strainRateNode.fill(0);
+    const wsum = this.rateW;
+    wsum.fill(0);
+    for (let e = 0; e < m.ne; e++) {
+      let r = 0;
+      for (let g = 0; g < 4; g++) r += this.flow.epsRate[4 * e + g];
+      r *= 0.25;
+      for (let k = 0; k < 4; k++) {
+        const nd = m.quads[4 * e + k];
+        this.strainRateNode[nd] += r;
+        wsum[nd] += 1;
+      }
+    }
+    for (let i = 0; i < m.nn; i++) if (wsum[i] > 0) this.strainRateNode[i] /= wsum[i];
+
+    // The strip arrives in whatever condition the chain hands over - unworked
+    // and at the line's entry temperature only for the first element.
+    const e0 = Math.max(0, this.entryStrain);
+    const t0 = Number.isFinite(this.entryTemp) ? this.entryTemp : p.tempEntry;
+    for (let j = 0; j < rows; j++) { this.strain[j] = e0; this.temp[j] = t0; }
+    for (let i = 1; i <= m.nx; i++) {
+      const dx = m.xs[i] - m.xs[i - 1];
+      const prevBase = (i - 1) * rows;
+      const prevTop = m.X[2 * (prevBase + m.ny) + 1];
+      for (let j = 0; j < rows; j++) {
+        const nd = i * rows + j;
+        const vx = Math.max(this.flow.v[2 * nd], 1e-6);
+        const dt = dx / vx;
+        const yBack = m.X[2 * nd + 1] - this.flow.v[2 * nd + 1] * dt;
+        // interpolate the upstream column at yBack
+        const f = Math.max(0, Math.min(1, prevTop > 0 ? yBack / prevTop : 0)) * m.ny;
+        const j0 = Math.min(m.ny - 1, Math.floor(f));
+        const fr = f - j0;
+        const e0 = this.strain[prevBase + j0];
+        const e1 = this.strain[prevBase + j0 + 1];
+        const rate = this.strainRateNode[nd];
+        const eps = e0 + fr * (e1 - e0) + rate * dt;
+        this.strain[nd] = eps;
+
+        // Same back-trace, same interpolation: whatever material arrived here
+        // brought its heat with it.
+        const t0 = this.temp[prevBase + j0];
+        const t1 = this.temp[prevBase + j0 + 1];
+        const tUp = t0 + fr * (t1 - t0);
+        // The flow stress doing the work is the one at this particle's own
+        // strain and the temperature it came in with - not the previous
+        // iterate's `sigmaF`, which is a whole Picard step stale.
+        this.temp[nd] = p.heatOn
+          ? tUp + (beta * uniaxial(p, eps, tUp) * rate * dt) / rc
+          : tUp;
+      }
+    }
+
+    for (let i = 0; i < m.nn; i++) {
+      this.sigmaF[i] = uniaxial(p, this.strain[i], this.temp[i]);
+    }
+  }
+
+  /** Static elastic solve of the barrel under the interface tractions. */
+  private solveRoll(): void {
+    const p = this.params;
+    const m = this.flow.mesh;
+    this.rollF.fill(0);
+
+    // interface pressure as a function of x, for interpolation onto the barrel
+    const px: number[] = [], pp: number[] = [], pt: number[] = [];
+    // anchor the traction distribution at the exact bite entry so the roll sees
+    // the same smoothly-moving load the strip does
+    px.push(this.biteEntryX); pp.push(0); pt.push(0);
+    for (let i = this.contactFrom; i <= this.contactTo; i++) {
+      if (m.xs[i] <= this.biteEntryX) continue;
+      px.push(m.xs[i]);
+      pp.push(this.flow.ifPressure[i]);
+      pt.push(this.flow.ifShear[i]);
+    }
+    if (px.length < 2) return;
+    const lerp = (arr: number[], x: number) => {
+      if (x <= px[0] || x >= px[px.length - 1]) return 0;
+      let lo = 0, hi = px.length - 1;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (px[mid] <= x) lo = mid; else hi = mid;
+      }
+      const f = (x - px[lo]) / Math.max(px[hi] - px[lo], 1e-15);
+      return arr[lo] + f * (arr[hi] - arr[lo]);
+    };
+
+    for (let k = 0; k < this.roll.nt; k++) {
+      const nd = this.roll.surfNodes[k];
+      const bx = this.roll.X[2 * nd], by = this.roll.X[2 * nd + 1];
+      if (by > this.cy - p.R * 0.5) continue;
+      const pr = lerp(pp, bx);
+      if (pr <= 0) continue;
+      const tr = lerp(pt, bx);
+      const kp = (k - 1 + this.roll.nt) % this.roll.nt;
+      const kn = (k + 1) % this.roll.nt;
+      const a = this.roll.surfNodes[kp], b = this.roll.surfNodes[kn];
+      const seg = 0.5 * Math.hypot(
+        this.roll.X[2 * b] - this.roll.X[2 * a],
+        this.roll.X[2 * b + 1] - this.roll.X[2 * a + 1]);
+      let nx = bx - this.roll.cx, ny = by - this.cy;
+      const L = Math.hypot(nx, ny) || 1;
+      nx /= L; ny /= L;
+      const tx = -ny, ty = nx;
+      // pressure pushes the barrel inward; the shear the strip feels is
+      // reacted on the barrel with the opposite sign
+      this.rollF[2 * nd] += (-pr * nx - tr * tx) * seg;
+      this.rollF[2 * nd + 1] += (-pr * ny - tr * ty) * seg;
+    }
+
+    pcgFiltered(this.rollPat, this.rollVals, this.rollF, this.rollFree,
+      this.rollU, this.rollWs, 200, 1e-6, true, this.rollPre);
+
+    const r = Math.max(0, Math.min(1, p.rollRelax));
+    for (let i = 0; i < this.rollUrel.length; i++) {
+      this.rollUrel[i] += r * (this.rollU[i] - this.rollUrel[i]);
+    }
+  }
+
+  private collectDiagnostics(inp: FlowInput): void {
+    const p = this.params;
+    const m = this.flow.mesh;
+    const d = this.diag;
+
+    let P = 0, T = 0, peak = 0, arcIn = Infinity, arcOut = -Infinity, count = 0;
+    let neutralX = 0, found = false;
+    let prevSlip = 0, prevX = 0, have = false;
+    for (let i = this.contactFrom; i <= this.contactTo; i++) {
+      if (!this.flow.ifActive[i]) continue;
+      const nd = m.topNodes[i];
+      const x = m.X[2 * nd], y = m.X[2 * nd + 1];
+      let nx = x - this.roll.cx, ny = y - this.cy;
+      const L = Math.hypot(nx, ny) || 1;
+      nx /= L; ny /= L;
+      const iPrev = Math.max(this.contactFrom, i - 1);
+      const iNext = Math.min(this.contactTo, i + 1);
+      const seg = this.contactW[i] * Math.max(
+        (m.X[2 * m.topNodes[iNext]] - m.X[2 * m.topNodes[iPrev]]) / (iNext - iPrev), 1e-9);
+      if (seg <= 0) continue;
+      const pr = this.flow.ifPressure[i];
+      P += pr * seg * -ny;                   // upward force on the barrel
+      T += -this.flow.ifShear[i] * seg * p.R;
+      if (pr > peak) peak = pr;
+      if (x < arcIn) arcIn = x;
+      if (x > arcOut) arcOut = x;
+      count++;
+      const s = this.flow.ifSlip[i];
+      if (have && prevSlip * s < 0) {
+        neutralX = prevX + ((0 - prevSlip) / (s - prevSlip)) * (x - prevX);
+        found = true;
+      }
+      prevSlip = s; prevX = x; have = true;
+    }
+    d.rollForce = P;
+    d.torque = T;
+    d.power = Math.abs(T * p.omega);
+    d.peakPressure = peak;
+    d.contactNodes = count;
+    d.arcIn = count ? arcIn : 0;
+    d.arcOut = count ? arcOut : 0;
+    d.arcLength = count ? arcOut - arcIn : 0;
+    d.meanPressure = d.arcLength > 0 ? P / d.arcLength : 0;
+    d.neutralX = neutralX;
+    d.neutralFound = found;
+
+    // Trapezoidal, like every other through-thickness average in this file:
+    // the two surface nodes each own half a cell. The rectangle rule this used
+    // to be over-weights them by half a cell apiece - a first-order error in
+    // ny, large enough at ny = 8 to stop the mass balance converging under mesh
+    // refinement, and it lands on the forward slip and the neutral point too.
+    const colMean = (i: number) => {
+      let s = 0;
+      for (let j = 0; j < m.rows; j++) {
+        const w = j === 0 || j === m.ny ? 0.5 : 1;
+        s += w * this.flow.v[2 * (i * m.rows + j)];
+      }
+      return s / m.ny;
+    };
+    d.entrySpeed = colMean(0);
+    d.exitSpeed = colMean(m.nx);
+    const vr = p.omega * p.R;
+    d.forwardSlip = vr > 0 ? (d.exitSpeed - vr) / vr : 0;
+    d.backwardSlip = vr > 0 ? (vr - d.entrySpeed) / vr : 0;
+    // Thicknesses first: the balance is v1*h1 / (v0*h0) for *this* frame, and
+    // reading them after the division quietly used the previous frame's mesh.
+    d.entryThickness = 2 * m.X[2 * m.topNodes[0] + 1];
+    d.exitThickness = 2 * m.X[2 * m.topNodes[m.nx] + 1];
+    const fluxIn = d.entrySpeed * d.entryThickness;
+    d.massBalance = fluxIn !== 0 ? (d.exitSpeed * d.exitThickness) / fluxIn : 1;
+    d.exitThicknessGap = 2 * this.gapY[Math.max(0, this.contactTo)];
+
+    // Elastic entry zone.
+    //
+    // The criterion is the material one: a column is still elastic while the
+    // equivalent strain it has accumulated is below the elastic limit
+    // kf / E'. The crossing is interpolated inside the column, because the
+    // zone is often shorter than one - it is only a percent or two of the arc
+    // when the bite is long.
+    {
+      const Ep = p.Estrip / (1 - p.nuStrip * p.nuStrip);
+      const kf = planeStrain(p, d.exitStrain);
+      const epsY = p.elasticZones ? kf / Ep : 0;
+      // Strain accumulated *in this bite*, so a strip that arrives already
+      // work-hardened still gets its elastic run-in: what matters is how far
+      // this stand has worked it, not what the stand upstream did.
+      const colStrain = (i: number) => {
+        let acc = 0;
+        for (let j = 0; j < m.rows; j++) {
+          const w = j === 0 || j === m.ny ? 0.5 : 1;
+          acc += w * this.strain[i * m.rows + j];
+        }
+        return acc / m.ny - this.entryStrain;
+      };
+      let xCross = this.biteEntryX;
+      let prevE = 0, prevX = this.biteEntryX, have = false;
+      for (let i = this.contactFrom; i <= this.contactTo; i++) {
+        if (this.contactW[i] <= 1e-6) continue;
+        const e = colStrain(i);
+        const x = m.xs[i];
+        if (e >= epsY) {
+          xCross = have && e > prevE
+            ? prevX + ((epsY - prevE) / (e - prevE)) * (x - prevX)
+            : x;
+          break;
+        }
+        prevE = e; prevX = x; have = true;
+        xCross = x;
+      }
+      d.elasticEntryLen = Math.max(0, xCross - this.biteEntryX);
+      d.plasticArcLen = Math.max(0, m.xs[this.contactTo] - xCross);
+      // the recovery is applied over this distance downstream of the exit plane
+      d.elasticExitLen = p.elasticZones
+        ? Math.max(d.exitThicknessGap, (this.winOut - this.winIn) / m.nx) : 0;
+      // Geometric estimate: upstream of the bite the strip is flat and the
+      // barrel closes on it at a slope |x_entry| / R, so the elastic
+      // compression h0 * kf / E' is taken up over that much arc. (The textbook
+      // sqrt(R * dh_e) applies to an isolated elastic contact and overstates
+      // the zone whenever the plastic bite is long.)
+      const dhE = p.h0 * kf / Ep;
+      const slope = Math.abs(this.biteEntryX) / Math.max(this.hitchcockRadius(), 1e-9);
+      d.elasticEntryCompression = dhE;
+      d.elasticEntryTheory = slope > 1e-9 ? dhE / slope : 0;
+      d.elasticEntryHertz = Math.sqrt(this.hitchcockRadius() * dhE);
+    }
+
+    // Springback from the stress state the exit-most contact element carries.
+    if (p.elasticZones && this.contactTo > this.contactFrom) {
+      const ee = Math.min(m.nx - 1, Math.max(0, this.contactTo - 1)) * m.ny + (m.ny - 1);
+      const sxx = this.flow.elemStress[4 * ee];
+      const pex = Math.max(this.flow.ifPressure[this.contactTo], 0);
+      const nu = p.nuStrip;
+      // plane strain: eps_yy = (1-nu^2)/E * [sig_yy - nu/(1-nu) sig_xx]
+      const c = (1 - nu * nu) / p.Estrip;
+      const raw = c * (pex - (nu / (1 - nu)) * (p.frontTension - sxx));
+      const target = Math.max(0, Math.min(0.02, raw));
+      this.springbackFilt += 0.1 * (target - this.springbackFilt);
+    } else {
+      this.springbackFilt *= 0.9;
+    }
+    d.springback = this.springbackFilt;
+
+    let se = 0, te = 0, pk = 0, prate = 0, tpk = -Infinity;
+    for (let j = 0; j < m.rows; j++) {
+      const w = j === 0 || j === m.ny ? 0.5 : 1;
+      se += w * this.strain[m.nx * m.rows + j];
+      te += w * this.temp[m.nx * m.rows + j];
+    }
+    d.exitStrain = se / m.ny;
+    d.exitTemp = te / m.ny;
+    d.entryStrain = this.entryStrain;
+    d.entryTemp = this.entryTemp;
+    // What *this* stand added, not what the strip has been through: on a
+    // tandem line the line's entry temperature is several stands back.
+    d.tempRise = d.exitTemp - this.entryTemp;
+    for (let i = 0; i < m.nn; i++) {
+      if (this.strain[i] > pk) pk = this.strain[i];
+      if (this.strainRateNode[i] > prate) prate = this.strainRateNode[i];
+      if (this.temp[i] > tpk) tpk = this.temp[i];
+    }
+    d.peakStrain = pk;
+    d.peakStrainRate = prate;
+    d.peakTemp = Number.isFinite(tpk) ? tpk : p.tempEntry;
+    d.thermalSoftening = 1 - thermalFactor(p, d.exitTemp);
+    // The flow stress the strip actually leaves with, softening included -
+    // this is the line the friction hill draws as `kf`, and it has to be the
+    // one the solve used or the plot disagrees with itself.
+    d.exitFlowStress = uniaxial(p, d.exitStrain, d.exitTemp);
+
+    // Volume weighted mean of the flow stress across the bite: each column
+    // contributes in proportion to the material it carries.
+    {
+      let acc = 0, wsum = 0;
+      for (let i = this.contactFrom; i <= this.contactTo; i++) {
+        if (this.contactW[i] <= 1e-6) continue;
+        const h = m.X[2 * m.topNodes[i] + 1];
+        if (h <= 0) continue;
+        let col = 0;
+        for (let j = 0; j < m.rows; j++) {
+          const w = j === 0 || j === m.ny ? 0.5 : 1;
+          col += w * this.sigmaF[i * m.rows + j];
+        }
+        col /= m.ny;
+        acc += col * h;
+        wsum += h;
+      }
+      d.meanFlowStress = wsum > 0 ? acc / wsum : uniaxial(p, 0);
+      d.meanPlaneStrainStress = (2 / Math.sqrt(3)) * d.meanFlowStress;
+      // Strain-averaged LMN: (1/eps1) INT_0^eps1 kf deps, converted back to
+      // uniaxial. The integral of L(eps+M)^N is closed form, so no quadrature.
+      const e1 = Math.max(d.exitStrain, 0);
+      d.meanFlowStressTheory = (Math.sqrt(3) / 2) * meanPlaneStrainLmn(p, e1);
+      const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
+      const sigMean = (p.backTension + p.frontTension) / 2;
+      d.stoneHMin = C * p.mu * p.R * Math.max(d.meanPlaneStrainStress - sigMean, 0);
+      const Rb = this.hitchcockRadius();
+      const aBite = Math.atan(p.mu);
+      d.biteLimitH1 = p.h0 - 2 * Rb * (1 - Math.cos(aBite));
+      d.biteLimitH1Cont = p.h0 - 2 * Rb * (1 - Math.cos(2 * aBite));
+    }
+
+    d.feedReaction = this.flow.feedReaction();
+
+    // roll flattening at the bite
+    let flat = 0;
+    {
+      let best = Infinity, bnd = 0;
+      for (let k = 0; k < this.roll.nt; k++) {
+        const nd = this.roll.surfNodes[k];
+        const dx = Math.abs(this.roll.X[2 * nd]);
+        if (this.roll.X[2 * nd + 1] < this.cy && dx < best) { best = dx; bnd = nd; }
+      }
+      const rr = Math.hypot(
+        this.roll.X[2 * bnd] + this.rollUrel[2 * bnd] - this.roll.cx,
+        this.roll.X[2 * bnd + 1] + this.rollUrel[2 * bnd + 1] - this.cy);
+      flat = p.R - rr;
+    }
+    d.rollFlattening = flat;
+    {
+      const Rp = this.hitchcockRadius();
+      const hg = d.exitThicknessGap > 0 ? d.exitThicknessGap : this.h1Command;
+      d.neutralAngle = d.neutralFound ? Math.atan2(Math.abs(d.neutralX), Rp) : 0;
+      d.forwardSlipTheory = d.neutralFound && hg > 0
+        ? (d.neutralX * d.neutralX) / (Rp * hg) : 0;
+      d.neutralTheory = d.forwardSlip > 0 ? -Math.sqrt(d.forwardSlip * Rp * hg) : 0;
+    }
+    // Against the *command*, so the number keeps its meaning while the screws
+    // move: 1 means the mill delivered the reduction that was asked for.
+    const want = p.h0 - this.h1Command;
+    d.reductionRatio = want > 0 ? (p.h0 - d.exitThickness) / want : 1;
+    d.gapCommand = this.gap;
+    d.millSpring = d.exitThickness - this.gap;
+    // Remembered for `gaugeIdle`, which has to know what this stand's spring
+    // is while deciding whether the stand should be rolling at all.
+    if (d.contactNodes > 0 && Number.isFinite(d.millSpring) && d.millSpring > 0) {
+      this.springHeld = d.millSpring;
+    }
+    d.gapLimitLo = this.gapLo();
+    d.gapLimitHi = this.gapHi();
+    const dh = Math.max(p.h0 - d.exitThickness, 1e-9);
+    const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
+    d.hitchcockR = p.R * (1 + (C * Math.max(P, 0)) / dh);
+    void inp;
+  }
+
+  /**
+   * Siebel / von Karman slab estimate: the friction hill lifts the mean
+   * pressure above the plane-strain flow stress by a factor set by mu*L/h.
+   */
+  /**
+   * Radius the bite geometry actually presents. With the elastic roll coupled
+   * in, that is the flattened radius, not the ground one - which is the whole
+   * reason a cold mill quotes R'.
+   */
+  private hitchcockRadius(): number {
+    return this.params.rollCoupling
+      ? Math.max(this.diag.hitchcockR, this.params.R)
+      : this.params.R;
+  }
+
+  slabMethod(): { load: number; meanPressure: number; arc: number; torque: number; kf: number } {
+    const p = this.params;
+    const h1 = this.diag.exitThickness > 0 ? this.diag.exitThickness : this.h1Command;
+    const dh = p.h0 - h1;
+    if (dh <= 0) return { load: 0, meanPressure: 0, arc: 0, torque: 0, kf: 0 };
+    const R = this.params.rollCoupling ? this.diag.hitchcockR : p.R;
+    const Lc = Math.sqrt(R * dh);
+    const hm = (p.h0 + h1) / 2;
+    // Strain-averaged kf: the mean deformation resistance the slab method is
+    // written for, and a better statement of the mean than sampling at half the
+    // strain. Closed form for the LMN law, so no quadrature.
+    // Averaged over the strain *this* stand spans, starting from what the
+    // strip arrived with - see `meanPlaneStrainLmnRange`.
+    const e0 = Math.max(this.entryStrain, 0);
+    const eps = e0 + (2 / Math.sqrt(3)) * Math.log(p.h0 / h1);
+    const kf = meanPlaneStrainLmnRange(p, e0, eps);
+    const a = (p.mu * Lc) / hm;
+    const Qp = a > 1e-6 ? (Math.exp(a) - 1) / a : 1;
+    const pm = kf * Qp;
+    return { load: pm * Lc, meanPressure: pm, arc: Lc, torque: pm * Lc * Lc * 0.5, kf };
+  }
+
+  /* ─────────────────────────────────────────────────────────── fields ──── */
+
+  computeField(kind: FieldKind): { min: number; max: number } {
+    const p = this.params;
+    const out = this.nodeField;
+    const m = this.flow.mesh;
+    const off = this.roll.nn;
+
+    // roll block: elastic von Mises from the (relaxed) displacement field
+    const nu = p.nuRoll;
+    const mu = p.Eroll / (2 * (1 + nu));
+    const lam = (p.Eroll * nu) / ((1 + nu) * (1 - 2 * nu));
+    const acc = this.accR, wsum = this.wR;
+    acc.fill(0); wsum.fill(0);
+    let rollPeak = 0;
+    const dN = this.rollElem.dN;
+    for (let e = 0; e < this.roll.ne; e++) {
+      let sxx = 0, syy = 0, sxy = 0;
+      for (let g = 0; g < 4; g++) {
+        const gb = 32 * e + 8 * g;
+        let exx = 0, eyy = 0, gxy = 0;
+        for (let k = 0; k < 4; k++) {
+          const nd = this.roll.quads[4 * e + k];
+          const ux = this.rollUrel[2 * nd], uy = this.rollUrel[2 * nd + 1];
+          const gx = dN[gb + 2 * k], gy = dN[gb + 2 * k + 1];
+          exx += gx * ux; eyy += gy * uy; gxy += gy * ux + gx * uy;
+        }
+        sxx += lam * (exx + eyy) + 2 * mu * exx;
+        syy += lam * (exx + eyy) + 2 * mu * eyy;
+        sxy += mu * gxy;
+      }
+      sxx *= 0.25; syy *= 0.25; sxy *= 0.25;
+      const szz = nu * (sxx + syy);
+      const vm = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * sxy * sxy);
+      if (vm > rollPeak) rollPeak = vm;
+      let val: number;
+      switch (kind) {
+        case 'pressure': val = -(sxx + syy + szz) / 3; break;
+        case 'shear': val = Math.hypot((sxx - syy) / 2, sxy); break;
+        case 'vonMises': val = vm; break;
+        default: val = 0;   // strip quantities, and the displacement fields
+      }                     // which are read straight off the nodes below
+      const w = this.rollElem.area[e];
+      for (let k = 0; k < 4; k++) {
+        const nd = this.roll.quads[4 * e + k];
+        acc[nd] += val * w; wsum[nd] += w;
+      }
+    }
+    this.diag.rollPeakVm = rollPeak;
+    for (let i = 0; i < this.roll.nn; i++) {
+      const dx = this.roll.X[2 * i] - this.roll.cx;
+      const dy = this.roll.X[2 * i + 1] - this.cy;
+      const ux = this.rollUrel[2 * i], uy = this.rollUrel[2 * i + 1];
+      switch (kind) {
+        case 'speed':
+          out[i] = Math.abs(p.omega) * Math.hypot(dx, dy);
+          break;
+        case 'rollDisp':
+          out[i] = Math.hypot(ux, uy);
+          break;
+        case 'rollRadial': {
+          // outward positive, so barrel flattening reads as a negative lobe
+          const r = Math.hypot(dx, dy) || 1;
+          out[i] = (ux * dx + uy * dy) / r;
+          break;
+        }
+        default:
+          out[i] = wsum[i] > 0 ? acc[i] / wsum[i] : 0;
+      }
+    }
+
+    // strip block
+    const sacc = this.accS, swsum = this.wS;
+    sacc.fill(0); swsum.fill(0);
+    if (kind === 'pressure' || kind === 'shear' || kind === 'vonMises') {
+      for (let e = 0; e < m.ne; e++) {
+        const o = 4 * e;
+        const sxx = this.flow.elemStress[o], syy = this.flow.elemStress[o + 1];
+        const sxy = this.flow.elemStress[o + 2], hyd = this.flow.elemStress[o + 3];
+        let val: number;
+        if (kind === 'pressure') val = -hyd;
+        else if (kind === 'shear') val = Math.hypot((sxx - syy) / 2, sxy);
+        else {
+          const szz = hyd;
+          val = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * sxy * sxy);
+        }
+        for (let k = 0; k < 4; k++) {
+          const nd = m.quads[4 * e + k];
+          sacc[nd] += val; swsum[nd] += 1;
+        }
+      }
+    }
+    for (let i = 0; i < m.nn; i++) {
+      let val: number;
+      switch (kind) {
+        case 'strain': val = this.strain[i]; break;
+        case 'strainRate': val = this.strainRateNode[i]; break;
+        case 'flowStress': val = this.sigmaF[i]; break;
+        case 'temperature': val = this.temp[i]; break;
+        case 'speed': val = Math.hypot(this.flow.v[2 * i], this.flow.v[2 * i + 1]); break;
+        // the strip is rigid-plastic: it carries no elastic displacement
+        case 'rollDisp': case 'rollRadial': val = 0; break;
+        default: val = swsum[i] > 0 ? sacc[i] / swsum[i] : 0;
+      }
+      out[off + i] = val;
+    }
+
+    // Range over the body the field actually lives on; the other one is drawn
+    // in plain steel and its zeros would otherwise drag the scale.
+    const rollOnly = kind === 'rollDisp' || kind === 'rollRadial';
+    const stripOnly = kind === 'strain' || kind === 'strainRate'
+      || kind === 'flowStress' || kind === 'speed' || kind === 'temperature';
+    const lo = rollOnly ? 0 : stripOnly ? off : 0;
+    const hi = rollOnly ? this.roll.nn : out.length;
+    let mn = Infinity, mx = -Infinity;
+    for (let i = lo; i < hi; i++) {
+      if (out[i] < mn) mn = out[i];
+      if (out[i] > mx) mx = out[i];
+    }
+    return { min: mn, max: mx };
+  }
+}
+
+/**
+ * Johnson-Cook thermal softening, as a factor on the isothermal flow stress.
+ *
+ *     1 - T*^m,   T* = (T - T_entry) / (T_melt - T_entry)
+ *
+ * The datum is the *entry* temperature rather than room temperature, so the
+ * factor is exactly 1 on the incoming strip whatever it comes in at, and the
+ * mode isolates the softening the pass generates for itself. That makes it an
+ * honest A/B against the isothermal solve, and it means a hot-rolling entry of
+ * 1000 degC does not arrive pre-softened by a number nobody typed.
+ *
+ * Floored well above zero: a rigid-viscoplastic solve with a vanishing flow
+ * stress has no stiffness left and the velocity field stops being defined.
+ */
+export function thermalFactor(p: RollingParams, T: number): number {
+  if (!p.heatOn) return 1;
+  const span = Math.max(p.tempMelt - p.tempEntry, 1);
+  const th = Math.max(0, Math.min(1, (T - p.tempEntry) / span));
+  return Math.max(0.05, 1 - Math.pow(th, Math.max(p.softenExp, 1e-3)));
+}
+
+/**
+ * Plane-strain deformation resistance, kf = L (eps + M)^N [Pa], softened by
+ * the temperature the particle has reached.
+ *
+ * `T` defaults to the entry temperature, i.e. to no softening, so a caller
+ * that has a strain but no temperature to go with it gets the isothermal curve
+ * rather than a wrong one.
+ */
+export function planeStrain(p: RollingParams, eps: number, T = p.tempEntry): number {
+  return p.lmnL * Math.pow(Math.max(eps, 0) + Math.max(p.lmnM, 0), p.lmnN)
+    * thermalFactor(p, T);
+}
+
+/** The same as the uniaxial flow stress the solve carries, sigma_f = kf sqrt(3)/2. */
+export function uniaxial(p: RollingParams, eps: number, T = p.tempEntry): number {
+  return (Math.sqrt(3) / 2) * planeStrain(p, eps, T);
+}
+
+/**
+ * Strain-averaged kf over 0..eps1 - the mean deformation resistance a rolling
+ * load formula wants, since the material enters unworked and only reaches the
+ * exit value at the very end.
+ *
+ *     (1/e1) INT_0^e1 L (e+M)^N de = L [ (e1+M)^(N+1) - M^(N+1) ] / ((N+1) e1)
+ */
+export function meanPlaneStrainLmn(p: RollingParams, eps1: number): number {
+  return meanPlaneStrainLmnRange(p, 0, eps1);
+}
+
+/**
+ * The same average, but over the strain this pass actually spans.
+ *
+ *     (1/(e1-e0)) INT_e0^e1 L (e+M)^N de
+ *       = L [ (e1+M)^(N+1) - (e0+M)^(N+1) ] / ((N+1)(e1-e0))
+ *
+ * The lower limit is the point of it. Averaging from zero says the strip
+ * arrives unworked, which is true only of the first stand: on a tandem line
+ * every stand after it is handed metal that has already been hardened, and
+ * the mean resistance across its bite starts from that value rather than from
+ * the annealed one.
+ *
+ * The error this fixes is not small. Three stands each taking 25 % all span
+ * the same strain increment, so averaging from zero gave all three the same
+ * 740 MPa - while the material they are actually working sits at 813, 1052
+ * and 1188 MPa. Every load formula in the app was reading the second stand's
+ * resistance as if it were the first's.
+ */
+export function meanPlaneStrainLmnRange(
+  p: RollingParams, eps0: number, eps1: number,
+): number {
+  const M = Math.max(p.lmnM, 0);
+  const e0 = Math.max(eps0, 0);
+  const e1 = Math.max(eps1, e0);
+  const n1 = p.lmnN + 1;
+  // Degenerate span: no strain is added here, so the mean is the value at the
+  // point itself rather than a ratio of two vanishing quantities.
+  if (e1 - e0 <= 1e-12) return planeStrain(p, e0);
+  return (p.lmnL * (Math.pow(e1 + M, n1) - Math.pow(e0 + M, n1))) / (n1 * (e1 - e0));
+}
+
+function emptyDiag(): RollingDiagnostics {
+  return {
+    rollForce: 0, torque: 0, power: 0, peakPressure: 0, meanPressure: 0,
+    arcLength: 0, arcIn: 0, arcOut: 0, contactNodes: 0, neutralX: 0,
+    neutralFound: false, entrySpeed: 0, exitSpeed: 0, forwardSlip: 0,
+    backwardSlip: 0, neutralAngle: 0, forwardSlipTheory: 0, neutralTheory: 0,
+    massBalance: 1,
+    entryThickness: 0, exitThickness: 0, exitStrain: 0, peakStrain: 0,
+    exitFlowStress: 0, meanFlowStress: 0, meanPlaneStrainStress: 0,
+    meanFlowStressTheory: 0, peakStrainRate: 0, rollFlattening: 0, hitchcockR: 0,
+    stoneHMin: 0, biteLimitH1: 0, biteLimitH1Cont: 0,
+    rollPeakVm: 0, feedReaction: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
+    couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
+    feedResidual: 0, feedFloor: 0,
+    elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,
+    elasticEntryTheory: 0, elasticEntryHertz: 0,
+    springback: 0, exitThicknessGap: 0, elasticEntryCompression: 0,
+    gapCommand: 0, millSpring: 0, millStretch: 0, millResidual: 0,
+    gapLimitLo: 0, gapLimitHi: 0,
+    agcMeasured: 0, agcError: 0, agcSettled: false,
+    agcSaturated: false, agcStalled: false, agcIdle: false, agcSensitivity: 0,
+    entryStrain: 0, entryTemp: 0,
+    exitTemp: 0, tempRise: 0, peakTemp: 0, thermalSoftening: 0,
+  };
+}
