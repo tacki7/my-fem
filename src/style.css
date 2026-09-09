@@ -611,6 +611,24 @@ body.resizing * { cursor: inherit !important; }
   font: inherit; font-variant-numeric: tabular-nums; text-align: right;
 }
 .num-field:focus { outline: none; border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.10); }
+/* A back-calculated friction. Red because it is the one cell in the table that
+   is not an input any more - it was solved for, from the load two rows up, and
+   it needs to be obvious that typing over it is throwing an answer away. */
+.num-field.mu-inv {
+  border-color: rgba(255, 107, 129, .85);
+  background: rgba(255, 107, 129, .16);
+  color: #ffd6dd; font-weight: 700;
+}
+/* Still red - it is still a back-calculated number - but struck through and
+   dimmed: an input it was derived from has been edited since, so it no longer
+   explains the load in the table. Nothing recomputes on its own here; the
+   cell's job is to stop claiming to be current. */
+.num-field.mu-inv.mu-inv-stale {
+  color: rgba(255, 214, 221, .55);
+  background: rgba(255, 107, 129, .07);
+  border-style: dashed;
+  text-decoration: line-through;
+}
 .num-field::-webkit-inner-spin-button { opacity: .35; }
 
 .stand-grid .sg-select {

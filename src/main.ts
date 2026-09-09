@@ -4,6 +4,10 @@ import {
   type RollingParams, type FieldKind, type AgcMode, type AgcMethod,
 } from './sim/solver';
 import { Mill, MAX_STANDS, type StandSetup, type LineMode } from './sim/mill';
+import {
+  muFromLoad, exitStrain, MU_MIN, MU_MAX,
+  type SlabCase, type MuInverseResult,
+} from './sim/muinv';
 import { MillLineView, type StandView } from './ui/millview';
 import { Renderer, type Camera, type RenderOptions } from './gfx/renderer';
 import { COLORMAP_NAMES, rampGradient } from './gfx/colormap';
@@ -797,9 +801,23 @@ function buildStandGrid(): void {
         : 'ライン入側の張力';
     return f;
   });
+  // Five decimals, and a range that reaches both ends of the back-calculation's
+  // bracket. Three was enough while this was only ever typed in; it is not
+  // enough for a number that comes out of `μ逆算`, because the load the answer
+  // reproduces is only worth as much as the digits it is quoted to - at
+  // d ln P / d ln mu ~ 0.15 a mu rounded to 0.001 is a load moved by 0.2 %,
+  // which is more than the whole residual of the solve.
   const mus = mk((k) => numField({
-    value: standSetups[k].mu, min: 0.01, max: 0.5, step: 0.01, digits: 3,
-    onChange: (v) => { standSetups[k].mu = v; syncStandDials(); },
+    value: standSetups[k].mu, min: MU_MIN, max: MU_MAX, step: 0.005, digits: 5,
+    onChange: (v) => {
+      standSetups[k].mu = v;
+      // Typing over a back-calculated mu takes that stand out of the mode. The
+      // red is a claim about where the number came from, and it no longer came
+      // from there.
+      muInv.delete(k);
+      syncStandDials();
+      paintMuInverse();
+    },
   }));
   const modes = mk((k) => {
     const sel = el('select', 'sg-select') as HTMLSelectElement;
@@ -878,6 +896,10 @@ function buildStandGrid(): void {
       mu: mus[k], rad: rads[k],
     });
   }
+  // The table has just been rebuilt from scratch, so every red cell went with
+  // it - and any stand the rebuild dropped has no cell to come back to.
+  for (const k of [...muInv.keys()]) if (k >= n) muInv.delete(k);
+  paintMuInverse();
   paintStandGridSelection();
 }
 
@@ -959,6 +981,7 @@ function refreshStandGrid(): void {
     c.rad.set(standSetups[k].R * 1000);
     if (document.activeElement !== c.mode) c.mode.value = standSetups[k].agcMode;
   }
+  paintMuInverse();
 }
 
 const sLine = section('ライン構成');
@@ -1030,7 +1053,9 @@ function applyModeWording(): void {
     + (rev
       ? '各パスは入出側のコイラで独立に張られるので、σb と σf は 1 行ずつ別々の入力。'
       : '張力は 1 本の量に 2 つの名前が付いたもので、#1 の後方張力がライン入側の張力、'
-        + '各スタンドの前方張力が次のスタンドの後方張力になる。');
+        + '各スタンドの前方張力が次のスタンドの後方張力になる。')
+    + ' μ が分からないときは、実測荷重を「圧延荷重 目標」に入れて画面上部の「μ逆算」を押す —'
+    + 'スラブ法をその荷重から逆に解いた μ が赤で入る。';
   tAutoSpeed.setEnabled(!rev);
 }
 
@@ -1673,6 +1698,270 @@ left.append(sLine.root, sGeo.root, sProc.root, sAgc.root, sRoll.root,
 
 document.getElementById('common')!.append(sStrip.root, sMat.root, sHeat.root);
 
+/* ── mu back-calculation ─────────────────────────────────────────────────── */
+
+const MU_INV_LABEL = 'μ逆算';
+const MU_INV_LABEL_ON = 'μ逆算 解除';
+const MU_INV_LABEL_STALE = 'μ逆算 再計算';
+const MU_INV_TITLE =
+  '各スタンドの「圧延荷重 目標」を実測荷重とみなして、その荷重になる摩擦係数を'
+  + 'スラブ法から逆に解き、μ 欄に赤で書き込む。\n'
+  + '入力は 荷重・入出側板厚・前後張力・ロール半径・変形抵抗のみ。FEM の現在値は'
+  + '一切使わないので、線が落ち着くのを待つ必要はなく、押した瞬間に答えが出る。\n'
+  + 'もう一度押すと押す前の μ に戻る。逆算のあとで入力を変えると、赤いセルが'
+  + '取り消し線になり、ボタンが「再計算」に変わる。';
+
+/** What one stand's back-calculation replaced, and what it was computed from. */
+interface MuInvEntry {
+  /** the mu that was in the field before, so 解除 can put it back */
+  was: number;
+  /** the answer, at full precision - the field shows it rounded */
+  mu: number;
+  /** the inputs it came from, so a later edit can be spotted as stale */
+  sig: string;
+  /** one line for the tooltip: what the number means */
+  note: string;
+}
+
+/** Stands currently showing a back-calculated mu. Empty means the mode is off. */
+const muInv = new Map<number, MuInvEntry>();
+let muInvBtn: HTMLButtonElement;
+/**
+ * Whether anything the answers were derived from has been edited since.
+ *
+ * Kept as state rather than recomputed at the click, because it is what the
+ * button's own label promises: with a stale cell on screen, the press people
+ * mean is "do it again", not "throw it away and then do it again".
+ */
+let muInvStale = false;
+
+/**
+ * The pass each stand's back-calculation is run on, read straight off the table.
+ *
+ * Entry gauge chains down the line exactly the way `Mill` chains it - stand k
+ * receives what stand k-1 delivers - and so does the work hardening, because a
+ * stand's own resistance is averaged over the strain *it* adds, starting from
+ * what the strip arrived with. Getting that second chain wrong is not a detail:
+ * averaged from zero instead, three stands each taking 25 % all come out at the
+ * same 740 MPa when the metal they are working is at 740, 1006 and 1147.
+ *
+ * The exit gauge is the 出側板厚 目標 cell. When that cell is not a usable exit
+ * for this stand - it is above the entry gauge, which happens when the schedule
+ * has been driven by 圧下率 and the gauge column left behind - the commanded
+ * reduction is used instead and the row says so. Nothing here reads the solver,
+ * which is the point: the answer is a function of the table alone.
+ */
+function muInvCases(): { c: SlabCase; fromReduction: boolean }[] {
+  const out: { c: SlabCase; fromReduction: boolean }[] = [];
+  let h0 = params.h0;
+  let e0 = 0;
+  for (let k = 0; k < standCount; k++) {
+    const s = standSetups[k];
+    let h1 = s.targetGauge;
+    let fromReduction = false;
+    if (!(h1 > 0) || h1 >= h0) { h1 = h0 * (1 - s.reduction); fromReduction = true; }
+    const c: SlabCase = {
+      h0,
+      h1,
+      R: s.R,
+      backTension: getBackTension(k),
+      frontTension: s.frontTension,
+      entryStrain: e0,
+    };
+    out.push({ c, fromReduction });
+    h0 = h1;
+    e0 = exitStrain(c);
+  }
+  return out;
+}
+
+/** Every input the answer depends on, as one string. Only ever compared. */
+function muInvSig(k: number, c: SlabCase): string {
+  return [
+    c.h0, c.h1, c.R, c.backTension, c.frontTension, c.entryStrain,
+    standSetups[k].targetForce,
+    params.lmnL, params.lmnM, params.lmnN,
+    params.Eroll, params.nuRoll, params.rollCoupling ? 1 : 0,
+  ].join(',');
+}
+
+/** A load per unit width as the mill quotes it: total force in tonf. */
+const asTonf = (perWidth: number) => (perWidth * view.stripWidth) / TONF;
+
+/**
+ * Why a stand has no answer, in the words of the cell that has to be fixed.
+ *
+ * The two range messages quote the wall that was hit, not the whole bracket.
+ * The other end of it is often infinite - past a certain friction the roll
+ * flattens faster than the load it is carrying grows, and there is no steady
+ * pass at all - and "1143〜Infinity tonf" is not a sentence anybody can act on.
+ */
+function muInvWhy(r: MuInverseResult, c: SlabCase, target: number): string {
+  const asked = `入力荷重 ${asTonf(target).toFixed(0)} tonf`;
+  switch (r.status) {
+    case 'geometry':
+      return `出側板厚 ${(c.h1 * 1000).toFixed(4)} mm が入側 ${(c.h0 * 1000).toFixed(4)} mm`
+        + ' 以上 — 圧下がないので荷重の式が立たない。「出側板厚 目標」か「圧下率 目標」を直す';
+    case 'tension':
+      return `張力平均 ${(((c.backTension + c.frontTension) / 2) / 1e6).toFixed(0)} MPa が`
+        + ' 変形抵抗 kf 以上 — この張力では板は圧延ではなく引き抜かれる。張力を下げる';
+    case 'runaway':
+      return `μ ${MU_MIN.toFixed(3)} でもロール扁平が発散する`
+        + '（Stone の最小圧延可能板厚を割っている）— 出側板厚を上げるか、'
+        + 'ロール径を小さくするか、張力を上げる';
+    case 'low':
+      return `${asked} は下限 ${asTonf(r.loadAtMin).toFixed(0)} tonf を下回る`
+        + `（μ を ${MU_MIN.toFixed(3)} まで下げても摩擦丘が消えるだけで kf·L は残るので、`
+        + '荷重はそこまでしか下がらない）— 圧下量を減らすか、張力を上げる';
+    case 'high':
+      return `${asked} は上限 ${asTonf(r.loadAtMax).toFixed(0)} tonf を上回る`
+        + `（μ ${MU_MAX.toFixed(3)} でも届かない）— 圧下量を増やすか、張力を下げる`;
+    default:
+      return '';
+  }
+}
+
+/**
+ * Solve every stand's friction from its load, once.
+ *
+ * Once, on the press - not per frame. There is nothing in here that would give
+ * a different answer next frame: it never reads the solver, only the table.
+ */
+function runMuInverse(): void {
+  const cases = muInvCases();
+  const body = el('div', 'toast-body');
+  const head = el('div', 'toast-head');
+  body.append(head);
+  // What each stand held before the mode was *entered*, not before this press.
+  // Solving again after retyping a load is the ordinary thing to do here, and
+  // if every re-run reset the undo point, 解除 would walk back one press at a
+  // time through a series of numbers nobody typed.
+  const prevWas = new Map<number, number>();
+  for (const [k, e] of muInv) prevWas.set(k, e.was);
+  muInv.clear();
+
+  let solved = 0, failed = 0, worst = 0;
+  for (let k = 0; k < standCount; k++) {
+    const { c, fromReduction } = cases[k];
+    const target = standSetups[k].targetForce;
+    const r = muFromLoad(params, c, target);
+    const row = el('div', 'toast-row');
+    row.append(el('span', 'toast-tag', standTag(k)));
+    const text = el('span', 'toast-text');
+    if (r.status === 'ok' && r.point) {
+      solved++;
+      worst = Math.max(worst, Math.abs(r.residual));
+      const gauge = `h ${(c.h0 * 1000).toFixed(4)}→${(c.h1 * 1000).toFixed(4)} mm`
+        + (fromReduction ? '（圧下率から）' : '');
+      // The forward check, in the message and not only in an assertion: this
+      // is the one number that says the answer is the answer.
+      text.textContent =
+        `μ ${r.mu.toFixed(5)} ／ ${gauge} ／ σb ${(c.backTension / 1e6).toFixed(0)}`
+        + ` σf ${(c.frontTension / 1e6).toFixed(0)} MPa ／ R′ ${(r.point.Rflat * 1000).toFixed(1)} mm`
+        + ` ／ kf ${(r.point.kf / 1e6).toFixed(0)} MPa`
+        + ` ／ 順方向照合 ${asTonf(r.point.load).toFixed(1)} tonf`
+        + `（入力 ${asTonf(target).toFixed(1)} tonf, 誤差 ${(r.residual * 100).toExponential(1)} %,`
+        + ` 二分 ${r.iterations} 回）`;
+      muInv.set(k, {
+        was: prevWas.get(k) ?? standSetups[k].mu,
+        mu: r.mu,
+        sig: muInvSig(k, c),
+        note: `圧延荷重 ${asTonf(target).toFixed(1)} tonf から逆算した μ`
+          + `（${gauge}, R′ ${(r.point.Rflat * 1000).toFixed(1)} mm, kf ${(r.point.kf / 1e6).toFixed(0)} MPa,`
+          + ` 順方向照合の誤差 ${(r.residual * 100).toExponential(1)} %）`,
+      });
+      standSetups[k].mu = r.mu;
+      // The plant has moved, so what the gap loop had identified about it is
+      // no longer about this stand. Same reasoning as retyping a load target.
+      mill.stands[k]?.resetAgc();
+    } else {
+      failed++;
+      text.textContent = muInvWhy(r, c, target);
+      // A stand that had an answer and no longer has one must not be left
+      // showing the old one in black: nothing on screen would then say that
+      // the red number people were reading has stopped being derived from
+      // anything. Put back what it had before the mode was entered.
+      if (prevWas.has(k)) {
+        standSetups[k].mu = prevWas.get(k)!;
+        mill.stands[k]?.resetAgc();
+      }
+    }
+    row.append(text);
+    body.append(row);
+  }
+
+  const w = unitWord();
+  head.textContent = failed === 0
+    ? `μ逆算 — ${solved} ${w}を荷重から解いた（順方向照合の最大誤差`
+      + ` ${(worst * 100).toExponential(1)} %）`
+    : solved === 0
+      ? `μ逆算 — 解けなかった（${failed} ${w}）`
+      : `μ逆算 — ${solved} ${w}を解き、${failed} ${w}は解けなかった`;
+  showToast(body, solved === 0, solved === 0 ? 12000 : 14000);
+
+  // `refreshStandGrid` repaints the cells and, at its end, the red.
+  syncStandDials();
+  refreshStandGrid();
+}
+
+/**
+ * Leave the mode.
+ *
+ * `restore` puts back the mu each stand had before, which is what the button
+ * does: the back-calculation is meant to be a question one can ask and unask,
+ * and a mode that cannot be undone is a mode nobody presses twice. A preset
+ * overwriting mu calls this with `false` - the preset's own friction is the
+ * right answer then, and reinstating a stale one over it would be a bug.
+ */
+function clearMuInverse(restore: boolean): void {
+  if (restore) for (const [k, e] of muInv) standSetups[k].mu = e.was;
+  const had = muInv.size > 0;
+  muInv.clear();
+  if (had) {
+    syncStandDials();
+    refreshStandGrid();
+    if (restore) toast('μ を逆算前の値に戻した');
+  } else {
+    paintMuInverse();
+  }
+}
+
+/**
+ * Paint the red, and take it away again when it stops being true.
+ *
+ * The stale check is why this runs on every table edit (`syncStandDials`) and
+ * again on the stats tick, rather than only on the press. A back-calculated mu
+ * is a statement about a particular load and a particular pass; retype the load
+ * and the red number is still sitting there claiming to explain it. Nothing
+ * recomputes on its own - that would put a solve back in the frame loop, which
+ * is exactly what this feature is not - but the cell stops claiming to be
+ * current, and the button says what to press to make it so.
+ */
+function paintMuInverse(): void {
+  const on = muInv.size > 0;
+  const cases = on ? muInvCases() : null;
+  muInvStale = false;
+  for (let k = 0; k < standCells.length; k++) {
+    const f = standCells[k].mu.root;
+    const e = muInv.get(k);
+    const stale = !!e && !!cases && k < cases.length && muInvSig(k, cases[k].c) !== e.sig;
+    if (stale) muInvStale = true;
+    f.classList.toggle('mu-inv', !!e);
+    f.classList.toggle('mu-inv-stale', stale);
+    const want = !e ? ''
+      : stale ? '逆算したあとで入力が変わっている。「μ逆算 再計算」を押すと解き直す' : e.note;
+    if (f.title !== want) f.title = want;
+  }
+  if (!muInvBtn) return;
+  const label = !on ? MU_INV_LABEL : muInvStale ? MU_INV_LABEL_STALE : MU_INV_LABEL_ON;
+  if (muInvBtn.textContent !== label) muInvBtn.textContent = label;
+  muInvBtn.classList.toggle('active', on);
+  const title = !on ? MU_INV_TITLE
+    : muInvStale ? `${MU_INV_TITLE}\n（逆算後に入力が変わっている — 押すと解き直す）`
+      : `${MU_INV_TITLE}\n（いま逆算値を表示中 — 押すと元の μ に戻る）`;
+  if (muInvBtn.title !== title) muInvBtn.title = title;
+}
+
 /* ── topbar ──────────────────────────────────────────────────────────────── */
 
 document.getElementById('topbar-presets')!.append(buttonRow(PRESETS.map((p) => ({
@@ -1695,6 +1984,20 @@ let playBtn: HTMLButtonElement;
   ]);
   document.getElementById('topbar-actions')!.append(row);
   playBtn = row.querySelector('button')!;
+
+  // Not next to 一時停止 and リセット, which are view controls: this one changes
+  // the setup. It is one press and it answers immediately - there is nothing
+  // to wait for, because it never asks the FEM anything.
+  const muRow = buttonRow([{
+    text: MU_INV_LABEL,
+    title: MU_INV_TITLE,
+    onClick: () => {
+      if (muInv.size > 0 && !muInvStale) clearMuInverse(true);
+      else runMuInverse();
+    },
+  }]);
+  document.getElementById('topbar-actions')!.append(muRow);
+  muInvBtn = muRow.querySelector('button')!;
 
   // Whole set-up in, whole set-up out. Everything a run is: the material, the
   // schedule, the mesh, the gains, the view. Not the solution - that is
@@ -1729,7 +2032,14 @@ function toast(text: string, bad = false): void {
   showToast(el('div', 'toast-line', text), bad);
 }
 
-function showToast(body: HTMLElement, bad: boolean): void {
+/**
+ * `ms` for a message that has to be *read* rather than glanced at.
+ *
+ * A save confirmation is one word and three seconds is plenty. A table of
+ * back-calculated frictions with the inputs each came from is not, and it is
+ * gone before it has been finished otherwise.
+ */
+function showToast(body: HTMLElement, bad: boolean, ms = bad ? 9000 : 3200): void {
   const t = el('div', bad ? 'toast bad' : 'toast');
   t.append(body);
   document.body.append(t);
@@ -1738,7 +2048,7 @@ function showToast(body: HTMLElement, bad: boolean): void {
   setTimeout(() => {
     t.classList.remove('in');
     setTimeout(() => t.remove(), 400);
-  }, bad ? 9000 : 3200);
+  }, ms);
 }
 
 const badges = document.getElementById('topbar-badges')!;
@@ -2066,6 +2376,11 @@ function syncStandDials(): void {
   view.agcTargetTonf = (c.targetForce * view.stripWidth) / TONF;
   syncAgcTarget();
   syncRollSpeed();
+  // Every edit in the stand table lands here, and several of them are inputs
+  // to the back-calculation. Repainting on the stats tick alone would leave a
+  // red cell claiming for a sixth of a second to explain a load that has
+  // already been retyped.
+  paintMuInverse();
 }
 
 /** Park the neutral-plane caption over its world position. */
@@ -2170,6 +2485,13 @@ function applyPreset(p: Preset): void {
     if (p.patch.mu !== undefined) st.mu = p.patch.mu;
     if (p.patch.reduction !== undefined) st.reduction = p.patch.reduction;
   }
+  // After the loop above, not before: leaving the mode re-reads the selected
+  // stand's settings into the shared dials, and doing that while the stands
+  // still held the back-calculated friction would put that number back into
+  // `params.mu` - where the theory panel reads it - over the preset's own.
+  // Dropped rather than restored, because the value to keep now is the
+  // preset's, not whatever the table held before the back-calculation.
+  clearMuInverse(false);
   sH0.set(params.h0);
   sY0.set(params.lmnL); sK.set(params.lmnM); sN.set(params.lmnN);
   view.rollSpeedMpm = params.omega * params.R * MPM;
