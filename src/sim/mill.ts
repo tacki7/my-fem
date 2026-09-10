@@ -423,8 +423,17 @@ export class Mill {
       if (q > 0 && Number.isFinite(q)) {
         for (let k = 1; k < n; k++) {
           const st = this.stands[k];
-          const hOut = st.diag.exitThickness > 0
-            ? st.diag.exitThickness : st.params.h0 * (1 - st.params.reduction);
+          // On the gauge the stand is *aiming at*, not the one it is making
+          // this frame. Pitched from the live exit gauge, the cone closed a
+          // loop through the stand itself: h1 up -> ω down -> feed re-balances
+          // -> load and gauge move -> ..., and the last stand of a line hunted
+          // at +-0.25 um for as long as it ran, never inside its band. Under
+          // load control there is no gauge target, so the live gauge is all
+          // there is; there the loop is on the load and the coupling is weak.
+          const mode = st.params.agcMode;
+          const hOut = (mode === 'gauge' || mode === 'ratio') ? st.agcSetpoint
+            : st.diag.exitThickness > 0 ? st.diag.exitThickness
+              : st.params.h0 * (1 - st.params.reduction);
           if (hOut > 0) st.params.omega = q / hOut / Math.max(st.params.R, 1e-9);
         }
       }
@@ -439,7 +448,7 @@ export class Mill {
     let upstreamSteady = true;
     for (let k = 0; k < n; k++) {
       const st = this.stands[k];
-      const want = !upstreamSteady;
+      const want = !upstreamSteady && st.params.lineHold;
       if (want && this.heldFor[k] < HOLD_MAX) {
         st.holdGap = true;
         this.heldFor[k]++;

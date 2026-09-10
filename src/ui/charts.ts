@@ -337,14 +337,42 @@ export class AgcScatterChart {
    * Anything outside is clamped to the edge rather than dropped, and the edge
    * marker says so, so a run off the end of the scale is visible as one.
    */
-  private static readonly X0 = 0.15;
-  private static readonly X1 = 2.0;
+  /**
+   * The gauge axis follows the schedule rather than a constant: from the last
+   * stand's target exit gauge minus a margin up to the line's entry gauge
+   * plus the same margin, set by `setGaugeRange`. Fixed 0.15-2.0 mm put a
+   * 0.25 mm schedule in the left tenth of the plot and a 6 mm one off the end.
+   * The margin is what keeps the trails off the edges while they settle.
+   */
+  private x0 = 0.15;
+  private x1 = 2.0;
   private static readonly R0 = 10;
   private static readonly R1 = 55;
   private static readonly P0 = 600;
   private static readonly P1 = 2400;
 
   constructor(canvas: HTMLCanvasElement) { this.canvas = canvas; }
+
+  /**
+   * Set the gauge axis [mm]. `lo` is the thinnest gauge the line is asked
+   * for, `hi` the gauge it is fed; the axis runs `margin` past each. A range
+   * that would come out inverted or degenerate is widened to a minimum span
+   * around its own centre rather than rejected, so the chart never goes blank
+   * on a half-typed schedule.
+   */
+  setGaugeRange(lo: number, hi: number, margin = 0.2): void {
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+    let a = Math.max(0, lo - margin);
+    let b = hi + margin;
+    const minSpan = 0.05;
+    if (b - a < minSpan) {
+      const c = 0.5 * (a + b);
+      a = Math.max(0, c - minSpan / 2);
+      b = a + minSpan;
+    }
+    this.x0 = a;
+    this.x1 = b;
+  }
 
   draw(trails: AgcTrail[]): void {
     const ctx = fit(this.canvas);
@@ -364,7 +392,8 @@ export class AgcScatterChart {
       return;
     }
 
-    const { X0: x0, X1: x1, R0: r0, R1: r1, P0: p0, P1: p1 } = AgcScatterChart;
+    const { R0: r0, R1: r1, P0: p0, P1: p1 } = AgcScatterChart;
+    const x0 = this.x0, x1 = this.x1;
 
     // Clamped, not clipped: a point off the scale is pinned to the edge and
     // marked there. Dropping it would leave the trail with a silent gap, which
@@ -398,16 +427,37 @@ export class AgcScatterChart {
       ctx.fillText(pv.toFixed(0), w - padR + 5, y + 3);
     }
     ctx.fillStyle = 'rgba(190,206,230,0.55)';
-    // Round gauges rather than even fractions of the span: the scale is fixed,
-    // so the ticks can be the numbers a schedule is actually written in.
-    const XT = [0.15, 0.5, 1.0, 1.5, 2.0];
-    XT.forEach((v, i) => {
+    // The two ends are the schedule's own numbers and are labelled as such;
+    // between them, round gauges at a 1-2-5 pitch chosen for about four
+    // intervals, so the ticks stay numbers a schedule is written in whatever
+    // span the line happens to have.
+    const span = x1 - x0;
+    const rawPitch = span / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawPitch)));
+    const pitch = [1, 2, 5, 10].map((m) => m * mag).find((p) => p >= rawPitch) ?? mag * 10;
+    // Inner ticks keep clear of the two end labels by pixels, not by a
+    // fraction of the pitch: at 2.200 the end label is five characters wide
+    // and a 2.00 tick a few pixels in from it printed as one smeared number.
+    const dp = pitch >= 1 ? 1 : pitch >= 0.1 ? 2 : 3;
+    // The end labels are left/right aligned to their ticks and the inner ones
+    // centred, so an inner tick needs the whole end label plus half its own
+    // clear - measured, not guessed: 34 px was under a five-digit end label
+    // and 1.50 printed straight through 1.701.
+    const endW = Math.max(ctx.measureText(x0.toFixed(3)).width, ctx.measureText(x1.toFixed(3)).width);
+    const innerHalf = ctx.measureText((x0 + pitch).toFixed(dp)).width / 2;
+    const clear = endW + innerHalf + 8;
+    const inner: number[] = [];
+    for (let v = Math.ceil(x0 / pitch) * pitch; v < x1; v += pitch) {
+      if (X(v) - X(x0) > clear && X(x1) - X(v) > clear) inner.push(v);
+    }
+    const XT: [number, boolean][] = [[x0, true], ...inner.map((v): [number, boolean] => [v, false]), [x1, true]];
+    XT.forEach(([v, end], i) => {
       const x = Math.round(X(v)) + 0.5;
-      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.strokeStyle = end ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.05)';
       ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
       // the end labels would hang off the plot if they were centred on the tick
       ctx.textAlign = i === 0 ? 'left' : i === XT.length - 1 ? 'right' : 'center';
-      ctx.fillText(v.toFixed(2), x, h - 6);
+      ctx.fillText(v.toFixed(end ? 3 : dp), x, h - 6);
     });
     ctx.textAlign = 'left';
 
@@ -420,8 +470,14 @@ export class AgcScatterChart {
     // on them; the high-reduction, high-load corner is empty in any schedule
     // this mill can actually run.
     ctx.fillStyle = 'rgba(190,206,230,0.4)';
-    ctx.fillText(many ? `${live.length} 本 / 計 ${total} 点 ／ 横軸 h₁ mm`
-                      : `${total} 点 ／ 横軸 h₁ mm`, padL + 5, padT + 11);
+    const caption = many ? `${live.length} 本 / 計 ${total} 点 ／ 横軸 h₁ mm`
+                         : `${total} 点 ／ 横軸 h₁ mm`;
+    ctx.fillText(caption, padL + 5, padT + 11);
+    // The target labels take the line under the caption. With the axis
+    // fitted to the schedule the whole line of stands can sit under the
+    // caption's width, so sharing its baseline and dodging sideways was not
+    // enough - every label still landed on it.
+    const labelY = padT + 23;
 
     // The quantity each loop is holding, drawn as the line it is aiming at.
     //
@@ -447,17 +503,44 @@ export class AgcScatterChart {
       ctx.fillText('目標 P*', w - padR - 3, Math.max(padT + 9, y - 12));
       ctx.textAlign = 'left';
     }
+    // Gauge-target labels are placed left to right so each can see where the
+    // previous one ended: to the left of its own line by preference (the
+    // trail converges on the line from the right), to the right if the left
+    // is taken or off the plot, and on the next row if both are - two stands
+    // rolling within a label's width of each other is an ordinary schedule.
+    const rowRight = [-Infinity, -Infinity];
+    const gaugeTargets = live
+      .filter((tr) => tr.target!.mode === 'gauge')
+      .map((tr) => ({ tr, x: Math.round(X(tr.target!.h1)) + 0.5 }))
+      .sort((a, b) => a.x - b.x);
+    for (const { tr, x } of gaugeTargets) {
+      ctx.strokeStyle = 'rgba(127,228,255,0.75)';
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+      ctx.fillStyle = 'rgba(127,228,255,0.85)';
+      const label = many ? `${tr.tag} h₁*` : '目標 h₁';
+      const lw = ctx.measureText(label).width;
+      let placed = false;
+      for (let row = 0; row < rowRight.length && !placed; row++) {
+        const y = labelY + row * 12;
+        const leftOk = x - 4 - lw >= Math.max(padL, rowRight[row] + 6);
+        const rightOk = x + 4 >= rowRight[row] + 6 && x + 4 + lw <= w - padR;
+        if (leftOk) {
+          ctx.textAlign = 'right'; ctx.fillText(label, x - 4, y);
+          rowRight[row] = x - 4; placed = true;
+        } else if (rightOk) {
+          ctx.textAlign = 'left'; ctx.fillText(label, x + 4, y);
+          rowRight[row] = x + 4 + lw; placed = true;
+        }
+      }
+      if (!placed) {   // out of rows: right of the line on the last row, overlap and all
+        ctx.textAlign = 'left'; ctx.fillText(label, x + 4, labelY + (rowRight.length - 1) * 12);
+      }
+      ctx.textAlign = 'left';
+    }
     for (const tr of live) {
       const t = tr.target!;
       if (t.mode === 'gauge') {
-        const x = Math.round(X(t.h1)) + 0.5;
-        ctx.strokeStyle = 'rgba(127,228,255,0.75)';
-        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
-        ctx.fillStyle = 'rgba(127,228,255,0.85)';
-        // to the left of its own line, where the trail converging on it is not
-        ctx.textAlign = 'right';
-        ctx.fillText(many ? `${tr.tag} h₁*` : '目標 h₁', x - 4, padT + 10);
-        ctx.textAlign = 'left';
+        // drawn above
       } else if (!oneLoad) {
         let lo = Infinity, hi = -Infinity;
         for (const s of tr.samples) { lo = Math.min(lo, s.h1); hi = Math.max(hi, s.h1); }

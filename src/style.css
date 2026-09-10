@@ -104,11 +104,13 @@ body.resizing * { cursor: inherit !important; }
 /* the handles are positioned against this box */
 #app { position: relative; }
 #topbar   { grid-column: 1 / -1; }
-/* Line-common inputs sit top-left, above the per-stand dials and beside the
-   machine they apply to: one strip, one gauge, one material for the whole line. */
-#common   { grid-column: 1; grid-row: 2; overflow-y: auto; }
 #millline { grid-column: 2 / -1; grid-row: 2; display: flex; flex-direction: column; }
-#left     { grid-column: 1; grid-row: 3 / 5; overflow-y: auto; }
+/* One left column, top bar to bottom edge. It used to be two panels - the
+   line-common inputs above, the rest below - and two scrollable columns of
+   sections in the same 290 px turned every search for a dial into a guess
+   about which one it was in. One column, sections in the order the set-up is
+   thought through: the line, the strip, the material, then the stand. */
+#left     { grid-column: 1; grid-row: 2 / 5; overflow-y: auto; }
 #stage    { grid-column: 2; grid-row: 3; position: relative; }
 #bottom   { grid-column: 2; grid-row: 4; display: flex; flex-direction: row; gap: 12px; }
 #right    { grid-column: 3; grid-row: 3 / 5; overflow-y: auto; }
@@ -611,6 +613,14 @@ body.resizing * { cursor: inherit !important; }
   font: inherit; font-variant-numeric: tabular-nums; text-align: right;
 }
 .num-field:focus { outline: none; border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.10); }
+/* A target the current control mode is not driving to. Dimmed rather than
+   hidden: the number is still live in the row below and still what the other
+   mode would pick up, so it has to stay readable - it just is not an input. */
+.num-field:disabled {
+  opacity: .38; cursor: default;
+  background: transparent; border-style: dashed;
+}
+.num-field:disabled::-webkit-inner-spin-button { display: none; }
 /* A back-calculated friction. Red because it is the one cell in the table that
    is not an input any more - it was solved for, from the load two rows up, and
    it needs to be obvious that typing over it is throwing an answer away. */

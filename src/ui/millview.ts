@@ -21,7 +21,11 @@ export interface StandView {
   /** entry and exit gauge [mm] */
   hIn: number;
   hOut: number;
-  /** commanded exit gauge [mm] - what the reduction command asks for */
+  /**
+   * The exit gauge the stand is asked for [mm]: the absolute target under
+   * gauge control, the reduction converted to a gauge under ratio control or
+   * with the loop off, NaN under load control where there is no gauge target.
+   */
   hOutTarget: number;
   /** reduction actually taken here, 0..1 */
   reduction: number;
@@ -205,13 +209,16 @@ export class MillLineView {
     // The strip itself is the achieved thickness, so wherever the two separate
     // the mill spring is visible as a shape - which is the whole reason gauge
     // control exists. Skipped when they agree to less than the line width.
+    // A stand with no gauge target (load control) draws its outline on the
+    // achieved gauge, so the dashed line simply coincides with the strip there.
+    const tgt = (s: StandView) => (Number.isFinite(s.hOutTarget) ? s.hOutTarget : s.hOut);
     const cmd: [number, number][] = [[xEntry, halfOf(stands[0].hIn)]];
     for (let i = 0; i < n; i++) {
       const x = stationX(i);
       cmd.push([x - slot * 0.16, halfOf(stands[i].hIn)]);
-      cmd.push([x + slot * 0.16, halfOf(stands[i].hOutTarget)]);
+      cmd.push([x + slot * 0.16, halfOf(tgt(stands[i]))]);
     }
-    cmd.push([xExit, halfOf(stands[n - 1].hOutTarget)]);
+    cmd.push([xExit, halfOf(tgt(stands[n - 1]))]);
     const gaugeGap = cmd.some((c, i) => Math.abs(c[1] - pts[i][1]) > 0.75);
     if (gaugeGap) {
       ctx.save();
@@ -261,7 +268,7 @@ export class MillLineView {
       ctx.beginPath();
       ctx.moveTo(4, padT - 7.5); ctx.lineTo(20, padT - 7.5); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillText('指令板厚', 24, padT - 4);
+      ctx.fillText('目標板厚', 24, padT - 4);
     }
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(190,206,230,0.75)';
@@ -301,11 +308,24 @@ export class MillLineView {
         ctx.stroke();
       }
 
-      // exit gauge, on the strip
+      // Exit gauge on the strip: what it is, and above that what it is asked
+      // to be. Two lines, because one number here used to be read as the
+      // target - it was the measurement - and the whole point of a gauge loop
+      // is the gap between the two. The column at x + 0.3 slot is clear of
+      // the barrel and the stand tag, so the only thing that can crowd the
+      // upper line out is the canvas edge itself - not the band height, which
+      // is what the schedule block leaves over and is usually small.
       ctx.textAlign = 'center';
       ctx.font = FONT;
+      const lx = x + slot * 0.30;
+      const ly = yMid - halfOf(s.hOut) - 5;
       ctx.fillStyle = 'rgba(226,238,255,0.9)';
-      ctx.fillText(s.hOut.toFixed(3), x + slot * 0.30, yMid - halfOf(s.hOut) - 5);
+      ctx.fillText(`${s.hOut.toFixed(4)} 実`, lx, ly);
+      if (ly - 12 - 10 >= 0) {
+        ctx.fillStyle = 'rgba(160,190,230,0.7)';
+        ctx.fillText(Number.isFinite(s.hOutTarget)
+          ? `${s.hOutTarget.toFixed(4)} 目標` : '目標なし', lx, ly - 12);
+      }
 
       // stand label
       ctx.font = FONT_B;

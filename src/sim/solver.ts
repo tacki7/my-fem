@@ -23,26 +23,36 @@ import {
 } from './sparse';
 import { BandPreconditioner } from './band';
 import { FlowSolver, type FlowInput } from './flow';
+import type { SlabCase, SlabPoint } from './muinv';
 
-/* Mill-spring loop constants. Not exposed: they are numerics, not process
-   settings, and the one knob a stand actually has is its modulus. */
-/** frames between revisions of the housing stretch */
-const MILL_EVERY = 3;
-/** damping on the Newton step */
-const MILL_GAIN = 0.7;
 /**
- * Largest single move of the barrel, as a fraction of the *current separation*
- * rather than of h0.
+ * The closed slab model, handed in by the app.
  *
- * What the flow solve has to absorb is a change relative to the gap it is
- * solving in, not to the incoming thickness - and once the stand stretches by
- * a good fraction of h0 those two stop being the same number. Scaling this to
- * h0 puts a step of a tenth of the strip's own thickness through the bite on
- * thin gauge, which is what tore the solve apart.
+ * `muinv.ts` imports the flow-stress helpers from this file, so importing it
+ * back would be a cycle; the app owns both and wires them at boot. Null means
+ * the FEM load is the only one there is.
  */
-const MILL_MAX_STEP = 0.05;
+type SlabHook = (p: RollingParams, c: SlabCase, mu: number) => SlabPoint;
+let slabHook: SlabHook | null = null;
+export function setSlabHook(fn: SlabHook): void { slabHook = fn; }
+
+/** Which model the reported rolling load comes from. */
+export type LoadModel = 'fem' | 'slab';
+
 /** the stand counts as settled below this residual, relative to h0 */
 const MILL_SETTLED = 1e-3;
+
+/**
+ * Window and count for `contactToggling`: how many times the bite-entry
+ * column may change inside how many frames before the contact set is
+ * reported as oscillating rather than merely moving.
+ *
+ * The cycle this catches has a period of 15-40 frames at the default mesh,
+ * so four changes inside three seconds is well clear of a loop that moved the
+ * entry once and stayed.
+ */
+const CONTACT_TOGGLE_WINDOW = 180;
+const CONTACT_TOGGLE_MIN = 4;
 /**
  * How far past its own deadband the free-running speed loop may be before the
  * gap loop refuses to act on what it is measuring.
@@ -242,6 +252,41 @@ export interface RollingParams {
   agcDeadband: number;
   /** largest single screw move, as a fraction of h0 */
   agcMaxStep: number;
+  /**
+   * Whether a stand waits for the stands ahead of it to settle before its gap
+   * loop moves. Off by default; see `Mill.advance` for what it was for and
+   * the note on `lineHold` in the app for why it lost.
+   */
+  lineHold: boolean;
+  /**
+   * Where the rolling load comes from.
+   *
+   * `fem` integrates the interface pressure the flow solve produced. `slab`
+   * replaces that one number - and the torque, power, mean pressure and
+   * flattened radius that go with it - by the Siebel / von Karman estimate
+   * with tension and Hitchcock flattening (the model μ逆算 inverts), evaluated
+   * on the gauge the FEM is actually making. Everything downstream of the
+   * load then reads the slab value: load control, the housing stretch, the
+   * stand table, the mill line. The flow solve itself keeps running, because
+   * the slab formula has no way to produce a gauge, a neutral point or a
+   * pressure profile of its own; those stay the FEM's.
+   */
+  loadModel: LoadModel;
+  /**
+   * Whether the gauge loops pay for the mill spring.
+   *
+   * On (the default), 圧下率一定 and 出側板厚一定 drive the *measured* exit
+   * gauge to the target: the screws close past h0(1-r) by however much the
+   * roll flattens, the housing stretches and the strip springs back, and
+   * that takes the loop several seconds of trimming against the inner loops.
+   *
+   * Off, the reduction is taken literally as a screw position: S = h0(1-r)
+   * (or S = the gauge target), set once, and the strip leaves at S plus the
+   * spring. One solve, no loop - the answer a rigid-mill calculation gives -
+   * and the panel reports the spring as the deviation rather than removing
+   * it. Load control is unaffected; a load loop has no gauge to compensate.
+   */
+  agcSpringComp: boolean;
 
   /* mill spring */
   /**
@@ -351,8 +396,11 @@ export const AGC_METHODS: { value: AgcMethod; label: string; note: string }[] = 
 ];
 
 export interface RollingDiagnostics {
-  /** roll separating force per unit width [N/m] */
   rollForce: number;
+  /** the FEM's own load [N/m], kept whichever model is reporting */
+  loadFem: number;
+  /** which model `rollForce` came from this frame */
+  loadModel: LoadModel;
   /** roll torque per unit width [N*m/m] */
   torque: number;
   /** mill power per unit width [W/m] */
@@ -473,6 +521,11 @@ export interface RollingDiagnostics {
   couplingResidual: number;
   /** current adaptive damping factor on rollRelax, 1 = undamped */
   relaxScale: number;
+  /**
+   * The bite-entry column has been switching in and out - see the note in
+   * the bite detection. A discretisation limit cycle, not a control one.
+   */
+  contactToggling: boolean;
   /** |feed reaction| / (mu * rolling load); the free-running convergence measure */
   feedResidual: number;
   /**
@@ -641,8 +694,30 @@ export class RollingSim {
   phase = 0;
   time = 0;
   private vIn = 0;
+  /**
+   * The barrel speed `vIn` was seeded or last rescaled for [rad/s].
+   *
+   * The kinematics of the bite are speed-invariant in a rate-independent
+   * material: double the barrel speed and the balanced entry speed doubles.
+   * So when ω moves - the speed cone re-pitching a downstream stand as the
+   * one ahead converges, or the roll-speed dial - the feed speed is scaled
+   * by the same ratio instead of being left for the feed loop to crawl to.
+   *
+   * Measured before this, on a three-stand line under 圧下率一定: the cone
+   * put #2's barrel 32 % above its seed on the first frame, the feed loop
+   * closed that at 0.5 % per update, and for 16 s the feed reaction sat at
+   * 60 % of μP with the gap loop gated behind it. #3 waited on #2 the same
+   * way. The line looked as if each stand refused to start until the one
+   * ahead had finished; it was the feed loop chasing a barrel speed it could
+   * have been handed.
+   */
+  private vInOmega = 0;
   private contactFrom = 0;
   private contactTo = 0;
+  /** bite-entry column last frame, and the change count over the window */
+  private contactFromPrev = -1;
+  private contactFlips = 0;
+  private contactFlipTick = 0;
   private rollTick = 0;
   /** exit half thickness of the previous frame, for the oscillation detector */
   private lastExitHalf = 0;
@@ -680,22 +755,7 @@ export class RollingSim {
   private gap = 0;
   /** low-passed housing stretch under load [m]; 0 with a rigid stand */
   private stretch = 0;
-  /**
-   * The mill spring last measured while this stand was actually rolling [m].
-   *
-   * Held separately from `diag.millSpring` because a parked stand reports zero
-   * spring - it is not touching the strip - and the test that decides whether
-   * to park reads this. Taking it from the live diagnostics would latch: park
-   * once, spring reads zero, floor rises to h0, and the stand stays parked
-   * however far the target is lowered.
-   */
-  private springHeld = 0;
-  /** mill-spring loop: identified plastic-curve slope and its secant memory */
-  private millQ = 0;
-  private millTick = 0;
-  private millPrevSep = 0;
-  private millPrevP = 0;
-  private millHavePrev = false;
+
   /** loaded barrel separation the mesh is currently built around [m] */
   private placedSep = 0;
   /** gap loop: low-passed measurement, secant memory, multi-rate tick */
@@ -759,7 +819,7 @@ export class RollingSim {
    * commanded h0*(1-r); under gap control it is wherever the loop has driven
    * them, which is *not* the gauge that leaves the mill - see `exitThickness`.
    */
-  get h1(): number { return this.gap; }
+  get h1(): number { return this.screwPosition; }
   /**
    * The gauge the *reduction command* implies [m].
    *
@@ -791,34 +851,53 @@ export class RollingSim {
    * The absolute gauge target asks for no rolling at all.
    *
    * A stand cannot make the strip thicker, so a target at or above the entry
-   * gauge is not a hard pass - it is not a pass. This happens for real on a
-   * tandem line: hold the last stand at 1.5 mm, then back the stands ahead of
-   * it off until they deliver 1.5 mm themselves, and the last stand is being
-   * asked to roll a strip that has already arrived at size.
+   * gauge is not a pass. On a tandem line the entry gauge is the stand in
+   * front's *current* exit, so this happens live: hold the last stand at
+   * 1.5 mm, back the stands ahead of it off until they deliver 1.5 mm
+   * themselves, and the last stand is being asked to roll a strip that has
+   * already arrived at size. The loop's response would be to open the screws
+   * until the bite empties and report the residue of a solve with nothing in
+   * it; better to say the pass is idle and hold the stand - `Mill.advance`
+   * parks it.
    *
-   * The loop's response would be to open the screws until the bite empties,
-   * at which point there is no contact set, no measurement, and the numbers on
-   * screen are the residue of a solve with nothing to solve. Better to say the
-   * pass is idle and hold the stand still - see `Mill.advance`, which parks it.
+   * That is the whole test: the raw target against the live entry gauge.
+   * Two cleverer floors were tried and both were wrong. Entry minus the mill
+   * spring last measured parked every skin pass on the line, because the
+   * spring it subtracted was the heavy pass's, not the light one's. Entry
+   * minus the lightest draft the mesh can resolve (three columns of arc, a
+   * few microns) let targets through that the loop then could not reach -
+   * the real numerical floor is nearer five columns, and it moves with the
+   * mesh, the roll and the gauge. A target below the entry that is too light
+   * to resolve is a *rail* problem, and the gap loop already reports those as
+   * saturated; it is not a reason to park.
    *
-   * The test is against the gauge the stand can actually deliver, not against
-   * the entry gauge. A stand cannot roll to its own entry: the barrel flattens
-   * and the strip springs back, so the thinnest it can make is entry minus
-   * nothing plus a mill spring - i.e. the spring it is already measuring is
-   * the floor. Asking for 1.5 mm from a 1.4998 mm entry is not "almost
-   * possible", it is as impossible as asking for 1.6, and testing against the
-   * entry alone let exactly that case through to chase a target it could never
-   * reach. Include the spring and it is caught.
-   *
-   * A margin on top, because a draft of a fraction of a percent of h0 is
-   * inside the flattening loop's own noise and a stand there is not rolling in
-   * any meaningful sense either.
+   * Raw target, not the clamped setpoint: the setpoint is pulled down to
+   * 0.995 h0, and a 1.6 mm target on a 1.5 mm entry would otherwise turn into
+   * a 0.5 % pass and be rolled.
    */
   get gaugeIdle(): boolean {
     const p = this.params;
     if (p.agcMode !== 'gauge') return false;
-    const floor = Math.min(p.h0 - this.springHeld, 0.999 * p.h0);
-    return this.agcSetpoint >= floor;
+    const want = Number.isFinite(p.agcTargetGauge) ? p.agcTargetGauge : this.h1Command;
+    return want >= this.gaugeFloor;
+  }
+
+  /** The gauge a target must stay below to be a pass [m]: the live entry gauge. */
+  get gaugeFloor(): number { return this.params.h0; }
+
+  /**
+   * The contact set as the flow solve sees it: which columns, how much of
+   * each, where the exact entry sits. Debug only - this is the thing that
+   * toggles when the bite entry crosses a column, and nothing else reports it.
+   */
+  get contactSpan(): { from: number; to: number; xEntry: number; xs: number[]; w: number[]; top: number[] } {
+    const m = this.flow.mesh;
+    const from = this.contactFrom, to = this.contactTo;
+    const xs: number[] = [], w: number[] = [], top: number[] = [];
+    for (let i = Math.max(0, from - 1); i <= Math.min(m.nx, to + 1); i++) {
+      xs.push(m.xs[i]); w.push(this.contactW[i]); top.push(m.X[2 * m.topNodes[i] + 1]);
+    }
+    return { from, to, xEntry: this.biteEntryX, xs, w, top };
   }
   /*
    * Note on `h1Command` below: several nominal-scale estimates - the contact
@@ -984,9 +1063,6 @@ export class RollingSim {
     this.time = 0;
     this.phase = 0;
     this.stretch = 0;
-    this.millQ = 0;
-    this.millTick = 0;
-    this.millHavePrev = false;
     this.releaseGap();
     this.rollU.fill(0);
     this.rollUrel.fill(0);
@@ -996,7 +1072,10 @@ export class RollingSim {
     this.lastGapDelta = 0;
     this.relaxScale = 1;
     this.springbackFilt = 0;
-    this.springHeld = 0;
+    this.contactFromPrev = -1;
+    this.contactFlips = 0;
+    this.contactFlipTick = 0;
+    this.diag.contactToggling = false;
     this.reactFilt = 0;
     this.reactSeen = false;
     this.feedTick = 0;
@@ -1006,6 +1085,7 @@ export class RollingSim {
     this.flow.ifPressure.fill(0);
     this.flow.ifShear.fill(0);
     this.vIn = p.feedSpeed > 0 ? p.feedSpeed : (p.omega * p.R * this.h1Command) / p.h0;
+    this.vInOmega = p.omega;
     this.updateGap();
     for (let i = 0; i < this.sigmaF.length; i++) {
       this.sigmaF[i] = uniaxial(p, this.entryStrain, this.entryTemp);
@@ -1151,6 +1231,40 @@ export class RollingSim {
       }
     }
 
+    /*
+     * Is the entry column toggling?
+     *
+     * The contact set is binary per column, and the barrel that decides it is
+     * relaxed against the load the set produces. Whenever the bite entry sits
+     * on a column boundary that closes a loop: the column enters, the load
+     * rises, the barrel flattens back above h0/2 there, the column leaves.
+     * Measured with every control loop off at 100x8: load 853 <-> 944 tonf,
+     * mass balance 1.004 <-> 1.019, forever. No controller can converge on a
+     * plant doing that, and until now the only visible symptom was a gap loop
+     * reporting itself stalled behind the feed loop - true, and useless. This
+     * names it, so the panel can say what actually helps.
+     *
+     * What helps is moving the entry off the boundary, i.e. a small change of
+     * setpoint. A finer mesh is not a cure: at 200x14 the same 1.5606 mm gap
+     * is quiet (872 tonf +-0.4, 41 columns fixed) and a 1.289 mm gap rings
+     * 1226 <-> 1316 tonf with 49 <-> 50 columns. Refinement moves the
+     * boundaries and lowers the step; it does not remove them. Two attempts
+     * to make the solve itself continuous in the entry point - the friction
+     * traction weighted by coverage, and the constraint normal blended
+     * towards the free surface - were both measured and both rejected: the
+     * first moved the validated forward slip by 16 %, the second fixed this
+     * gap and broke the default pass outright (mass balance 0.89).
+     */
+    if (this.contactFromPrev >= 0 && touching && this.contactFrom !== this.contactFromPrev) {
+      this.contactFlips++;
+    }
+    this.contactFromPrev = touching ? this.contactFrom : -1;
+    if (++this.contactFlipTick >= CONTACT_TOGGLE_WINDOW) {
+      this.diag.contactToggling = this.contactFlips >= CONTACT_TOGGLE_MIN;
+      this.contactFlips = 0;
+      this.contactFlipTick = 0;
+    }
+
     const delta = exitHalf - this.lastExitHalf;
     if (this.lastExitHalf > 0) {
       if (delta * this.lastGapDelta < 0) {
@@ -1183,10 +1297,6 @@ export class RollingSim {
   passThrough(): void {
     const d = this.diag;
     const p = this.params;
-    // Do not disturb `springHeld`. It is what `gaugeIdle` tests against, and
-    // the pass-through below writes millSpring = 0 - so reading the spring
-    // from the live diagnostics would make the idle test true by virtue of
-    // being idle, and the stand could never come back when its target moved.
     d.agcIdle = true;
     d.agcSettled = true;
     d.agcStalled = false;
@@ -1279,6 +1389,8 @@ export class RollingSim {
       this.rollTick = 0;
       this.solveRoll();
     }
+    // Which load the rest of the step believes, before anything reads it.
+    this.applyLoadModel();
     // The stand gives first, then the screws move to answer it, and only then
     // is the strip re-laid into the gap the pair leaves behind.
     this.updateMillStretch();
@@ -1289,10 +1401,46 @@ export class RollingSim {
     if (p.feedSpeed > 0) {
       this.vIn = p.feedSpeed;
     } else {
+      // Feed forward a barrel-speed change before the loop trims the rest.
+      if (this.vInOmega > 0 && p.omega > 0 && p.omega !== this.vInOmega) {
+        this.vIn *= p.omega / this.vInOmega;
+      }
       this.updateFeedSpeed();
     }
+    this.vInOmega = p.omega;
 
     this.lastStepMs = performance.now() - t0;
+  }
+
+  /**
+   * Replace the FEM load by the slab estimate when that is the model selected.
+   *
+   * Runs after the diagnostics and before the stretch, gap and feed loops, so
+   * every consumer of `rollForce` in this step sees the same number. The FEM
+   * value is kept beside it as `loadFem` for the comparison rows.
+   */
+  private applyLoadModel(): void {
+    const p = this.params;
+    const d = this.diag;
+    d.loadFem = d.rollForce;
+    d.loadModel = 'fem';
+    if (p.loadModel !== 'slab' || !slabHook) return;
+    const h1 = d.exitThickness;
+    if (!(h1 > 0) || !(h1 < p.h0) || d.contactNodes === 0) return;
+    const pt = slabHook(p, {
+      h0: p.h0, h1, R: p.R,
+      backTension: p.backTension, frontTension: p.frontTension,
+      entryStrain: this.entryStrain,
+    }, p.mu);
+    if (!Number.isFinite(pt.load) || !(pt.load > 0)) return;
+    d.rollForce = pt.load;
+    d.meanPressure = pt.meanPressure;
+    // Torque and power the way the slab method states them: the mean pressure
+    // acting at the middle of the arc.
+    d.torque = -pt.meanPressure * pt.arc * pt.arc * 0.5;
+    d.power = Math.abs(d.torque * p.omega);
+    d.hitchcockR = pt.Rflat;
+    d.loadModel = 'slab';
   }
 
   /** Forget what the gap loop has learned; its target or its mode has moved. */
@@ -1328,7 +1476,7 @@ export class RollingSim {
     const p = this.params;
     const d = this.diag;
     const draft = Math.max(p.h0 - d.exitThickness, 1e-9);
-    const spring = Math.max(d.millSpring, 1e-12);
+    const spring = Math.max(d.millSpring - d.millStretch, 1e-12);
     if (!force) return Math.max(0.15, Math.min(1, draft / (draft + spring)));
     const scale = Math.max(Math.abs(p.agcTargetForce), 1e3);
     const raw = (d.rollForce * p.h0) / ((draft + spring) * scale);
@@ -1535,8 +1683,10 @@ export class RollingSim {
    * would straddle a jump the plant never made.
    */
   retarget(): void {
-    const spring = Number.isFinite(this.diag.millSpring)
-      ? Math.max(this.diag.millSpring, 0) : 0;
+    // The spring the *loop* has to pay is the flattening and springback; the
+    // housing stretch is under the command already (see `updateMillStretch`).
+    const spring = this.params.agcSpringComp && Number.isFinite(this.diag.millSpring)
+      ? Math.max(this.diag.millSpring - this.diag.millStretch, 0) : 0;
     this.setGap(this.agcSetpoint - spring);
     this.agcTick = 0;
     this.agcHavePrev = false;
@@ -1572,8 +1722,17 @@ export class RollingSim {
    * spring is what opens it back up. With a rigid stand the stretch is zero
    * and the screw bounds collapse onto the separation bounds, as before.
    */
-  private gapLo(): number { return this.sepLo() - this.stretch; }
-  private gapHi(): number { return this.sepHi() - this.stretch; }
+  /**
+   * `gap` is the *loaded* separation the loop commands, net of roll
+   * flattening and springback; the physical screw position is `gap` minus
+   * the housing stretch (see `updateMillStretch`), so the rails on what the
+   * loop may ask for are simply the separation bounds.
+   */
+  private gapLo(): number { return this.sepLo(); }
+  private gapHi(): number { return this.sepHi(); }
+  /** The screw position a stand would read: the command less the housing stretch [m]. */
+  get screwPosition(): number { return this.gap - this.stretch; }
+
 
   /**
    * Move the screws to a new unloaded gap.
@@ -1603,7 +1762,7 @@ export class RollingSim {
    * on screen.
    */
   private placeRoll(): void {
-    const sep = Math.max(this.sepLo(), Math.min(this.sepHi(), this.gap + this.stretch));
+    const sep = Math.max(this.sepLo(), Math.min(this.sepHi(), this.gap));
     const dy = (sep - this.placedSep) / 2;
     if (dy === 0 || !Number.isFinite(dy)) return;
     this.placedSep = sep;
@@ -1635,64 +1794,42 @@ export class RollingSim {
     const p = this.params;
     const d = this.diag;
     if (!p.millSpringOn || !(p.millModulus > 0)) {
-      if (this.stretch !== 0) { this.stretch = 0; this.placeRoll(); }
+      this.stretch = 0;
       d.millStretch = 0;
       d.millResidual = 0;
-      this.millHavePrev = false;
       return;
     }
+    /*
+     * The housing stretch is P/M, and it is taken off the screw position
+     * rather than added to the separation.
+     *
+     * This used to be the other way round: `gap` was the physical screw, the
+     * stretch was relaxed onto P/M by a Newton step and *added* to the
+     * separation, and the gauge loop was left to find the screw position that
+     * paid for it. Measured, the loop never got there. On a 2 mm strip through
+     * a 5 MN/mm stand at 1000 tonf the stretch is 1.93 mm, the stretch loop
+     * opened the barrel at 75 um a frame against the gauge loop's 10, the
+     * pass collapsed to 2.5 % reduction inside half a second, the feed loop
+     * could not settle in that bite and the gauge loop stalled behind it for
+     * good - 22 % off target, from boot or from the switch alike. Feeding the
+     * stretch forward into the physical screw while the loop still commanded
+     * that screw was tried next, and hunted (+-500 tonf): the loop identified
+     * its gain against a screw the feed-forward was moving underneath it.
+     *
+     * So the loop commands the loaded separation, and the screw a real stand
+     * would read is that command less P/M - negative on thin gauge, as it is
+     * on a real mill. Nothing about the flattening or springback changes: the
+     * loop pays for those exactly as before. What the switch adds is the
+     * screw readout, the physical rails, the うち ハウジング伸び row, and the
+     * fact that a load change now moves the screw the operator sees. This is
+     * gaugemeter compensation, and it is the only form in which a stand this
+     * soft converges at all.
+     */
     const P = d.rollForce;
     if (!Number.isFinite(P)) return;
-    d.millResidual = Math.abs(this.stretch - Math.max(P, 0) / p.millModulus) / p.h0;
-
-    // Multi-rate, for the same reason the gap loop is: moving the barrel is a
-    // large perturbation to the flattening loop, and it needs frames to relax
-    // before the load it reports means anything again.
-    if (++this.millTick < MILL_EVERY) { d.millStretch = this.stretch; return; }
-    this.millTick = 0;
-
-    // Newton on the mill equation  sep = S + P(sep)/M.
-    //
-    //   f(sep) = sep - S - P(sep)/M      f'(sep) = 1 + Q/M,   Q = -dP/dsep
-    //
-    // Relaxing straight onto P/M instead is a fixed-point iteration of gain
-    // Q/M, and Q is of the same order as M for a real stand - so that diverges
-    // exactly where the model is most interesting. Dividing by (1 + Q/M)
-    // cannot: the factor is above one for every Q >= 0, so the step is always
-    // a contraction. Q is identified from the last move rather than assumed,
-    // because it is the slope of the plastic curve and depends on everything.
-    const sep = this.gap + this.stretch;
-    if (this.millHavePrev) {
-      const dSep = sep - this.millPrevSep;
-      const dP = P - this.millPrevP;
-      if (Math.abs(dSep) > 1e-9) {
-        const raw = -dP / dSep;                      // Q, positive when rolling
-        if (Number.isFinite(raw) && raw > 0 && raw < 500 * p.millModulus) {
-          this.millQ = this.millQ > 0 ? this.millQ + 0.4 * (raw - this.millQ) : raw;
-        }
-      }
-    }
-    if (!(this.millQ > 0)) this.millQ = p.millModulus;   // first move: Q ~ M
-    this.millPrevSep = sep;
-    this.millPrevP = P;
-    this.millHavePrev = true;
-
-    const residual = this.stretch - Math.max(P, 0) / p.millModulus;
-    const step = -(residual / (1 + this.millQ / p.millModulus)) * MILL_GAIN;
-    const lim = MILL_MAX_STEP * Math.max(this.placedSep, 0.05 * p.h0);
-    // The pair (screw position, stretch) must stay inside the separation
-    // bounds on its own, not get silently clipped when the barrel is placed:
-    // once the two disagree with where the barrel actually is, `millSpring`,
-    // the screw rails and everything the gap loop reads are fiction.
-    const hi = Math.max(0, this.sepHi() - this.gap);
-    const lo = Math.max(0, this.sepLo() - this.gap);
-    const next = Math.max(lo, Math.min(hi,
-      this.stretch + Math.max(-lim, Math.min(lim, step))));
-    if (Number.isFinite(next) && next !== this.stretch) {
-      this.stretch = next;
-      this.placeRoll();
-    }
+    this.stretch = Math.max(P, 0) / p.millModulus;
     d.millStretch = this.stretch;
+    d.millResidual = 0;
   }
 
   /**
@@ -1750,6 +1887,24 @@ export class RollingSim {
     const meas = force ? d.rollForce : d.exitThickness;
     const target = force ? p.agcTargetForce : this.agcSetpoint;
     const scale = force ? Math.max(Math.abs(target), 1e3) : p.h0;
+
+    // Spring compensation off: the target is a screw position, not a gauge.
+    // Park the screws on it and report, without a loop. The deviation shown
+    // is the mill spring itself - the number this switch exists to expose -
+    // so `agcSettled` is the stand having nothing left to do, not the error
+    // being small. The rails still apply: a target under the separation
+    // floor is still reported as ギャップ端に張り付き.
+    if (!force && !p.agcSpringComp) {
+      if (Math.abs(this.gap - target) > 1e-12) this.setGap(target);
+      d.gapCommand = this.screwPosition;
+      d.agcMeasured = meas > 0 ? meas : target;
+      d.agcError = (d.agcMeasured - target) / scale;
+      d.agcSettled = true;
+      d.agcStalled = false;
+      d.agcSaturated = target < this.gapLo() - 1e-15 || target > this.gapHi() + 1e-15;
+      d.agcSensitivity = 0;
+      return;
+    }
     // Nothing is rolling yet. Until the bite carries load the exit thickness
     // is just the gap it was meshed into, so the error reads as zero and the
     // loop would declare victory before the mill has sprung at all.
@@ -1761,6 +1916,13 @@ export class RollingSim {
     const err = (this.agcFilt - target) / scale;
     d.agcError = err;
     d.agcSettled = Math.abs(err) < p.agcDeadband;
+    // A measurement inside the band means no rail is binding, whatever the
+    // last move asked for. Cleared here, ahead of the gates below, because a
+    // stand held by the line or stalled behind the feed loop returns before
+    // the settled branch further down - and its `agcSaturated` from an
+    // earlier rail-limited move then outlived the condition it described.
+    // On screen that read as 収束 and ギャップ端に張り付き at once.
+    if (d.agcSettled) d.agcSaturated = false;
 
     if (this.holdGap) {
       d.agcStalled = true;
@@ -1840,7 +2002,7 @@ export class RollingSim {
         this.agcSens = -2;
       } else {
         const draft = Math.max(p.h0 - d.exitThickness, 1e-9);
-        const spring = Math.max(d.millSpring, 1e-12);
+        const spring = Math.max(d.millSpring - d.millStretch, 1e-12);
         this.agcSens = Math.max(0.15, Math.min(1, draft / (draft + spring)));
       }
     }
@@ -1936,10 +2098,10 @@ export class RollingSim {
     // the strip through untouched - the bite collapses, the contact set
     // empties, and there is no measurement left to close the loop on. The
     // measured spring is the only thing that knows where that point is.
-    const openCap = 0.995 * p.h0 - Math.max(d.millSpring, 0);
+    const openCap = 0.995 * p.h0 - Math.max(d.millSpring - d.millStretch, 0);
     const want = Math.min(raw, openCap);
     this.setGap(want);
-    d.gapCommand = this.gap;
+    d.gapCommand = this.screwPosition;
     d.agcSaturated = want < this.gapLo() - 1e-15
       || want > this.gapHi() + 1e-15
       || raw > want + 1e-15;
@@ -1983,6 +2145,17 @@ export class RollingSim {
     // the controller cannot remove, so a sharper controller only chases noise.
     const v = this.vIn;
     const rel = Math.max(-1, Math.min(1, this.reactFilt / ref));
+    /*
+     * The clamp is fixed, and that was re-measured. Halving it on every
+     * reaction reversal - the flattening coupling's own rule - was tried
+     * against the limit cycle load control falls into when the bite entry
+     * sits on a column boundary. It cut the reversals from 204 to 123 per
+     * 2000 frames and did not settle the loop, because that cycle is not this
+     * loop's (see `contactToggling`); and in ordinary use it cost 2.5x on a
+     * reduction step (10.0 s to 24.8 s), the clamp having shrunk on the
+     * damped reversals of a normal transient and then lagging every screw
+     * move that followed.
+     */
     const step = Math.max(-0.005, Math.min(0.005, -this.params.feedGain * rel));
     this.vIn = Math.max(1e-5,
       Math.min(5 * this.params.omega * this.params.R + 1e-3, v * (1 + step)));
@@ -2362,15 +2535,12 @@ export class RollingSim {
     // move: 1 means the mill delivered the reduction that was asked for.
     const want = p.h0 - this.h1Command;
     d.reductionRatio = want > 0 ? (p.h0 - d.exitThickness) / want : 1;
-    d.gapCommand = this.gap;
-    d.millSpring = d.exitThickness - this.gap;
-    // Remembered for `gaugeIdle`, which has to know what this stand's spring
-    // is while deciding whether the stand should be rolling at all.
-    if (d.contactNodes > 0 && Number.isFinite(d.millSpring) && d.millSpring > 0) {
-      this.springHeld = d.millSpring;
-    }
-    d.gapLimitLo = this.gapLo();
-    d.gapLimitHi = this.gapHi();
+    // Physical readouts: the screw a stand would show, and the spring
+    // measured against it - flattening, springback and housing stretch.
+    d.gapCommand = this.screwPosition;
+    d.millSpring = d.exitThickness - this.screwPosition;
+    d.gapLimitLo = this.gapLo() - this.stretch;
+    d.gapLimitHi = this.gapHi() - this.stretch;
     const dh = Math.max(p.h0 - d.exitThickness, 1e-9);
     const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
     d.hitchcockR = p.R * (1 + (C * Math.max(P, 0)) / dh);
@@ -2620,7 +2790,7 @@ export function meanPlaneStrainLmnRange(
 
 function emptyDiag(): RollingDiagnostics {
   return {
-    rollForce: 0, torque: 0, power: 0, peakPressure: 0, meanPressure: 0,
+    rollForce: 0, loadFem: 0, loadModel: 'fem', torque: 0, power: 0, peakPressure: 0, meanPressure: 0,
     arcLength: 0, arcIn: 0, arcOut: 0, contactNodes: 0, neutralX: 0,
     neutralFound: false, entrySpeed: 0, exitSpeed: 0, forwardSlip: 0,
     backwardSlip: 0, neutralAngle: 0, forwardSlipTheory: 0, neutralTheory: 0,
@@ -2631,7 +2801,7 @@ function emptyDiag(): RollingDiagnostics {
     stoneHMin: 0, biteLimitH1: 0, biteLimitH1Cont: 0,
     rollPeakVm: 0, feedReaction: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
-    feedResidual: 0, feedFloor: 0,
+    feedResidual: 0, feedFloor: 0, contactToggling: false,
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,
     elasticEntryTheory: 0, elasticEntryHertz: 0,
     springback: 0, exitThicknessGap: 0, elasticEntryCompression: 0,

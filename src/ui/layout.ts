@@ -76,10 +76,12 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
   const gutters: Gutter[] = [
     {
       prop: '--col-left', axis: 'x', sign: 1, min: 200, max: 560,
+      // The left column now runs from under the top bar to the bottom edge,
+      // so its handle does too.
       place: (r, n) => {
         n.style.left = px(PAD + sizes['--col-left'] + (GAP - 13) / 2);
-        n.style.top = px(PAD + DEFAULTS['--row-line'] * 0 + 52 + GAP + rowTop() + GAP);
-        n.style.height = px(Math.max(0, r.height - PAD * 2 - 52 - GAP * 2 - rowTop()));
+        n.style.top = px(PAD + 52 + GAP);
+        n.style.height = px(Math.max(0, r.height - PAD * 2 - 52 - GAP));
       },
     },
     {
@@ -92,10 +94,12 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
     },
     {
       prop: '--row-line', axis: 'y', sign: 1, min: 140, max: 900,
+      // Between the mill line and the stage only: the left column is one
+      // panel now and has no boundary at this height.
       place: (r, n) => {
         n.style.top = px(PAD + 52 + GAP + rowTop() + (GAP - 13) / 2);
-        n.style.left = px(PAD);
-        n.style.width = px(Math.max(0, r.width - PAD * 2));
+        n.style.left = px(PAD + sizes['--col-left'] + GAP);
+        n.style.width = px(Math.max(0, r.width - PAD * 2 - sizes['--col-left'] - GAP));
       },
     },
     {
