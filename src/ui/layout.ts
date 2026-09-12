@@ -23,7 +23,9 @@ import { el } from './controls';
 export type Theme = 'classic' | 'modern' | 'chic';
 export const THEMES: Theme[] = ['classic', 'modern', 'chic'];
 
-type Prop = '--col-left' | '--col-right' | '--row-line' | '--row-charts' | '--chart-nip';
+type Prop = '--col-left' | '--col-right' | '--row-line' | '--row-charts' | '--chart-nip' | '--chart-agc';
+/** the properties written as a share of the chart band rather than in pixels */
+const PERCENT: ReadonlySet<Prop> = new Set<Prop>(['--chart-nip', '--chart-agc']);
 
 /** One draggable boundary: which track it sizes, and which way it grows. */
 interface Gutter {
@@ -53,9 +55,9 @@ interface Gutter {
  * first column there.
  */
 const DEFAULTS: Record<Theme, Record<Prop, number>> = {
-  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 510, '--row-charts': 250, '--chart-nip': 50 },
-  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 400, '--row-charts': 260, '--chart-nip': 48 },
-  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 470, '--row-charts': 250, '--chart-nip': 50 },
+  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 510, '--row-charts': 250, '--chart-nip': 50, '--chart-agc': 20 },
+  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 400, '--row-charts': 260, '--chart-nip': 48, '--chart-agc': 20 },
+  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 470, '--row-charts': 250, '--chart-nip': 50, '--chart-agc': 20 },
 };
 
 const GAP = 10;
@@ -100,7 +102,7 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
 
   const apply = (p: Prop, v: number) => {
     sizes[p] = v;
-    app.style.setProperty(p, p === '--chart-nip' ? `${v}%` : px(v));
+    app.style.setProperty(p, PERCENT.has(p) ? `${v}%` : px(v));
   };
   const save = () => {
     try {
@@ -193,6 +195,19 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
         n.hidden = agcChartHidden() || !c || !nip;
         if (n.hidden || !c || !nip) return;
         setBox(n, nip.right + (CHART_GAP - HANDLE) / 2, c.top, HANDLE, c.height);
+      },
+    },
+    {
+      // Between the control trail and the time-series column. Also a share of
+      // the band; only there while both cells are (the trail hides with no
+      // stand under control, the column with nothing to trace).
+      prop: '--chart-agc', axis: 'x', sign: () => 1, min: 8, max: 40, unit: '%',
+      scale: () => bandWidth() / 100,
+      place: (n) => {
+        const c = box('bottom'), agc = box('chart-agc');
+        n.hidden = cellHidden('chart-agc') || cellHidden('chart-track') || !c || !agc;
+        if (n.hidden || !c || !agc) return;
+        setBox(n, agc.right + (CHART_GAP - HANDLE) / 2, c.top, HANDLE, c.height);
       },
     },
   ];

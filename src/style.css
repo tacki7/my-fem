@@ -653,7 +653,10 @@ body.resizing * { cursor: inherit !important; }
    the trail hidden there is nothing to share and the hill takes the band. */
 #chart-nip { flex: 0 0 var(--chart-nip, 50%); }
 #bottom:has(> #chart-agc[hidden]):has(> #chart-track[hidden]) #chart-nip { flex: 1 1 0; }
-#chart-agc { flex: 1 1 0; border-left: 1px solid var(--line); padding-left: 12px; }
+/* The trail's share of the band is the second draggable boundary; with the
+   time-series column hidden there is nothing to share and it takes the rest. */
+#chart-agc { flex: 0 0 var(--chart-agc, 20%); border-left: 1px solid var(--line); padding-left: 12px; }
+#bottom:has(> #chart-track[hidden]) #chart-agc { flex: 1 1 0; }
 /* The tension and gauge traces stack in one column at the right of the band;
    each takes half of it while both are shown, the gauge all of it otherwise. */
 .chart-col { flex: 1.5 1 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0;
