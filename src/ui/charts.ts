@@ -754,7 +754,7 @@ export class AgcScatterChart {
   }
 }
 
-/* ── interstand tension over time ────────────────────────────────────────── */
+/* ── a quantity against its target over time ─────────────────────────────── */
 
 const GAP_COLORS = [
   'rgba(127,228,255,0.95)', 'rgba(255,178,110,0.95)', 'rgba(170,255,150,0.95)',
@@ -762,25 +762,37 @@ const GAP_COLORS = [
   'rgba(255,120,120,0.95)',
 ];
 
+export interface TrackChartOpts {
+  /** axis unit, drawn in the corner */
+  unit: string;
+  /** decimals on the ticks and the end labels */
+  digits: number;
+  /** scale from zero to the peak (a tension) or fit the data (a gauge) */
+  fromZero: boolean;
+}
+
 /**
- * Rolling time chart of each gap's tension: the carried value as a line and
- * the table's target as a dashed one in the same colour. One sample per solved
- * frame; the window is the last `len` samples, so at 60 Hz the default shows
- * the last ten seconds of real time. Autoscaled from zero to the larger of the
- * two, with a little headroom, so a gap sitting on its target reads as two
- * lines on top of each other and one hunting reads as a wave around a rule.
+ * Rolling time chart of several quantities, each against its target: the
+ * live value as a line and the target as a dashed one in the same colour.
+ * One sample per solved frame; the window is the last `len` samples, so at
+ * 60 Hz the default shows the last ten seconds of real time. A series sitting
+ * on its target reads as two lines on top of each other and one hunting reads
+ * as a wave around a rule. Used for the interstand tensions (from zero, MPa)
+ * and the exit gauges (fitted, mm).
  */
-export class TensionChart {
+export class TrackChart {
   private canvas: HTMLCanvasElement;
   private len: number;
+  private opts: TrackChartOpts;
   private head = 0;
   private filled = 0;
   private actual: Float32Array[] = [];
   private target: Float32Array[] = [];
 
-  constructor(canvas: HTMLCanvasElement, len = 600) {
+  constructor(canvas: HTMLCanvasElement, len = 600, opts: TrackChartOpts = { unit: 'MPa', digits: 1, fromZero: true }) {
     this.canvas = canvas;
     this.len = len;
+    this.opts = opts;
   }
 
   /** Forget the history: the line it was drawn for no longer exists. */
@@ -791,7 +803,7 @@ export class TensionChart {
     this.target = [];
   }
 
-  /** one sample per gap, in MPa */
+  /** one sample per series; a NaN target draws no rule for that series */
   push(actual: number[], target: number[]): void {
     const m = actual.length;
     if (this.actual.length !== m) {
@@ -809,46 +821,59 @@ export class TensionChart {
     if (this.filled < this.len) this.filled++;
   }
 
-  draw(tags: string[]): void {
+  draw(tags: string[], emptyText = 'データ待ち'): void {
     const ctx = fit(this.canvas);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
-    const padL = 40, padR = 10, padT = 10, padB = 16;
+    const padL = 12 + 7 * (this.opts.digits + 3), padR = 10, padT = 10, padB = 14;
     ctx.clearRect(0, 0, w, h);
     ctx.font = FONT;
     const m = this.actual.length;
     if (m === 0 || this.filled < 2) {
       ctx.fillStyle = 'rgba(190,206,230,0.4)';
       ctx.textAlign = 'center';
-      ctx.fillText(m === 0 ? '張力モデル OFF のとき時系列は出ない' : 'データ待ち', w / 2, h / 2);
+      ctx.fillText(emptyText, w / 2, h / 2);
       ctx.textAlign = 'left';
       return;
     }
-    let peak = 1;
+    // From zero with headroom, or fitted to the data with a margin - and a
+    // floor on the span, so a flat trace does not blow a micron up into a
+    // wall and read as a fault.
+    let lo = Infinity, hi = -Infinity;
     for (let k = 0; k < m; k++) {
       for (let i = 0; i < this.len; i++) {
-        const a = this.actual[k][i], t = this.target[k][i];
-        if (a > peak) peak = a;
-        if (t > peak) peak = t;
+        for (const v of [this.actual[k][i], this.target[k][i]]) {
+          if (!Number.isFinite(v)) continue;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
       }
     }
-    peak *= 1.15;
+    if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
+    if (this.opts.fromZero) {
+      lo = 0;
+      hi = Math.max(hi, 1) * 1.15;
+    } else {
+      const span = Math.max(hi - lo, Math.abs(hi) * 5e-3, 1e-9);
+      lo -= span * 0.15;
+      hi += span * 0.15;
+    }
     const X = (i: number) => padL + ((w - padL - padR) * i) / (this.len - 1);
-    const Y = (v: number) => h - padB - ((h - padT - padB) * v) / peak;
+    const Y = (v: number) => h - padB - ((h - padT - padB) * (v - lo)) / (hi - lo);
 
     ctx.lineWidth = 1;
     for (let i = 0; i <= 3; i++) {
-      const v = (peak * i) / 3;
+      const v = lo + ((hi - lo) * i) / 3;
       const y = Math.round(Y(v)) + 0.5;
       ctx.strokeStyle = 'rgba(255,255,255,0.06)';
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
       ctx.fillStyle = 'rgba(190,206,230,0.55)';
       ctx.textAlign = 'right';
-      ctx.fillText(v.toFixed(v < 10 ? 1 : 0), padL - 5, y + 3);
+      ctx.fillText(v.toFixed(this.opts.fromZero && v >= 10 ? 0 : this.opts.digits), padL - 5, y + 3);
     }
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(190,206,230,0.4)';
-    ctx.fillText('MPa', 2, padT + 2);
+    ctx.fillText(this.opts.unit, 2, padT + 2);
 
     // Oldest sample at the left. The ring is read from `head` when full and
     // from zero while it is filling, so the trace grows in from the left and
@@ -880,7 +905,8 @@ export class TensionChart {
       if (Number.isFinite(last)) {
         ctx.fillStyle = colour;
         ctx.textAlign = 'right';
-        ctx.fillText(`${tags[k] ?? k + 1} ${last.toFixed(1)}`, w - padR - 2, Math.max(padT + 9, Y(last) - 3));
+        ctx.fillText(`${tags[k] ?? k + 1} ${last.toFixed(this.opts.digits)}`, w - padR - 2,
+          Math.min(h - padB - 2, Math.max(padT + 9, Y(last) - 3)));
         ctx.textAlign = 'left';
       }
     }

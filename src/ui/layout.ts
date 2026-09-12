@@ -53,9 +53,9 @@ interface Gutter {
  * first column there.
  */
 const DEFAULTS: Record<Theme, Record<Prop, number>> = {
-  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 510, '--row-charts': 196, '--chart-nip': 59 },
-  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 400, '--row-charts': 210, '--chart-nip': 55 },
-  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 470, '--row-charts': 196, '--chart-nip': 59 },
+  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 510, '--row-charts': 250, '--chart-nip': 50 },
+  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 400, '--row-charts': 260, '--chart-nip': 48 },
+  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 470, '--row-charts': 250, '--chart-nip': 50 },
 };
 
 const GAP = 10;
@@ -128,7 +128,9 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
     const m = box('millline'), s = box('stage');
     return !m || !s || m.top < s.top;
   };
-  const agcChartHidden = () => (document.getElementById('chart-agc') as HTMLElement | null)?.hidden ?? true;
+  const cellHidden = (id: string) => (document.getElementById(id) as HTMLElement | null)?.hidden ?? true;
+  /** nothing to the right of the hill: the boundary has nothing to move */
+  const agcChartHidden = () => cellHidden('chart-agc') && cellHidden('chart-track');
   const bandWidth = () => Math.max(1, (box('bottom')?.width ?? 1) - CHART_GAP);
   const setBox = (n: HTMLElement, left: number, top: number, w: number, h: number) => {
     n.style.left = px(left); n.style.top = px(top);

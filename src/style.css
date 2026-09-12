@@ -144,7 +144,7 @@ body {
   --col-left: 292px;
   --col-right: 332px;
   --row-line: 510px;
-  --row-charts: 196px;
+  --row-charts: 250px;
   grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   /* topbar / mill line / stage / charts. The line is always visible: it is the
      only view of the whole machine, and it doubles as the stand selector. */
@@ -643,7 +643,7 @@ body.resizing * { cursor: inherit !important; }
 .sw-tau { background: #ffb26e; }
 .sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
 .sw-kf  { background: #96e6b4; }
-#nip, #agcscatter, #tensionchart { flex: 1; width: 100%; min-height: 0; display: block; }
+#nip, #agcscatter, #tensionchart, #gaugechart { flex: 1; width: 100%; min-height: 0; display: block; }
 
 /* Two charts share the bottom row; the scatter only appears under gap control,
    and the friction hill keeps the whole width whenever it is hidden. */
@@ -651,9 +651,15 @@ body.resizing * { cursor: inherit !important; }
 .chart-cell[hidden] { display: none; }
 /* The hill's share of the band is a draggable boundary (see layout.ts); with
    the trail hidden there is nothing to share and the hill takes the band. */
-#chart-nip { flex: 0 0 var(--chart-nip, 59%); }
-#bottom:has(> #chart-agc[hidden]) #chart-nip { flex: 1 1 0; }
+#chart-nip { flex: 0 0 var(--chart-nip, 50%); }
+#bottom:has(> #chart-agc[hidden]):has(> #chart-track[hidden]) #chart-nip { flex: 1 1 0; }
 #chart-agc { flex: 1 1 0; border-left: 1px solid var(--line); padding-left: 12px; }
+/* The tension and gauge traces stack in one column at the right of the band;
+   each takes half of it while both are shown, the gauge all of it otherwise. */
+.chart-col { flex: 1.5 1 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0;
+  border-left: 1px solid var(--line); padding-left: 12px; }
+.chart-col[hidden] { display: none; }
+.chart-col > .chart-cell { flex: 1 1 0; min-height: 0; }
 
 /* ── budget chart ────────────────────────────────────────────────────────── */
 .spark { width: 100%; height: 66px; display: block; border-radius: 7px; overflow: hidden; }

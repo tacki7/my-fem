@@ -69,12 +69,21 @@
       </div>
       <canvas id="agcscatter" title="軌跡の先頭の ΔP/Δh₁ は塑性曲線の勾配: スクリュー改訂ごとの荷重と出側板厚の対から同定（板幅ぶん tonf / µm、薄くすると荷重が増えるので負）。ゲージメータ式 dh₁/dS = M/(M+Q) の Q。"></canvas>
     </div>
-    <div id="chart-tension" class="chart-cell" hidden>
-      <div class="chart-head">
-        <span class="chart-title">スタンド間張力</span>
-        <span class="chart-sub" id="tension-sub">実線 = 実績 σf ／ 破線 = 目標（表の前方張力）／ 直近 600 フレーム</span>
+    <div id="chart-track" class="chart-col">
+      <div id="chart-tension" class="chart-cell" hidden>
+        <div class="chart-head">
+          <span class="chart-title">スタンド間張力</span>
+          <span class="chart-sub" id="tension-sub">実線 = 実績 σf ／ 破線 = 目標（表の前方張力）／ 直近 600 フレーム</span>
+        </div>
+        <canvas id="tensionchart" title="各スタンド間の張力の時系列。実線が動特性モデルの実績、破線が表に入力した目標。制御 ON なら上流スタンドのロール周速を PI で操作して実線を破線に合わせる。"></canvas>
       </div>
-      <canvas id="tensionchart" title="各スタンド間の張力の時系列。実線が動特性モデルの実績、破線が表に入力した目標。制御 ON なら上流スタンドのロール周速を PI で操作して実線を破線に合わせる。"></canvas>
+      <div id="chart-gauge" class="chart-cell">
+        <div class="chart-head">
+          <span class="chart-title">出側板厚</span>
+          <span class="chart-sub">実線 = 実績 h₁ ／ 破線 = 目標（板厚一定は目標値、圧下率一定・制御なしは h₀(1−r)、荷重一定は目標なし）／ 直近 600 フレーム</span>
+        </div>
+        <canvas id="gaugechart" title="各スタンドの出側板厚の時系列。実線が FEM の実測、破線がそのスタンドの狙い。縦軸はデータに合わせて伸縮する（ただし全幅 0.5% 未満には縮めない）。"></canvas>
+      </div>
     </div>
   </footer>
 

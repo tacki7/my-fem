@@ -18,7 +18,7 @@ import { MillLineView, type StandView } from './ui/millview';
 import { Renderer, type Camera, type RenderOptions } from './gfx/renderer';
 import { COLORMAP_NAMES, rampGradient } from './gfx/colormap';
 import {
-  BudgetChart, FrictionHillChart, TensionChart, AgcScatterChart,
+  BudgetChart, FrictionHillChart, TrackChart, AgcScatterChart,
   type HillSample, type AgcSample, type AgcTargets, type AgcTrail,
 } from './ui/charts';
 import {
@@ -662,6 +662,9 @@ function scheduleRebuild(): void {
     buildStandGrid();
     selectStand(view.stand);
     clearAgcTrail();
+    // The traces were of a line that no longer exists.
+    gaugeChart.reset();
+    tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
     // The camera stays where the user put it. Rebuilding is not a reason to
@@ -2912,8 +2915,10 @@ const hill = new FrictionHillChart(document.getElementById('nip') as HTMLCanvasE
 const agcScatter = new AgcScatterChart(
   document.getElementById('agcscatter') as HTMLCanvasElement);
 const agcChartCell = document.getElementById('chart-agc') as HTMLElement;
-const tensionChart = new TensionChart(document.getElementById('tensionchart') as HTMLCanvasElement);
+const tensionChart = new TrackChart(document.getElementById('tensionchart') as HTMLCanvasElement);
 const tensionChartCell = document.getElementById('chart-tension') as HTMLElement;
+const gaugeChart = new TrackChart(document.getElementById('gaugechart') as HTMLCanvasElement, 600,
+  { unit: 'mm', digits: 4, fromZero: false });
 
 /** The chart is only there while a model is on; with it off there is no history to draw. */
 function refreshTensionChart(): void {
@@ -2926,8 +2931,20 @@ function refreshTensionChart(): void {
 /** One sample per solved frame, straight off the line's diagnostics. */
 function pushTensionSample(): void {
   const md = mill.diag;
-  if (md.tensionModel === 'off') return;
-  tensionChart.push(md.tensionActual.map((v) => v / 1e6), md.tensionTarget.map((v) => v / 1e6));
+  if (md.tensionModel !== 'off') {
+    tensionChart.push(md.tensionActual.map((v) => v / 1e6), md.tensionTarget.map((v) => v / 1e6));
+  }
+  // Every stand's exit gauge against what it is aiming at - the same rule the
+  // mill diagram uses for its target, so the two never disagree.
+  const stands = activeStands();
+  gaugeChart.push(
+    stands.map((st) => (st.diag.exitThickness > 0 ? st.diag.exitThickness : NaN) * 1000),
+    stands.map((st, k) => {
+      const c = standSetups[k];
+      return c.agcMode === 'gauge' ? c.targetGauge * 1000
+        : c.agcMode === 'force' ? NaN
+          : st.params.h0 * (1 - c.reduction) * 1000;
+    }));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
@@ -4171,6 +4188,7 @@ function updateStats(): void {
     tensionChart.draw(Array.from({ length: Math.max(0, mill.count - 1) },
       (_, k) => `${standTag(k)}→${standTag(k + 1)}`));
   }
+  gaugeChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
