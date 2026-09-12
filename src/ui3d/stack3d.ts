@@ -189,7 +189,7 @@ export class StackView3D {
   private uLine: Record<string, WebGLUniformLocation | null> = {};
   /** orbit */
   yaw = 0.42;
-  pitch = 0.24;
+  pitch = 0.3;
   dist = 1;
   private target = [0, 0, 0];
   private extent = 1;
@@ -259,7 +259,7 @@ export class StackView3D {
       this.dist = Math.max(0.35, Math.min(6, this.dist * Math.exp(e.deltaY * 0.0015)));
       this.render();
     }, { passive: false });
-    canvas.addEventListener('dblclick', () => { this.yaw = 0.42; this.pitch = 0.24; this.dist = 1; this.render(); });
+    canvas.addEventListener('dblclick', () => { this.yaw = 0.42; this.pitch = 0.3; this.dist = 1; this.render(); });
   }
 
   /** rebuild the geometry from a solution and draw it */
@@ -400,7 +400,7 @@ export class StackView3D {
       hm = n ? hm / n : 0;
       const xs: number[] = [];
       for (let s = 0; s < R.x.length; s++) if (Number.isFinite(R.h1[s])) xs.push(s);
-      const zl = Math.max(zext, top) * 1.7;
+      const zl = Math.max(zext, top) * (o.mirror ? 1.7 : 1.15);
       if (xs.length > 1) {
         // a wave of wavelength λ and amplitude A carries an elongation (πA/λ)²
         const lambda = 0.55 * zl;
@@ -465,7 +465,7 @@ export class StackView3D {
     // a floor grid under the mill, for depth
     const lines: number[] = [];
     {
-      const yf = -(o.mirror ? top : wr0(rolls, stack).D / 2) - 0.06 * top - 0.05;
+      const yf = -(o.mirror ? top : 0.12 * top) - 0.05;
       const ext = Math.max(xext, zext, top) * 1.6;
       const step = ext / 8;
       for (let i = -8; i <= 8; i++) {
@@ -494,8 +494,8 @@ export class StackView3D {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
     this.lineCount = lines.length / 3;
-    this.target = [0, o.mirror ? 0 : top / 2, 0];
-    this.extent = Math.max(xext, top * (o.mirror ? 2 : 1.2), zext * 1.5);
+    this.target = [0, o.mirror ? 0 : top * 0.4, 0];
+    this.extent = Math.max(xext * 1.1, top * (o.mirror ? 2 : 2.2), zext * 1.8);
     this.render();
   }
 
@@ -578,4 +578,3 @@ export class StackView3D {
   }
 }
 
-function wr0(rolls: Result3D['rolls'], stack: Stack) { return rolls[stack.wr].def; }

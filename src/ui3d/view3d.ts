@@ -84,7 +84,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     return { root: c, canvas };
   };
 
-  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 下半分は上半分の鏡像 ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
+  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分（モデル化した範囲） ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
   // the stack is drawn either in 3D (WebGL, the default) or as the flat
   // front view; the cell holds both canvases and a label layer for the 3D one
   const stage = el('div', 'v3-stage');
@@ -409,7 +409,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     if (frontMode === '3d' && stack3d) {
       const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
       stack3d.draw(R, st, {
-        magnify, width: params.width, mirror: true,
+        magnify, width: params.width, mirror: false,
         labels: R.rolls.map((r) => `${r.def.id}\n撓み ${um(r.bow)} 扁平 ${um(r.flatMax)}`),
       });
     } else frontView.draw(R, st, { magnify, width: params.width });
