@@ -79,6 +79,10 @@ export interface Stack {
   type: MillType;
   rolls: RollDef[];
   contacts: ContactDef[];
+  /** the first-intermediate angle actually used [rad] (the asked-for one, or the least that clears the pair) */
+  angle1: number;
+  /** what is wrong with the layout, if anything: a designated contact that is not tangent, or two rolls that meet without a contact */
+  issues: string[];
   /** index of the work roll */
   wr: number;
   /** rolls whose supports the screw moves */
@@ -130,8 +134,10 @@ export interface Params3D {
   /** 20Hi first intermediate taper: start relative to the strip edge [m] (+ outside), length and depth */
   taperShift: number; taperLen: number; taperDepth: number;
   asu: number[];
-  /** cluster layout angles [rad] */
+  /** cluster layout: first-intermediate angle from vertical [rad] - raised to the least that keeps the pair apart */
   angle1: number;
+  /** the gap kept between rolls that sit side by side in a cluster [m] */
+  clearance: number;
   /** roll material */
   Eroll: number;
   nuRoll: number;
@@ -169,6 +175,7 @@ export function defaultParams(mill: MillType): Params3D {
     taperShift: 0, taperLen: 0.3, taperDepth: 0.4e-3,
     asu: new Array(ASU_RACKS).fill(0),
     angle1: (24 * Math.PI) / 180,
+    clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
     stations: 81,
     flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
@@ -183,7 +190,7 @@ export function defaultParams(mill: MillType): Params3D {
         ...base, wrD: 0.1, wrLb: 1.4, wrLs: 1.5, wrDn: 0.08,
         irD: 0.18, irLb: 1.45, irLs: 1.55, irDn: 0.14,
         bbD: 0.3, bbShaft: 0.17, bbLb: 1.5,
-        h0: 0.001, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (30 * Math.PI) / 180,
+        h0: 0.001, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (41 * Math.PI) / 180,
       };
     case '20hi':
       return {
@@ -191,7 +198,7 @@ export function defaultParams(mill: MillType): Params3D {
         irD: 0.11, irLb: 1.45, irLs: 1.55, irDn: 0.09,
         ir2D: 0.175, ir2Lb: 1.45,
         bbD: 0.3, bbShaft: 0.16, bbLb: 1.5,
-        h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (22 * Math.PI) / 180,
+        h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (40 * Math.PI) / 180,
       };
     default:
       return base;
@@ -236,6 +243,7 @@ export function buildStack(p: Params3D): Stack {
   const Rw = p.wrD / 2;
   const rolls: RollDef[] = [];
   const contacts: ContactDef[] = [];
+  let angle1 = p.angle1;
   const touch = (a: number, b: number) => {
     const dy = rolls[b].cy - rolls[a].cy, dz = rolls[b].cz - rolls[a].cz;
     const d = Math.hypot(dy, dz) || 1;
@@ -287,14 +295,17 @@ export function buildStack(p: Params3D): Stack {
     }
     case '12hi': {
       const R1 = p.irD / 2, Rb = p.bbD / 2;
-      const c1L = tangentAt([0, 0], Rw, R1, -p.angle1);
-      const c1R = tangentAt([0, 0], Rw, R1, p.angle1);
+      // the two intermediates must not meet: 2 (Rw + R1) sin α ≥ 2 R1 + clearance
+      angle1 = Math.max(p.angle1, Math.asin(Math.min(1, (R1 + p.clearance / 2) / (Rw + R1))));
+      const c1L = tangentAt([0, 0], Rw, R1, -angle1);
+      const c1R = tangentAt([0, 0], Rw, R1, angle1);
       const irL = roll({ id: 'IR-L', label: '中間ロール (L)', D: p.irD, Dn: p.irDn, Lb: p.irLb, Ls: p.irLs, cy: c1L[0], cz: c1L[1], crown: p.irCrown });
       const irR = roll({ id: 'IR-R', label: '中間ロール (R)', D: p.irD, Dn: p.irDn, Lb: p.irLb, Ls: p.irLs, cy: c1R[0], cz: c1R[1], crown: p.irCrown });
       rolls.push(irL, irR);
       const cB = tangentTwo(c1L, R1, c1R, R1, Rb, 1);
-      // A on the outer side of the line from the left intermediate up to B
-      const cA = tangentTwo(c1L, R1, cB, Rb, Rb, 1);
+      // A touches the left intermediate and clears B by the clearance (B's
+      // radius grown by it for the construction), on the outer side
+      const cA = tangentTwo(c1L, R1, cB, Rb + p.clearance, Rb, 1);
       const cC: Pt = [cA[0], -cA[1]];
       const bb = (id: string, label: string, c: Pt, asu?: number[]) => roll({
         id, label, D: p.bbD, Dn: p.bbShaft, Lb: p.bbLb, Ls: p.bbLb, cy: c[0], cz: c[1],
@@ -308,8 +319,9 @@ export function buildStack(p: Params3D): Stack {
     }
     case '20hi': {
       const R1 = p.irD / 2, R2 = p.ir2D / 2, Rb = p.bbD / 2;
-      const c1L = tangentAt([0, 0], Rw, R1, -p.angle1);
-      const c1R = tangentAt([0, 0], Rw, R1, p.angle1);
+      angle1 = Math.max(p.angle1, Math.asin(Math.min(1, (R1 + p.clearance / 2) / (Rw + R1))));
+      const c1L = tangentAt([0, 0], Rw, R1, -angle1);
+      const c1R = tangentAt([0, 0], Rw, R1, angle1);
       // The tapered end of each first intermediate faces one edge of the
       // strip; the taper starts `taperShift` outside that edge.
       const taperFor = (side: 1 | -1) => ({
@@ -319,15 +331,36 @@ export function buildStack(p: Params3D): Stack {
       const irR = roll({ id: 'IR1-R', label: '第1中間 (R)', D: p.irD, Dn: p.irDn, Lb: p.irLb, Ls: p.irLs, cy: c1R[0], cz: c1R[1], crown: p.irCrown, taper: taperFor(-1) });
       rolls.push(irL, irR);
       const c2B = tangentTwo(c1L, R1, c1R, R1, R2, 1);
-      // outer second intermediates: touching a first intermediate, packed against the centre one
-      const c2A = tangentTwo(c1L, R1, c2B, R2, R2 * 1.02, 1);
+      // Outer second intermediates: touching their first intermediate, and
+      // spread from the centre one by at least the clearance - but further
+      // if that is what it takes for the two centre backing bearings (each
+      // tangent to the centre second intermediate and one outer one) to
+      // clear each other. Their spacing grows with the spread, so a
+      // bisection on the spread finds the least that works.
+      const placeA = (spread: number): Pt => tangentTwo(c1L, R1, c2B, R2 + spread, R2, 1);
+      const bbGap = (spread: number): number => {
+        const a = placeA(spread);
+        const b = tangentTwo(a, R2, c2B, R2, Rb, 1);
+        return 2 * Math.abs(b[1]) - 2 * Rb;
+      };
+      let spread = p.clearance;
+      if (bbGap(spread) < p.clearance) {
+        let lo = spread, hi = R2 * 4;
+        for (let i = 0; i < 60; i++) {
+          const mid = 0.5 * (lo + hi);
+          if (bbGap(mid) < p.clearance) lo = mid; else hi = mid;
+        }
+        spread = hi;
+      }
+      const c2A = placeA(spread);
       const c2C: Pt = [c2A[0], -c2A[1]];
       const ir2 = (id: string, label: string, c: Pt) => roll({
         id, label, D: p.ir2D, Dn: p.ir2D * 0.8, Lb: p.ir2Lb, Ls: p.ir2Lb + 0.1, cy: c[0], cz: c[1],
       });
       rolls.push(ir2('IR2-A', '第2中間 A', c2A), ir2('IR2-B', '第2中間 B', c2B), ir2('IR2-C', '第2中間 C', c2C));
       const cB = tangentTwo(c2A, R2, c2B, R2, Rb, 1);
-      const cA = tangentTwo(c2A, R2, cB, Rb, Rb, 1);
+      // A touches the outer second intermediate and clears B
+      const cA = tangentTwo(c2A, R2, cB, Rb + p.clearance, Rb, 1);
       const cC: Pt = [cB[0], -cB[1]];
       const cD: Pt = [cA[0], -cA[1]];
       const bb = (id: string, label: string, c: Pt, asu?: number[]) => roll({
@@ -345,7 +378,34 @@ export function buildStack(p: Params3D): Stack {
       break;
     }
   }
-  return { type: p.mill, rolls, contacts, wr: 0, screwRolls };
+  return { type: p.mill, rolls, contacts, wr: 0, screwRolls, angle1, issues: layoutIssues(rolls, contacts, p.clearance) };
+}
+
+/**
+ * Every pair of rolls, checked against what the stack claims: a designated
+ * contact has to be tangent (its two circles meet), and any other pair has
+ * to keep the clearance - two rolls that meet without a contact between
+ * them would be pushing on each other with nothing in the model to say so.
+ */
+export function layoutIssues(rolls: RollDef[], contacts: ContactDef[], clearance: number): string[] {
+  const out: string[] = [];
+  const key = (a: number, b: number) => `${Math.min(a, b)}-${Math.max(a, b)}`;
+  const has = new Set(contacts.map((c) => key(c.a, c.b)));
+  const mm = (v: number) => `${(v * 1e3).toFixed(1)} mm`;
+  for (let a = 0; a < rolls.length; a++) {
+    for (let b = a + 1; b < rolls.length; b++) {
+      const A = rolls[a], B = rolls[b];
+      const gap = Math.hypot(A.cy - B.cy, A.cz - B.cz) - (A.D + B.D) / 2;
+      if (has.has(key(a, b))) {
+        if (Math.abs(gap) > 1e-6) out.push(`${A.id}–${B.id}: 接触のはずが ${gap > 0 ? '離れている' : '食い込んでいる'} (${mm(Math.abs(gap))})`);
+      } else if (gap < 0) {
+        out.push(`${A.id}–${B.id}: 接触なしのはずが干渉 (${mm(-gap)})`);
+      } else if (gap < clearance - 1e-6) {
+        out.push(`${A.id}–${B.id}: 隙間 ${mm(gap)} < クリアランス ${mm(clearance)}`);
+      }
+    }
+  }
+  return out;
 }
 
 /**

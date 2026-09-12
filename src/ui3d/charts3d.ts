@@ -526,7 +526,8 @@ export class EndView {
     const px = (z: number) => cx + z * scale;
     const py = (y: number) => cy0 - y * scale;
 
-    // contacts
+    // contacts: a designated one carrying nothing is a dashed grey line; a
+    // pair that meets with no contact between them is a red one
     let fmax = 1e-9;
     for (const c of R.contacts) fmax = Math.max(fmax, c.total);
     fmax = Math.max(fmax, R.force);
@@ -534,9 +535,21 @@ export class EndView {
     for (const c of R.contacts) {
       const A = rolls[c.a], B = rolls[c.b];
       const t = c.total / fmax;
-      ctx.strokeStyle = heat(t);
-      ctx.lineWidth = 1 + 7 * t;
+      if (c.total <= 0) { ctx.strokeStyle = 'rgba(140,170,210,0.5)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5; }
+      else { ctx.strokeStyle = heat(t); ctx.setLineDash([]); ctx.lineWidth = 1 + 7 * t; }
       ctx.beginPath(); ctx.moveTo(px(A.cz), py(A.cy)); ctx.lineTo(px(B.cz), py(B.cy)); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    const designated = new Set(R.contacts.map((c) => `${Math.min(c.a, c.b)}-${Math.max(c.a, c.b)}`));
+    for (let a = 0; a < rolls.length; a++) {
+      for (let b = a + 1; b < rolls.length; b++) {
+        if (designated.has(`${a}-${b}`)) continue;
+        const A = rolls[a], B = rolls[b];
+        if (Math.hypot(A.cy - B.cy, A.cz - B.cz) - (A.D + B.D) / 2 >= 0) continue;
+        ctx.strokeStyle = '#ff6b81';
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(px(A.cz), py(A.cy)); ctx.lineTo(px(B.cz), py(B.cy)); ctx.stroke();
+      }
     }
     // strip
     ctx.fillStyle = STRIP_COLOR;
@@ -591,7 +604,8 @@ export class EndView {
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(`接触力 [tonf] ／ 板幅 ${(width * 1e3).toFixed(0)} mm`, pad, H - 3);
+    const ang = stack.type === '12hi' || stack.type === '20hi' ? ` ／ 第1中間 ${((stack.angle1 * 180) / Math.PI).toFixed(1)}°` : '';
+    ctx.fillText(`接触力 [tonf] ／ 板幅 ${(width * 1e3).toFixed(0)} mm${ang}`, pad, H - 3);
   }
 }
 

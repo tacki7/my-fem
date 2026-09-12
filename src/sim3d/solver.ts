@@ -97,7 +97,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -105,6 +105,8 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   tensionYield: '張力が降伏に近い（変形抵抗の 70% 超）',
   stuck: '未収束（残差が下がらない）',
   target: '制御目標に届かない',
+  layout: 'ロール配置が成立していない（端面図の赤い線）',
+  openContact: '上下のロールが離れている接触がある（端面図の破線）',
 };
 
 export interface Result3D {
@@ -145,6 +147,8 @@ export interface Result3D {
   converged: boolean;
   /** what is wrong with this pass, if anything - keys, see `WARNING_TEXT` */
   warnings: Warning3D[];
+  /** the layout's own complaints, spelled out (see `layoutIssues`) */
+  notes: string[];
   /** last solve time [ms] */
   solveMs: number;
   dof: number;
@@ -982,7 +986,7 @@ export class StackSolver {
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, warnings: [], solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, converged: false, warnings: [], notes: [], solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
     };
   }
 
@@ -1020,6 +1024,7 @@ export class StackSolver {
     R.manifestIU = man * 1e5;
     R.screw = this.screw;
     R.warnings = this.diagnose();
+    R.notes = [...this.stack.issues];
     R.residual = this.residual;
     R.stepMax = this.stepMax;
     R.iterations = iters;
@@ -1060,7 +1065,11 @@ export class StackSolver {
     const e0 = Math.max(p.entryStrain, 0);
     const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
-    if (this.iterations > STUCK_ITERS && !this.converged && this.residual > 1e-4) w.push('stuck');
+    if (this.stack.issues.length) w.push('layout');
+    // a designated contact carrying nothing once the solve has settled: the
+    // roll above has lifted off, which no cluster is built to do
+    if (this.converged && this.contacts.some((c) => c.total <= 0)) w.push('openContact');
+    if (this.iterations > STUCK_ITERS && !this.converged) w.push('stuck');
     if (p.mode !== 'screw' && this.iterations > STUCK_ITERS && !this.screwSettled()
       && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');
     return w;

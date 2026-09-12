@@ -8,7 +8,7 @@
  * once the solve has settled.
  */
 
-import { StackSolver } from '../sim3d/solver';
+import { StackSolver, WARNING_TEXT, type Warning3D } from '../sim3d/solver';
 import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
@@ -309,7 +309,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
       geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3));
       geoSec.body.append(num('bbLb', 'バッキング軸 支持長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 45, 1, Math.PI / 180, '鉛直からの角度。'));
+      geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 60, 1, Math.PI / 180, '鉛直からの角度。左右の中間ロールが触れ合わない最小角より小さければ、その最小角に引き上げられる（端面図に実際の角を表示）。'));
+      geoSec.body.append(num('clearance', '隣接ロールのクリアランス', 'mm', 0.5, 20, 0.5, 1e-3, '同じ段に並ぶロール同士（第1中間の左右、第2中間、バッキング）に空ける隙間。'));
     }
     geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 5, 1e9));
     left.append(geoSec.root);
@@ -438,7 +439,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     setChip(chips.conv, R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
     chips.conv.classList.toggle('busy', !R.converged && running);
     setChip(chips.ms, R.solveMs.toFixed(0));
-    const warns = (R as { warnings?: string[] }).warnings ?? [];
+    const warns = [...R.warnings.map((w: Warning3D) => WARNING_TEXT[w]), ...R.notes];
     const want = warns.join('\u0001');
     if (warnBox.dataset.sig !== want) {
       warnBox.dataset.sig = want;
