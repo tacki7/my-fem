@@ -19,7 +19,7 @@
  */
 
 import { BandMatrix, denseSolve } from './band';
-import { makeContactLaw, loadAt, approach, type ContactLaw } from './contact';
+import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import {
   sliceLoad, springback, kfMean, kfExitOf, TENSION_CAP, type StripLaw,
@@ -79,6 +79,12 @@ export interface RollState {
   w: Float64Array;
   /** reaction at each support [N], + up */
   reactions: number[];
+  /** the axis bow: v at the barrel centre minus the mean of v at the barrel ends [m] (+ = centre higher) */
+  bow: number;
+  /** the largest vertical deflection along the roll, signed [m] */
+  vMax: number;
+  /** the roll's own largest compression at any of its contacts [m] */
+  flatMax: number;
 }
 
 export interface ContactState {
@@ -93,6 +99,9 @@ export interface ContactState {
   q: Float64Array;
   /** approach (both bodies) [m] */
   delta: Float64Array;
+  /** each body's share of the approach [m] */
+  dA: Float64Array;
+  dB: Float64Array;
   /** total force [N] */
   total: number;
 }
@@ -292,6 +301,7 @@ export class StackSolver {
         def, ia, ib, supports, prof, barrel,
         v: new Float64Array(this.ns).fill(NaN), w: new Float64Array(this.ns).fill(NaN),
         reactions: supports.map(() => 0),
+        bow: 0, vMax: 0, flatMax: 0,
       };
     });
     this.contacts = this.stack.contacts.map((c) => {
@@ -300,6 +310,7 @@ export class StackSolver {
         a: c.a, b: c.b, ny: c.ny, nz: c.nz,
         law: makeContactLaw(A.E, A.nu, A.D / 2, B.E, B.nu, B.D / 2),
         weight: new Float64Array(this.ns), q: new Float64Array(this.ns), delta: new Float64Array(this.ns),
+        dA: new Float64Array(this.ns), dB: new Float64Array(this.ns),
         total: 0,
       };
     });
@@ -1000,6 +1011,32 @@ export class StackSolver {
         roll.v[s] = inside ? u[this.idx(s, r, 0)] : NaN;
         roll.w[s] = inside ? u[this.idx(s, r, 2)] : NaN;
       }
+    }
+    // per-roll summaries for the picture: bow, largest deflection, own flattening
+    for (const c of this.contacts) {
+      for (let s = 0; s < ns; s++) {
+        const [a, b] = c.weight[s] > 0 ? approachParts(c.law, c.q[s]) : [0, 0];
+        c.dA[s] = a; c.dB[s] = b;
+      }
+    }
+    for (let r = 0; r < nr; r++) {
+      const roll = this.rolls[r];
+      const d = roll.def;
+      const st = (x: number) => Math.max(roll.ia, Math.min(roll.ib, this.stationOf(x)));
+      const sC = st(d.shift), sL = st(d.shift - d.Lb / 2), sR = st(d.shift + d.Lb / 2);
+      const vv = (s: number) => (Number.isFinite(roll.v[s]) ? roll.v[s] : 0);
+      roll.bow = vv(sC) - 0.5 * (vv(sL) + vv(sR));
+      let vm = 0;
+      for (let s = roll.ia; s <= roll.ib; s++) if (Math.abs(vv(s)) > Math.abs(vm)) vm = vv(s);
+      roll.vMax = vm;
+      let fm = 0;
+      for (const c of this.contacts) {
+        const arr = c.a === r ? c.dA : c.b === r ? c.dB : null;
+        if (!arr) continue;
+        for (let s = 0; s < ns; s++) fm = Math.max(fm, arr[s]);
+      }
+      if (r === this.stack.wr) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
+      roll.flatMax = fm;
     }
     R.h0.fill(NaN); R.h1.fill(NaN); R.q.fill(NaN); R.flat.fill(NaN);
     R.dEps.fill(NaN); R.manifest.fill(NaN); R.sigmaF.fill(NaN);

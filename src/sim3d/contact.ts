@@ -55,6 +55,16 @@ export function makeContactLaw(
   };
 }
 
+/** each body's own compression at load q [m]: how much of the approach is body 1's and how much body 2's */
+export function approachParts(c: ContactLaw, q: number): [number, number] {
+  if (q <= 0) return [0, 0];
+  const bh = Math.sqrt(c.bCoef * q);
+  const b = bh >= c.bFloor ? bh : c.bFloor;
+  const g1 = c.ring1 ? ringCompliance(c.ring1, b) : c.A1 * (2 * Math.log((4 * c.R1) / b) - 1);
+  const g2 = c.A2 > 0 ? (c.ring2 ? ringCompliance(c.ring2, b) : c.A2 * (2 * Math.log((4 * c.R2) / b) - 1)) : 0;
+  return [q * g1, q * g2];
+}
+
 /** approach δ [m] at load q [N/m], and dδ/dq */
 export function approach(c: ContactLaw, q: number): [number, number] {
   if (q <= 0) return [0, 0];

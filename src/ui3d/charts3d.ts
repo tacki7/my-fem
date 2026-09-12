@@ -374,6 +374,11 @@ export class FrontView {
     // with a vertical offset so both are seen, and their labels go to
     // alternating sides so they do not land on each other.
     const LAYER_OFF = 12;
+    const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
+    // bow of the axis (centre against the barrel ends) and the roll's own
+    // flattening at its heaviest contact; paired rolls of a layer take
+    // different spots along the barrel, between the saddle positions
+    const labels: { x: number; y: number; text: string }[] = [];
     for (const L of layers) {
       L.forEach((ri, k) => {
         const r = rolls[ri];
@@ -442,6 +447,14 @@ export class FrontView {
         ctx.textAlign = labelLeft ? 'right' : 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(d.id, labelLeft ? xa - 5 : xb + 5, cy);
+        // the roll's numbers go on the barrel, drawn after every roll so
+        // nothing lands on them (see below)
+        {
+          const frac = L.length > 1 ? (k === 0 ? 0.34 : 0.66) : 0.5;
+          const xm = x0 + (x1 - x0) * frac;
+          const sMid = Math.max(r.ia, Math.min(r.ib, Math.round((xm - R.x[0]) / dx)));
+          labels.push({ x: sx(xm), y: cy - vAt(sMid) * mag * pxPerM, text: `${d.id}  撓み ${um(r.bow)}  扁平 ${um(r.flatMax)}` });
+        }
         for (const s of r.supports) {
           const px = sx(R.x[s]);
           const py = cy - vAt(s) * mag * pxPerM;
@@ -451,6 +464,16 @@ export class FrontView {
           ctx.closePath(); ctx.fill();
         }
       });
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const l of labels) {
+      const tw = ctx.measureText(l.text).width + 10;
+      ctx.fillStyle = 'rgba(7, 10, 18, 0.8)';
+      ctx.fillRect(l.x - tw / 2, l.y - 8, tw, 16);
+      ctx.fillStyle = TEXT_BRIGHT;
+      ctx.fillText(l.text, l.x, l.y);
     }
 
     // the strip: the exit profile on an automatic scale
