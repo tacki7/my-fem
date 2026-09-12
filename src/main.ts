@@ -2273,6 +2273,47 @@ left.append(sLine.root, sStrip.root, sMat.root, sHeat.root,
 
 /* ── mu back-calculation ─────────────────────────────────────────────────── */
 
+/* ── optional panels ─────────────────────────────────────────────────────── */
+type PanelMode = 'both' | 'stage' | 'stats' | 'none';
+const PANEL_MODE_LABEL: Record<PanelMode, string> = {
+  both: '表示: コンター図 ＋ 圧延諸元',
+  stage: '表示: コンター図のみ',
+  stats: '表示: 圧延諸元のみ',
+  none: '表示: グラフ優先（両方隠す）',
+};
+const PANELS_KEY = 'rollfem.panels.v1';
+let panelMode: PanelMode = (() => {
+  try {
+    const v = localStorage.getItem(PANELS_KEY);
+    return v && v in PANEL_MODE_LABEL ? (v as PanelMode) : 'both';
+  } catch { return 'both'; }
+})();
+const stageEl = document.getElementById('stage') as HTMLElement;
+const rightEl = document.getElementById('right') as HTMLElement;
+/** the contour stage is off screen: nothing to draw into */
+const stageHidden = () => stageEl.hidden;
+
+/** Put the grid in the mode: classes and hidden flags only, safe at boot. */
+function paintPanelMode(m: PanelMode): void {
+  panelMode = m;
+  const app = document.getElementById('app')!;
+  const noStage = m === 'stats' || m === 'none';
+  const noRight = m === 'stage' || m === 'none';
+  app.classList.toggle('hide-stage', noStage);
+  app.classList.toggle('hide-right', noRight);
+  stageEl.hidden = noStage;
+  rightEl.hidden = noRight;
+}
+/** The switch at run time: repaint, then re-place the handles and re-fit the views. */
+function applyPanelMode(m: PanelMode): void {
+  paintPanelMode(m);
+  try { localStorage.setItem(PANELS_KEY, m); } catch { /* private mode */ }
+  layoutRef?.refresh();
+  relayout();
+}
+// The remembered mode goes on before anything measures the grid.
+paintPanelMode(panelMode);
+
 const MU_INV_LABEL = 'μ逆算';
 const MU_INV_LABEL_ON = 'μ逆算 解除';
 const MU_INV_LABEL_STALE = 'μ逆算 再計算';
@@ -2726,6 +2767,19 @@ function applyPanelStructure(theme: Theme): void {
   ]);
   document.getElementById('topbar-actions')!.append(row);
   playBtn = row.querySelector('button')!;
+
+  // Which of the two optional panels are on screen. The mill line, the
+  // charts and the controls are always there; the contour stage and the
+  // stats panel each go away on request and the grid closes over them.
+  const psel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  psel.title = '中央のコンター図と右の圧延諸元パネルの表示。隠した分はミルライン・グラフ・残りのパネルが使う。'
+    + '隠している間はコンター図の描画も止まるので、その分フレームが軽い。';
+  for (const [v, text] of Object.entries(PANEL_MODE_LABEL)) {
+    const o = el('option'); o.value = v; o.textContent = text; psel.append(o);
+  }
+  psel.value = panelMode;
+  psel.addEventListener('change', () => applyPanelMode(psel.value as PanelMode));
+  document.getElementById('topbar-actions')!.append(psel);
 
   // Not next to 一時停止 and リセット, which are view controls: this one changes
   // the setup. It is one press and it answers immediately - there is nothing
@@ -3408,6 +3462,7 @@ function relayout(): void {
   millLine.draw(millViews());
   fieldDirty = true;
 }
+
 const layout = installLayout(document.getElementById('app')!, relayout);
 layoutRef = layout;
 // The remembered look was applied to the root before first paint; its
@@ -3715,7 +3770,7 @@ function frame(now: number): void {
   last = now;
   frameEma += (wall - frameEma) * 0.1;
   fpsEma += (1000 / Math.max(wall, 1e-3) - fpsEma) * 0.08;
-  renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
+  if (!stageHidden()) renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
 
   let solved = false;
   if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
@@ -3766,7 +3821,7 @@ function frame(now: number): void {
     rollUseField: !STRIP_ONLY.has(view.field),
     stripUseField: !ROLL_ONLY.has(view.field),
   };
-  renderer.draw(sim, cam, ropts);
+  if (!stageHidden()) renderer.draw(sim, cam, ropts);
 
   if (view.showTracers && tracers.lines.length) {
     for (const f of view.extent === 'full' ? [1, -1] : [1]) {

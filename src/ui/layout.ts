@@ -123,11 +123,17 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
   /** the side panel in the first column, and the one in the last */
   const sides = () => {
     const l = box('left'), r = box('right');
-    if (!l || !r) return { first: l ?? r, last: r ?? l };
+    // With one panel hidden the other keeps its column: whichever side of
+    // the app it sits on says which handle it gets.
+    if (!l || !r) {
+      const one = l ?? r;
+      if (!one) return { first: null, last: null };
+      return one.left < app.clientWidth / 2 ? { first: one, last: null } : { first: null, last: one };
+    }
     return l.left <= r.left ? { first: l, last: r } : { first: r, last: l };
   };
   const lineAbove = () => {
-    const m = box('millline'), s = box('stage');
+    const m = box('millline'), s = box('stage') ?? box('bottom');
     return !m || !s || m.top < s.top;
   };
   const cellHidden = (id: string) => (document.getElementById(id) as HTMLElement | null)?.hidden ?? true;
@@ -178,7 +184,9 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
       prop: '--row-charts', axis: 'y', sign: () => -1, min: 90, max: 700,
       place: (n) => {
         const c = box('bottom');
-        if (!c) { n.hidden = true; return; }
+        // With the stage hidden the charts take whatever the line leaves,
+        // and the boundary above them is the line's own handle.
+        if (!c || cellHidden('stage')) { n.hidden = true; return; }
         n.hidden = false;
         setBox(n, c.left, c.top - GAP + (GAP - HANDLE) / 2, c.width, HANDLE);
       },

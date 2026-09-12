@@ -835,3 +835,49 @@ body.resizing * { cursor: inherit !important; }
 
 /* a live tension cell more than 2 % from its target */
 .sg-now.off-target { color: var(--warn, #ffb26e); }
+
+/* ── optional panels ─────────────────────────────────────────────────────── */
+/* The contour stage and the stats panel can each be hidden from the top bar;
+   the grid closes over them so the mill line, the charts and the remaining
+   panel take the room. One template per look and combination, because the
+   looks place the same panels differently. */
+#app.hide-right #right, #app.hide-stage #stage { display: none; }
+#app.hide-right {
+  grid-template-columns: var(--col-left) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "left millline" "left stage" "left bottom";
+}
+#app.hide-stage {
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar topbar" "left millline millline" "left bottom right";
+}
+#app.hide-right.hide-stage {
+  grid-template-columns: var(--col-left) minmax(0, 1fr);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "left millline" "left bottom";
+}
+:root[data-theme="modern"] #app.hide-right {
+  grid-template-areas: "topbar topbar" "left stage" "left bottom" "millline millline";
+}
+:root[data-theme="modern"] #app.hide-stage {
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-line), 46vh);
+  grid-template-areas: "topbar topbar topbar" "left bottom right" "millline millline millline";
+}
+:root[data-theme="modern"] #app.hide-right.hide-stage {
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-line), 46vh);
+  grid-template-areas: "topbar topbar" "left bottom" "millline millline";
+}
+/* chic mirrors the columns: the stats panel is the first, sized by --col-left,
+   and the controls the last, sized by --col-right. */
+:root[data-theme="chic"] #app.hide-right {
+  grid-template-columns: minmax(0, 1fr) var(--col-right);
+  grid-template-areas: "topbar topbar" "millline millline" "stage left" "bottom left";
+}
+:root[data-theme="chic"] #app.hide-stage {
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar topbar" "millline millline millline" "right bottom left";
+}
+:root[data-theme="chic"] #app.hide-right.hide-stage {
+  grid-template-columns: minmax(0, 1fr) var(--col-right);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "millline millline" "bottom left";
+}
