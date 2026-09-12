@@ -938,6 +938,21 @@ body.resizing * { cursor: inherit !important; }
   min-height: 0;
 }
 #view3d .v3-cell canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+/* the stack cell: the 3D canvas and the flat front view share one box, one shown at a time */
+#view3d .v3-stage { position: relative; flex: 1; min-height: 0; }
+#view3d .v3-stage > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#view3d .v3-stage > canvas.v3-gl { cursor: grab; }
+#view3d .v3-stage > canvas.v3-gl:active { cursor: grabbing; }
+#view3d .v3-stage.flat > canvas.v3-gl, #view3d .v3-stage.flat > .v3-labels { display: none; }
+#view3d .v3-stage:not(.flat) > canvas:not(.v3-gl) { display: none; }
+#view3d .v3-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#view3d .v3-label {
+  position: absolute; transform: translate(-50%, -100%);
+  font-family: var(--mono); font-size: 9.5px; line-height: 1.25; color: #dce6f5; white-space: pre; text-align: center;
+  background: rgba(7, 10, 18, .78); border: 1px solid rgba(140, 170, 210, .18); border-radius: 4px; padding: 1px 6px;
+}
+#view3d .v3-front-mode { margin-left: auto; flex: none; gap: 3px; }
+#view3d .v3-front-mode .btn { padding: 2px 8px; font-size: 10.5px; border-radius: 5px; }
 #view3d .v3-charts {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

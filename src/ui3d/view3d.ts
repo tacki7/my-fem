@@ -14,6 +14,7 @@ import {
 } from '../sim3d/stack';
 import { el, section, slider, select, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
 import { LineChart, FrontView, EndView, SectionView, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 
 const TONF = 9.80665e3;
@@ -83,7 +84,33 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     return { root: c, canvas };
   };
 
-  const front = cell('v3-front', 'ロールスタック 正面図', '上半分 ／ 撓みは倍率表示 ／ 胴の色 = その位置の接触線荷重 ／ ▲ = 支持点（赤 = 圧下スクリュー、黄 = サドル、緑 = ベンダー付きチョック）');
+  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 下半分は上半分の鏡像 ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
+  // the stack is drawn either in 3D (WebGL, the default) or as the flat
+  // front view; the cell holds both canvases and a label layer for the 3D one
+  const stage = el('div', 'v3-stage');
+  const glCanvas = el('canvas');
+  glCanvas.className = 'v3-gl';
+  const labelBox = el('div', 'v3-labels');
+  front.canvas.replaceWith(stage);
+  stage.append(glCanvas, labelBox, front.canvas);
+  let frontMode: '3d' | '2d' = (() => { try { return localStorage.getItem('rollfem.v3.front') === '2d' ? '2d' : '3d'; } catch { return '3d'; } })();
+  let stack3d: StackView3D | null = null;
+  try { stack3d = new StackView3D(glCanvas, labelBox); } catch { frontMode = '2d'; }
+  const modeBtns = buttonRow([
+    { text: '3D', onClick: () => setFrontMode('3d') },
+    { text: '正面図', onClick: () => setFrontMode('2d') },
+  ]);
+  modeBtns.classList.add('v3-front-mode');
+  front.root.querySelector('.chart-head')!.append(modeBtns);
+  const setFrontMode = (m: '3d' | '2d') => {
+    if (m === '3d' && !stack3d) m = '2d';
+    frontMode = m;
+    stage.classList.toggle('flat', m === '2d');
+    [...modeBtns.children].forEach((b, i) => b.classList.toggle('active', (i === 0) === (m === '3d')));
+    try { localStorage.setItem('rollfem.v3.front', m); } catch { /* private mode */ }
+    dirty = true;
+  };
+  setFrontMode(frontMode);
   const chartGrid = el('div', 'v3-charts');
   const cDefl = cell('v3-defl', 'ロール撓み', '各ロール軸の鉛直たわみ v(x)（支持点基準ではなく絶対値：スクリュー分の沈み込みを含む）');
   const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
@@ -354,7 +381,13 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const st = solver.stack;
     const halfWidth = -R.x[0];
     const strip = params.width / 2;
-    frontView.draw(R, st, { magnify, width: params.width });
+    if (frontMode === '3d' && stack3d) {
+      const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
+      stack3d.draw(R, st, {
+        magnify, width: params.width, mirror: true,
+        labels: R.rolls.map((r) => `${r.def.id}\n撓み ${um(r.bow)} 扁平 ${um(r.flatMax)}`),
+      });
+    } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
