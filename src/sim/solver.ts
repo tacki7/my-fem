@@ -312,6 +312,13 @@ export interface RollingParams {
    * ignored by the stand solve, and carried here so the settings file, the
    * query string and the change detection see them like everything else.
    */
+  /**
+   * Strip speed leaving the line [m/s]. In tandem with the speed cone on this
+   * is the one speed the line is run at: every barrel speed is derived from
+   * it by mass flow and forward slip (see `Mill.advance`). `omega` is then an
+   * outcome per stand, not an input.
+   */
+  lineSpeed: number;
   /** how the tension between stands is made to move; 'off' keeps the inputs */
   tensionModel: TensionModel;
   /** distance between stands [m]; the length of the elastic bar */
