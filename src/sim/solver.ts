@@ -16,6 +16,7 @@
  */
 
 import { buildRollMesh, type RollMesh } from './mesh';
+import type { TensionModel } from './tension';
 import { precomputeElements, assembleStiffness, type ElementGeometry } from './element';
 import {
   buildCsrPattern, makePcgWorkspace, pcgFiltered, patternBytes, workspaceBytes,
@@ -305,6 +306,28 @@ export interface RollingParams {
   feedDeadband: number;
   /** run the roll elastic solve every N frames; it changes slowly */
   rollEvery: number;
+
+  /*
+   * Interstand tension (src/sim/tension.ts). Line-level: read by `Mill`,
+   * ignored by the stand solve, and carried here so the settings file, the
+   * query string and the change detection see them like everything else.
+   */
+  /** how the tension between stands is made to move; 'off' keeps the inputs */
+  tensionModel: TensionModel;
+  /** distance between stands [m]; the length of the elastic bar */
+  standDistance: number;
+  /** model seconds per real second for the tension dynamics and the controller */
+  tensionTimeScale: number;
+  /** rigid: fraction of the reaction-implied correction applied per frame */
+  tensionFollow: number;
+  /** PI on the upstream stand's roll speed, holding each gap at its σf target */
+  tensionControl: boolean;
+  /** proportional gain: speed trim per unit relative tension error */
+  tensionKp: number;
+  /** integral gain [1/s of model time] */
+  tensionKi: number;
+  /** trim limit as a fraction of the base roll speed */
+  tensionVLimit: number;
 
   /* automatic gap control */
   /**
@@ -628,6 +651,8 @@ export interface RollingDiagnostics {
   rollPeakVm: number;
   /** net longitudinal reaction at the feed face [N/m]; zero when free running */
   feedReaction: number;
+  /** height of the prescribed feed face [m]; `feedReaction` over this is a stress */
+  feedFace: number;
   picardDelta: number;
   cgIterations: number;
   cgResidual: number;
@@ -2941,6 +2966,7 @@ export class RollingSim {
     }
 
     d.feedReaction = this.flow.feedReaction();
+    d.feedFace = this.flow.feedFaceHeight();
 
     // roll flattening at the bite
     let flat = 0;
@@ -3253,7 +3279,7 @@ function emptyDiag(): RollingDiagnostics {
     exitFlowStress: 0, meanFlowStress: 0, meanPlaneStrainStress: 0,
     meanFlowStressTheory: 0, peakStrainRate: 0, rollFlattening: 0, hitchcockR: 0,
     stoneHMin: 0, biteLimitH1: 0, biteLimitH1Cont: 0,
-    rollPeakVm: 0, feedReaction: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
+    rollPeakVm: 0, feedReaction: 0, feedFace: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
     feedResidual: 0, feedFloor: 0, meshResidual: 0,
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,

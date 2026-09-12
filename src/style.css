@@ -643,7 +643,7 @@ body.resizing * { cursor: inherit !important; }
 .sw-tau { background: #ffb26e; }
 .sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
 .sw-kf  { background: #96e6b4; }
-#nip, #agcscatter { flex: 1; width: 100%; min-height: 0; display: block; }
+#nip, #agcscatter, #tensionchart { flex: 1; width: 100%; min-height: 0; display: block; }
 
 /* Two charts share the bottom row; the scatter only appears under gap control,
    and the friction hill keeps the whole width whenever it is hidden. */
@@ -820,3 +820,6 @@ body.resizing * { cursor: inherit !important; }
   border-color: rgba(255,196,107,.8); background: rgba(255,196,107,.16);
   color: var(--fg); pointer-events: none;
 }
+
+/* a live tension cell more than 2 % from its target */
+.sg-now.off-target { color: var(--warn, #ffb26e); }

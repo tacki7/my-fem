@@ -1,4 +1,5 @@
 import './style.css';
+import { TENSION_MODEL_LABEL, type TensionModel } from './sim/tension';
 import {
   RollingSim, fieldUnit, planeStrain, AGC_METHODS, setSlabHook,
   type RollingParams, type FieldKind, type AgcMode, type AgcMethod, type LoadModel, type SlabTheory,
@@ -17,7 +18,7 @@ import { MillLineView, type StandView } from './ui/millview';
 import { Renderer, type Camera, type RenderOptions } from './gfx/renderer';
 import { COLORMAP_NAMES, rampGradient } from './gfx/colormap';
 import {
-  BudgetChart, FrictionHillChart, AgcScatterChart,
+  BudgetChart, FrictionHillChart, TensionChart, AgcScatterChart,
   type HillSample, type AgcSample, type AgcTargets, type AgcTrail,
 } from './ui/charts';
 import {
@@ -177,6 +178,16 @@ const params: RollingParams = {
   // loop's answer depend on how it got there; at 3e-4 two different routes
   // to the same target agree to 0.02 um.
   feedEvery: 6, feedGain: 0.15, feedDeadband: 3e-4,
+  // Interstand tension dynamics (src/sim/tension.ts). Off keeps the tension
+  // the table's input; a model makes the table's σf a target and the line's
+  // own speed balance the actual. Time scale 1 is real time, where the
+  // strip's elastic transient is under a frame and every model reads rigid.
+  tensionModel: 'off',
+  standDistance: 4.5,
+  tensionTimeScale: 1,
+  tensionFollow: 0.5,
+  tensionControl: false,
+  tensionKp: 0, tensionKi: 0.5, tensionVLimit: 0.1,
   agcMode: 'off', agcTargetForce: (800 * TONF) / 1.0,
   // Absolute-gauge setpoint. Seeded to the default pass's own exit so it is
   // never zero; the real value is adopted when a stand enters the mode.
@@ -312,6 +323,14 @@ if (QS.has('nogrid')) view.showGrid = false;
   // Gap control, so a measurement run can start with the loop already closed.
   const qa = QS.get('agc');
   if (qa === 'off' || qa === 'ratio' || qa === 'gauge' || qa === 'force') params.agcMode = qa;
+  // Interstand tension model and its controller, so a measurement run can
+  // start with the line already carrying its own tension.
+  const qt = QS.get('tension');
+  if (qt === 'off' || qt === 'rigid' || qt === 'simple' || qt === 'dist') params.tensionModel = qt;
+  const qtc = QS.get('tctl');
+  if (qtc === '1' || qtc === '0') params.tensionControl = qtc === '1';
+  const qts = Number(QS.get('tscale'));
+  if (Number.isFinite(qts) && qts > 0 && qts <= 1) params.tensionTimeScale = qts;
   // Absolute exit gauge in mm, so a measurement run can start on a setpoint.
   const qg = Number(QS.get('h1'));
   if (Number.isFinite(qg) && qg > 0) params.agcTargetGauge = qg / 1000;
@@ -696,6 +715,8 @@ function announceRestarts(): void {
 function millViews(): StandView[] {
   const out: StandView[] = [];
   const b = view.stripWidth;
+  const md = mill.diag;
+  const tensionOn = md.tensionModel !== 'off';
   for (let k = 0; k < mill.count; k++) {
     const st = mill.stands[k], d = st.diag;
     const p = st.params;
@@ -728,6 +749,15 @@ function millViews(): StandView[] {
       // front's exit pull, not a value this row owns.
       backTension: getBackTension(k) / 1e6,
       frontTension: c.frontTension / 1e6,
+      // As carried, from the gap model: the front is gap k, the back is gap
+      // k-1. The line's two ends are coilers and keep their inputs.
+      backTensionActual: tensionOn
+        ? (k === 0 ? c.backTension : (md.tensionActual[k - 1] * md.h1[k - 1]) / hIn) / 1e6 : NaN,
+      frontTensionActual: tensionOn
+        ? (k === mill.count - 1 ? c.frontTension : md.tensionActual[k]) / 1e6 : NaN,
+      tensionHot: tensionOn && [k - 1, k].some((j) => j >= 0 && j < md.tensionActual.length
+        && (Math.abs(md.tensionActual[j] - md.tensionRigid[j]) > 1e-3 * Math.max(md.tensionActual[j], 5e6)
+          || Math.abs(md.tensionError[j]) > 1e-3)),
       // Plane-strain kf, which is what a rolling load formula uses. The solve
       // carries the uniaxial flow stress, so those convert by 2/sqrt(3).
       //
@@ -797,6 +827,7 @@ interface StandRowCells {
   redNow: HTMLElement;
   gaugeNow: HTMLElement;
   loadNow: HTMLElement;
+  tenNow: HTMLElement;
   mode: HTMLSelectElement;
   red: NumFieldHandle;
   gauge: NumFieldHandle;
@@ -976,6 +1007,7 @@ function buildStandGrid(): void {
   const redNow = mk(() => el('div', 'sg-now', '—'));
   const gaugeNow = mk(() => el('div', 'sg-now', '—'));
   const loadNow = mk(() => el('div', 'sg-now', '—'));
+  const tenNow = mk(() => el('div', 'sg-now', '—'));
   const resets = mk((k) => {
     const b = el('button', 'sg-btn', RECALC_LABEL);
     b.type = 'button';
@@ -1004,6 +1036,7 @@ function buildStandGrid(): void {
   row('　　　現在', loadNow, 'tonf');
   row('後方張力 σb', backs.map((x) => x.root), 'MPa');
   row('前方張力 σf', tens.map((x) => x.root), 'MPa');
+  row('　　　実績', tenNow, 'MPa');
   row('摩擦係数 μ', mus.map((x) => x.root), '');
   row('ロール半径 R', rads.map((x) => x.root), 'mm');
   row('', resets, '');
@@ -1013,6 +1046,7 @@ function buildStandGrid(): void {
       head: heads[k], redNow: redNow[k], gaugeNow: gaugeNow[k], loadNow: loadNow[k],
       mode: modes[k],
       red: reds[k], gauge: gauges[k], load: loads[k], backT: backs[k], ten: tens[k],
+      tenNow: tenNow[k],
       mu: mus[k], rad: rads[k],
     });
   }
@@ -1093,6 +1127,20 @@ function refreshStandGrid(): void {
         : Math.abs(r - want) < 0.05 ? 'ok'
           : Math.abs(r - want) < 0.5 ? 'warn' : 'bad');
     c.loadNow.textContent = Number.isFinite(load) ? load.toFixed(1) : '—';
+    // The front tension the gap after this stand is actually carrying. The
+    // last stand's front is the coiler, which the model does not move, and
+    // with the model off the input is the whole story - both read '—'.
+    const md = mill.diag;
+    const ta = md.tensionModel !== 'off' ? md.tensionActual[k] : NaN;
+    const tt = md.tensionTarget[k];
+    c.tenNow.textContent = Number.isFinite(ta) ? (ta / 1e6).toFixed(1) : '—';
+    const tErr = Number.isFinite(ta) && tt > 0 ? (ta - tt) / tt : 0;
+    c.tenNow.classList.toggle('off-target', Number.isFinite(ta) && Math.abs(tErr) > 0.02);
+    c.tenNow.title = Number.isFinite(ta)
+      ? `目標 ${(tt / 1e6).toFixed(1)} MPa に対し ${(100 * tErr).toFixed(2)}%`
+        + (md.tensionClamped[k] === -1 ? '。張力抜け（0 で頭打ち）'
+          : md.tensionClamped[k] === 1 ? '。降伏の 90% で頭打ち' : '')
+      : '';
     const tgt = (standSetups[k].targetForce * b) / TONF;
     // A slab load the theory could not solve is flagged whatever the mode,
     // and the cell says why.
@@ -1293,6 +1341,7 @@ function applyModeWording(): void {
 function setLineMode(v: LineMode): void {
   view.lineMode = v;
   mill.mode = v;
+  syncTensionUi();
   if (v === 'reverse') {
     for (let k = 1; k < standSetups.length; k++) {
       standSetups[k].backTension = standSetups[k - 1].frontTension;
@@ -2020,8 +2069,128 @@ sDisp.body.append(
 
 // One column, in the order a set-up is thought through: the line, the strip
 // it carries, the material, then the selected stand and how it is run.
+/* ── interstand tension ──────────────────────────────────────────────────── */
+
+const TENSION_ABOUT =
+  'スタンド間の張力を、表の入力値（目標）とラインが実際に持つ値（実績）に分ける。'
+  + '参考書 5.4 節の 3 つのモデル（tension-lab と同じ）で実績を動かす: 剛体はスタンド間の板を伸びないものとして'
+  + '速度が釣り合う張力を毎フレーム求める。単純弾性は長さ L の一様な弾性棒 dT/dt = (E h/L)(v_in − v_out)、'
+  + '分布弾性は板厚分布を運ぶ直列ばね。FEM では下流スタンドの入側面を上流の出側速度で拘束し、'
+  + 'その面が負担する反力を面高さで割った量が「不足している張力」— それを剛体はそのまま、弾性はその時定数 τ で追う。'
+  + '実機の τ は 10 ms 程度でフレームより短いので、実時間ではどのモデルも剛体に見える。時間倍率で遅回しにすると差が見える。'
+  + '張力制御 ON で、各スタンド間の実績を目標に合わせるよう上流スタンドのロール周速を PI で操作する。'
+  + '出側板厚の受け渡しもスタンド間の搬送遅れ L/v を持つ。リバースでは無効。';
+const sTension = section('スタンド間張力 (動特性・張力制御)', { hint: TENSION_ABOUT, open: false });
+const tensionHint = el('div', 'ctrl-hint');
+const tensionReadout = el('div', 'ctrl-hint');
+const tensionDials: { setEnabled(on: boolean): void }[] = [];
+const selTension = select<TensionModel>('張力モデル',
+  (['off', 'rigid', 'simple', 'dist'] as TensionModel[]).map((v) => ({ value: v, text: TENSION_MODEL_LABEL[v] })),
+  params.tensionModel, (v) => { params.tensionModel = v; tensionChart.reset(); syncTensionUi(); },
+  'なし: 張力は入力値のまま（従来どおり、各スタンドの送り速度が自走し不整合は「流量ずれ」に出る）。'
+    + '剛体 / 単純弾性 / 分布弾性: 表の前方張力が目標になり、実績はラインの速度バランスが決める。'
+    + '3 つの定常値は同じで、違うのは過渡の速さ（分布弾性はさらにスタンド間の板厚分布で剛性が変わる）。');
+const sTScale = slider({
+  label: '時間倍率', min: 0.001, max: 1, log: true, value: params.tensionTimeScale,
+  format: (v) => (v >= 0.1 ? v.toFixed(2) : v.toPrecision(2)),
+  hint: '張力の動特性と張力制御が進む速さ。1 で実時間（弾性の時定数 ~10 ms はフレーム以下なので剛体と区別がつかない）。'
+    + '0.01 なら 100 倍の遅回しで、弾性の一次遅れと搬送遅れ L/v が目で追える。FEM 本体（AGC・送り）は倍率の影響を受けない。',
+  onInput: (v) => { params.tensionTimeScale = v; },
+});
+const sTLen = slider({
+  label: 'スタンド間距離 L', unit: 'm', min: 0.5, max: 20, log: true, value: params.standDistance,
+  format: (v) => v.toFixed(2),
+  hint: '弾性棒の長さ、および搬送遅れ L/v の L。既定 4.5 m は参考書 図 5.17 の到達時刻から逆算した値（tension-lab と同じ）。'
+    + '短いほど剛性 E h/L が高く張力が速く動く。',
+  onInput: (v) => { params.standDistance = v; },
+});
+const sTFollow = slider({
+  label: '剛体の追従係数', min: 0.05, max: 1, step: 0.05, value: params.tensionFollow,
+  format: (v) => v.toFixed(2),
+  hint: '剛体モデルで、反力が示す不足分のうち 1 フレームに埋める割合。1 で一発、0.5 既定。'
+    + '反力は収束途中の Picard 反復から読むので、1 に近いと過渡で行き過ぎることがある。弾性モデルは τ が決めるので効かない'
+    + '（Bland–Ford に中立点がなく τ を作れない段だけ、この係数で代用する）。',
+  onInput: (v) => { params.tensionFollow = v; },
+});
+const tTCtl = toggle('張力制御（上流スタンドの周速を PI で操作）', params.tensionControl, (v) => {
+  params.tensionControl = v;
+  syncTensionUi();
+},
+  '各スタンド間で 実績 − 目標 の相対誤差を PI にかけ、上流スタンドのロール周速に相対トリムとして重ねる。'
+    + '張力が高ければ上流を増速して緩める。#1 の周速も操作するが、速度コーンは #1 の基準速度から張るので'
+    + 'トリムが下流に伝播することはない。tension-lab と同じ構成（Kp=0, Ki のみが既定）。');
+const sTKp = slider({
+  label: '比例ゲイン Kp', min: 0, max: 1, step: 0.05, value: params.tensionKp,
+  format: (v) => v.toFixed(2),
+  hint: '張力の不足分を「それを打ち消す周速トリム」に換算した量（プラントゲイン v/(h₁·|dΔv/dT|) で割る）のうち、'
+    + 'ただちに掛ける割合。0 既定（積分のみ、tension-lab と同じ構成）。',
+  onInput: (v) => { params.tensionKp = v; },
+});
+const sTKi = slider({
+  label: '積分ゲイン Ki', unit: '1/s', min: 0.02, max: 5, log: true, value: params.tensionKi,
+  format: (v) => v.toPrecision(2),
+  hint: '閉ループの速さ。誤差をプラントゲインで割って積分するので、Ki はスケジュールによらず「モデル時間 1 s あたりに不足分の何割を埋めるか」。'
+    + '0.5 既定（時定数 2 s）。FEM の反力は 0.1〜0.2 s 遅れて追いつくので、2 を超えると剛体モデルで振動しやすい。'
+    + '相対誤差で積分する版は 50 MPa/% のプラントゲインの前で発散した。',
+  onInput: (v) => { params.tensionKi = v; },
+});
+const sTLim = slider({
+  label: '周速トリム上限', unit: '%', min: 1, max: 30, step: 1, value: params.tensionVLimit * 100,
+  format: (v) => v.toFixed(0),
+  hint: 'トリムの絶対値の上限（基準周速に対する割合）。上限に当たった分は積分しない（アンチワインドアップ）。',
+  onInput: (v) => { params.tensionVLimit = v / 100; },
+});
+tensionDials.push(sTScale, sTLen, sTFollow, tTCtl, sTKp, sTKi, sTLim);
+sTension.body.append(selTension.root, tensionHint, sTScale.root, sTLen.root, sTFollow.root,
+  tTCtl.root, sTKp.root, sTKi.root, sTLim.root, tensionReadout);
+
+/** Enable what the model uses, and say why the rest is grey. */
+function syncTensionUi(): void {
+  const reverse = view.lineMode === 'reverse';
+  const on = !reverse && params.tensionModel !== 'off';
+  (selTension.root.querySelector('select') as HTMLSelectElement).disabled = reverse;
+  for (const d of tensionDials) d.setEnabled(on);
+  if (on) {
+    sTFollow.setEnabled(params.tensionModel === 'rigid');
+    for (const d of [sTKp, sTKi, sTLim]) d.setEnabled(params.tensionControl);
+  }
+  tensionHint.textContent = reverse
+    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効。'
+    : params.tensionModel === 'off'
+      ? '張力は表の入力値がそのまま境界条件。下流スタンドの送り速度は自走で決まり、'
+        + '残る不整合は上部の「流量ずれ」に出る（実機ならスタンド間張力が吸収する分）。'
+      : `${TENSION_MODEL_LABEL[params.tensionModel]}: 下流スタンドの入側速度を上流の出側速度に拘束し、`
+        + '張力は反力から求める。表の前方張力は目標、実績は表の「実績」行・ミルライン図・下のグラフに出る。'
+        + (params.tensionControl ? '制御 ON。' : '制御 OFF: 実績は目標から離れたところに落ち着く。目標に合わせるには制御を ON にする。');
+  if (mill.count < 2 && !reverse) tensionHint.textContent += ' スタンドが 1 つのあいだはスタンド間がない。';
+  refreshTensionChart();
+}
+
+/** The per-gap numbers, refreshed every frame while a model is on. */
+function paintTensionReadout(): void {
+  const md = mill.diag;
+  if (md.tensionModel === 'off' || md.tensionActual.length === 0) {
+    if (tensionReadout.textContent) tensionReadout.textContent = '';
+    return;
+  }
+  const lines: string[] = [];
+  for (let k = 0; k < md.tensionActual.length; k++) {
+    const a = md.tensionActual[k] / 1e6, t = md.tensionTarget[k] / 1e6, r = md.tensionRigid[k] / 1e6;
+    const tau = md.tensionTau[k];
+    const clamp = md.tensionClamped[k] === -1 ? ' 張力抜け' : md.tensionClamped[k] === 1 ? ' 降伏上限' : '';
+    lines.push(`${standTag(k)}→${standTag(k + 1)}: 目標 ${t.toFixed(1)} / 実績 ${a.toFixed(1)} MPa`
+      + `（反力の示す剛体値 ${r.toFixed(1)}${Number.isFinite(tau) ? `, τ ${(tau * 1000).toFixed(1)} ms` : ''}`
+      + `${params.tensionControl ? `, トリム ${(100 * md.tensionTrim[k]).toFixed(2)}%` : ''}`
+      + `, 搬送中 ${md.tensionQueueLen[k].toFixed(2)} m）${clamp}`);
+  }
+  lines.push(md.tensionSettled ? '全スタンド間 静定' : '推移中');
+  const text = lines.join('\n');
+  if (tensionReadout.textContent !== text) tensionReadout.textContent = text;
+}
+tensionReadout.style.whiteSpace = 'pre-line';
+
 left.append(sLine.root, sStrip.root, sMat.root, sHeat.root,
-  sProc.root, sAgc.root, sRoll.root, sNum.root, sDisp.root);
+  sProc.root, sAgc.root, sTension.root, sRoll.root, sNum.root, sDisp.root);
 
 /* ── mu back-calculation ─────────────────────────────────────────────────── */
 
@@ -2743,6 +2912,23 @@ const hill = new FrictionHillChart(document.getElementById('nip') as HTMLCanvasE
 const agcScatter = new AgcScatterChart(
   document.getElementById('agcscatter') as HTMLCanvasElement);
 const agcChartCell = document.getElementById('chart-agc') as HTMLElement;
+const tensionChart = new TensionChart(document.getElementById('tensionchart') as HTMLCanvasElement);
+const tensionChartCell = document.getElementById('chart-tension') as HTMLElement;
+
+/** The chart is only there while a model is on; with it off there is no history to draw. */
+function refreshTensionChart(): void {
+  const hidden = params.tensionModel === 'off' || view.lineMode === 'reverse' || mill.count < 2;
+  if (tensionChartCell.hidden === hidden) return;
+  tensionChartCell.hidden = hidden;
+  layoutRef?.refresh();
+}
+
+/** One sample per solved frame, straight off the line's diagnostics. */
+function pushTensionSample(): void {
+  const md = mill.diag;
+  if (md.tensionModel === 'off') return;
+  tensionChart.push(md.tensionActual.map((v) => v / 1e6), md.tensionTarget.map((v) => v / 1e6));
+}
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
 /**
@@ -3123,6 +3309,7 @@ updateExtentChip();
 updateLegendStatic();
 buildStandGrid();
 refreshAgcChart();
+syncTensionUi();
 // view.running, not a literal: ?nosolve has already set it false.
 setRunning(view.running);
 fitView();
@@ -3205,6 +3392,41 @@ if (DEBUG_TITLE) {
     /** debug: poison a stand's velocity field, to watch it recover */
     poison: (k: number) => { const st = mill.stands[k]; if (!st) return false; st.flow.v.fill(NaN); return true; },
     restarts: () => mill.stands.map((st) => ({ restarts: st.restarts, giveUp: st.divergedGiveUp, ago: performance.now() - st.restartAt })),
+    /** the interstand gaps as the line carries them; MPa, %, ms, m */
+    tension: () => {
+      const md = mill.diag;
+      return {
+        model: md.tensionModel,
+        control: params.tensionControl,
+        timeScale: params.tensionTimeScale,
+        settled: md.tensionSettled,
+        flowError: md.flowError,
+        omega: [...md.omega],
+        gaps: mill.gapStates.map((g, k) => ({
+          k,
+          actual: md.tensionActual[k] / 1e6,
+          target: md.tensionTarget[k] / 1e6,
+          rigid: md.tensionRigid[k] / 1e6,
+          err: md.tensionError[k],
+          trimPct: 100 * md.tensionTrim[k],
+          tauMs: 1000 * md.tensionTau[k],
+          sens: g.sens,
+          queueLen: g.queue.length,
+          slices: g.queue.count,
+          clamped: g.clamped,
+          feedSpeed: mill.stands[k + 1]?.params.feedSpeed,
+          exitSpeed: mill.stands[k]?.diag.exitSpeed,
+          reaction: mill.stands[k + 1]?.diag.feedReaction,
+          appliedBack: (mill.stands[k + 1]?.params.backTension ?? NaN) / 1e6,
+          appliedFront: (mill.stands[k]?.params.frontTension ?? NaN) / 1e6,
+        })),
+      };
+    },
+    setTensionModel: (m: TensionModel) => {
+      params.tensionModel = m; selTension.set(m); tensionChart.reset(); syncTensionUi(); return true;
+    },
+    setTensionControl: (on: boolean) => { params.tensionControl = on; tTCtl.set(on); syncTensionUi(); return true; },
+    setTensionScale: (s: number) => { params.tensionTimeScale = s; sTScale.set(s); return true; },
     setMu: (k: number, mu: number) => {
       const f = standCells[k]?.mu.root as HTMLInputElement | undefined;
       if (!f) return false;
@@ -3368,6 +3590,7 @@ function frame(now: number): void {
     mill.advance(wall / 1000);
     announceRestarts();
     pushAgcSample();
+    pushTensionSample();
     solved = true;
   }
   if (view.running && view.showTracers) tracers.update(wall / 1000);
@@ -3898,6 +4121,11 @@ function updateStats(): void {
   const unsolvedTag = unsolved.length
     ? ` ⚠ 計算不能 ${unsolved.map(([k, s]) => `${standTag(k)} ${s === 'runaway' ? '扁平発散' : s === 'tension' ? '張力' : s === 'geometry' ? '圧下なし' : '噛み込みなし'}`).join('・')}`
     : '';
+  paintTensionReadout();
+  const tensionTag = md.tensionModel !== 'off'
+    ? ` ／ 張力: ${md.tensionModel === 'rigid' ? '剛体' : md.tensionModel === 'simple' ? '単純弾性' : '分布弾性'}`
+      + `${params.tensionControl ? '・制御中' : ''} ${md.tensionSettled ? '静定' : '推移中'}`
+    : '';
   const modelTag = params.loadModel === 'slab'
     ? ` ／ 荷重: スラブ法 (${SLAB_THEORY_LABEL[params.slabTheory]}${params.flattening === 'roberts' ? '・Roberts 偏平' : ''})${unsolvedTag}` : '';
   // Any stand whose volume is not conserved is named here, because the
@@ -3916,7 +4144,7 @@ function updateStats(): void {
       // Consecutive passes do not share a flow, so there is nothing to be off by.
       + (Number.isFinite(md.flowError)
         ? ` ／ 流量ずれ ${(md.flowError * 100).toFixed(2)}%` : '')
-      + ` ／ ${md.settled ? `全${w}収束` : '調整中'}`
+      + ` ／ ${md.settled ? `全${w}収束` : '調整中'}${tensionTag}`
     : `単スタンド${modelTag}${massTag}${totals}`
       + ` ／ 「ライン構成」で${view.lineMode === 'reverse' ? 'パス' : 'スタンド'}数を増やせる`;
 
@@ -3939,6 +4167,10 @@ function updateStats(): void {
     agcScatter.setGaugeRange(targetOf(standCount - 1) * 1000, targetOf(0) * 1000);
   }
   agcScatter.draw(agcTrailSet());
+  if (!tensionChartCell.hidden) {
+    tensionChart.draw(Array.from({ length: Math.max(0, mill.count - 1) },
+      (_, k) => `${standTag(k)}→${standTag(k + 1)}`));
+  }
   hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,

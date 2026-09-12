@@ -35,9 +35,17 @@ export interface StandView {
   load: number;
   /** target load [tonf]; 0 when this stand is not under load control */
   target: number;
-  /** entry (back) and exit (front) tension [MPa] */
+  /** entry (back) and exit (front) tension as typed in the table [MPa] */
   backTension: number;
   frontTension: number;
+  /**
+   * The same two as the line actually carries them [MPa], from the tension
+   * model; NaN with the model off, where the inputs are the whole story.
+   */
+  backTensionActual: number;
+  frontTensionActual: number;
+  /** a gap this stand touches is still away from its target or its reaction */
+  tensionHot: boolean;
   /** work roll radius [mm], for drawing the barrels to relative size */
   R: number;
   /** 'off' | 'lock' | 'work' | 'sat' | 'stall' | 'idle' | 'recalc' (just restarted after a NaN solve) | 'diverged' (given up) */
@@ -416,8 +424,16 @@ export class MillLineView {
       // Both ends of the pull, in the order the strip meets them. On a tandem
       // line the front tension of one stand is the back tension of the next,
       // so read across the line the row is continuous by construction.
-      row('張力 σb/σf', null,
-        `${s.backTension.toFixed(0)} / ${s.frontTension.toFixed(0)}`, 'MPa', false);
+      // With a tension model on, the table's numbers are targets and the line
+      // carries its own: the target goes in the command slot, the carried pair
+      // is the value, painted hot while a gap is still away from its target.
+      const tOn = Number.isFinite(s.frontTensionActual) || Number.isFinite(s.backTensionActual);
+      const tPair = (b: number, f: number) =>
+        `${Number.isFinite(b) ? b.toFixed(1) : '—'} / ${Number.isFinite(f) ? f.toFixed(1) : '—'}`;
+      row('張力 σb/σf', tOn ? tPair(s.backTension, s.frontTension) : null,
+        tOn ? tPair(s.backTensionActual, s.frontTensionActual)
+          : `${s.backTension.toFixed(0)} / ${s.frontTension.toFixed(0)}`,
+        'MPa', tOn && s.tensionHot);
       // Deformation resistance: the bite mean is what sets the load, the exit
       // value is what the strip leaves work-hardened to. Both, because the gap
       // between them is the hardening the pass did.

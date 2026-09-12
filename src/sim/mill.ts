@@ -38,6 +38,10 @@
  */
 
 import { RollingSim, type RollingParams, type AgcMode } from './solver';
+import {
+  newGapState, piStep, plantGain, speedSensitivity, type GapState, type TensionModel,
+} from './tension';
+import { slabPointAt } from './slab';
 
 /** Hard cap on stands (tandem) or passes (reverse); the UI offers 1..MAX_STANDS. */
 export const MAX_STANDS = 8;
@@ -149,6 +153,30 @@ export interface MillDiagnostics {
   settled: boolean;
   /** how far each stand's entry gauge has drifted from the one its window was fitted for */
   windowStrain: number[];
+
+  /* interstand tension, one entry per gap: index k is between stand k and k+1 */
+  /** the model the line is running; 'off' means the arrays below are empty */
+  tensionModel: TensionModel;
+  /** front tension of stand k as actually carried [Pa] */
+  tensionActual: number[];
+  /** front tension of stand k as typed in the table [Pa] */
+  tensionTarget: number[];
+  /** the tension the entry-face reaction says would balance the speeds [Pa] */
+  tensionRigid: number[];
+  /** relative roll-speed trim the controller has put on stand k */
+  tensionTrim: number[];
+  /** model time constant of the elastic lag [s]; NaN under rigid */
+  tensionTau: number[];
+  /** (σ − σ*)/σ* per gap; 0 with the controller off */
+  tensionError: number[];
+  /** −1 slack, +1 at the yield ceiling, 0 free */
+  tensionClamped: number[];
+  /** strip length the gap is holding [m], for the transport readout */
+  tensionQueueLen: number[];
+  /** every gap's tension has stopped moving (and, with control on, is on target) */
+  tensionSettled: boolean;
+  /** roll speed of each stand this frame [rad/s], after the trim */
+  omega: number[];
 }
 
 export class Mill {
@@ -181,6 +209,18 @@ export class Mill {
    * change here, where every path ends up.
    */
   private cond: RollingParams[] = [];
+  /**
+   * The gaps between the stands - `gaps[k]` is between stand k and k+1 - and
+   * the tension settings they run under, copied from the line's params at
+   * every sync. Empty while the model is off, so nothing below the model
+   * switch costs a frame it is not used on.
+   */
+  private gaps: GapState[] = [];
+  private tp = {
+    model: 'off' as TensionModel, L: 4.5, E: 2.1e11, timeScale: 1, follow: 0.5,
+    control: false, kp: 0, ki: 0, vLimit: 0.1,
+  };
+  private sensTick = 0;
 
   diag: MillDiagnostics = emptyMillDiag();
 
@@ -245,6 +285,7 @@ export class Mill {
       this.heldFor.push(0);
       hIn *= 1 - s.reduction;
     }
+    this.gaps = [];
     this.diag = emptyMillDiag();
   }
 
@@ -362,6 +403,78 @@ export class Mill {
       this.cond[k] = next;
       Object.assign(p, next);
     }
+    this.syncTension(base, setups);
+  }
+
+  /**
+   * Pick up the tension settings, and (re)build the gap state when the model
+   * comes on, the line changes length, or the strip's bar length moves.
+   *
+   * Only a tandem line has gaps. Reverse passes are one stand re-threaded,
+   * with a coiler at each end, so the model is forced off there whatever the
+   * dial says - the dial stays as typed for when the line goes back.
+   */
+  private syncTension(base: RollingParams, setups: StandSetup[]): void {
+    const n = this.stands.length;
+    const model: TensionModel = this.mode === 'tandem' && n > 1 ? base.tensionModel : 'off';
+    const tp = this.tp;
+    const rebuild = model !== tp.model
+      || (model !== 'off' && (this.gaps.length !== n - 1 || tp.L !== base.standDistance));
+    tp.model = model;
+    tp.L = base.standDistance;
+    tp.E = base.Estrip;
+    tp.timeScale = base.tensionTimeScale;
+    tp.follow = base.tensionFollow;
+    tp.control = base.tensionControl;
+    tp.kp = base.tensionKp;
+    tp.ki = base.tensionKi;
+    tp.vLimit = base.tensionVLimit;
+    if (rebuild) this.resetTension(setups);
+    if (!tp.control) for (const g of this.gaps) { g.integ = 0; g.trim = 0; g.err = 0; }
+  }
+
+  /**
+   * Start every gap at the table's tension, with the gap full of strip at the
+   * upstream stand's exit gauge. What a line threaded at its schedule holds.
+   */
+  resetTension(setups: StandSetup[]): void {
+    this.gaps = [];
+    if (this.tp.model === 'off') return;
+    for (let k = 0; k + 1 < this.stands.length; k++) {
+      const st = this.stands[k];
+      const h1 = st.diag.exitThickness > 0 ? st.diag.exitThickness
+        : st.params.h0 * (1 - st.params.reduction);
+      const sigma = setups[k]?.frontTension ?? 0;
+      this.gaps.push(newGapState(sigma * h1, this.tp.L, h1));
+    }
+  }
+
+  /** The gap state, for the readouts and the headless hook. Empty when off. */
+  get gapStates(): readonly GapState[] { return this.gaps; }
+
+  private coneSlipCache: number[] = [];
+  private coneTick = 0;
+
+  /**
+   * Forward slip of stand k at the schedule's tensions, by Bland–Ford, for the
+   * speed cone. Cached for eight frames - the theory integrates its pressure
+   * hill numerically - and 0 where it has no neutral point to offer.
+   */
+  private coneSlip(k: number, hOut: number): number {
+    if (k === 1) this.coneTick++;
+    if (this.coneTick % 8 !== 1 && Number.isFinite(this.coneSlipCache[k])) return this.coneSlipCache[k];
+    const st = this.stands[k];
+    const p = st.params, c = this.cond[k];
+    let f = 0;
+    if (c && hOut > 0 && p.h0 > hOut) {
+      const pt = slabPointAt({ ...p, slabTheory: 'blandford' }, {
+        h0: p.h0, h1: hOut, R: p.R, backTension: c.backTension, frontTension: c.frontTension,
+        entryStrain: st.entryStrain,
+      }, p.mu, st.diag.hitchcockR > 0 ? st.diag.hitchcockR : p.R);
+      if (Number.isFinite(pt.forwardSlip) && pt.forwardSlip > -0.5 && pt.forwardSlip < 0.5) f = pt.forwardSlip;
+    }
+    this.coneSlipCache[k] = f;
+    return f;
   }
 
   /** Whether anything a stand solves against differs from the last sync. */
@@ -404,6 +517,16 @@ export class Mill {
     st.resetState();
     this.h1Hist[k] = new Array(STEADY_WINDOW).fill(0);
     this.heldFor[k] = 0;
+    // The gaps either side go back to the schedule with the stand: a tension
+    // measured against the state that was just thrown away is not a state.
+    for (const j of [k - 1, k]) {
+      const g = this.gaps[j];
+      if (!g) continue;
+      const h1 = this.stands[j].params.h0 * (1 - this.stands[j].params.reduction);
+      g.T = this.cond[j]?.frontTension !== undefined ? this.cond[j].frontTension * h1 : g.T;
+      g.queue.reset(this.tp.L, h1);
+      g.integ = 0; g.trim = 0; g.tau = NaN;
+    }
   }
 
   advance(dt: number): void {
@@ -424,10 +547,15 @@ export class Mill {
     head.params.h0 = this.h0;
     head.entryStrain = 0;
     head.entryTemp = head.params.tempEntry;
+    const tm = this.tp.model;
     for (let k = 1; k < n; k++) {
       const up = this.stands[k - 1].diag;
       const st = this.stands[k];
-      const h = up.exitThickness;
+      // With a tension model on, the gauge arriving is the one that left the
+      // stand upstream a transit time ago - the gap is a queue of strip and
+      // this stand bites its front. Off, the chain is instantaneous as before.
+      const front = tm !== 'off' ? this.gaps[k - 1]?.queue.frontThickness() : NaN;
+      const h = front > 0 && Number.isFinite(front) ? front : up.exitThickness;
       if (!(h > 0) || !Number.isFinite(h)) continue;
       const cur = st.params.h0;
       const lim = Math.max(cur, h) * H0_RATE;
@@ -460,7 +588,13 @@ export class Mill {
     // hold: each pass keeps whatever barrel speed it was given.
     if (this.autoSpeed && this.mode === 'tandem' && n > 1) {
       const lead = this.stands[0].diag;
-      const q = lead.exitSpeed * lead.exitThickness;
+      // The cone is pitched from the *base* flow of the first stand. With the
+      // tension controller trimming stand 0 for its own gap, the measured exit
+      // speed carries that trim, and a cone pitched from it would hand the
+      // trim to every stand downstream - the relative speeds, which are all
+      // the tension answers to, would not have moved at all.
+      const lead0 = 1 + (tm !== 'off' && this.tp.control ? this.gaps[0]?.trim ?? 0 : 0);
+      const q = (lead.exitSpeed / lead0) * lead.exitThickness;
       if (q > 0 && Number.isFinite(q)) {
         for (let k = 1; k < n; k++) {
           const st = this.stands[k];
@@ -475,10 +609,21 @@ export class Mill {
           const hOut = (mode === 'gauge' || mode === 'ratio') ? st.agcSetpoint
             : st.diag.exitThickness > 0 ? st.diag.exitThickness
               : st.params.h0 * (1 - st.params.reduction);
-          if (hOut > 0) st.params.omega = q / hOut / Math.max(st.params.R, 1e-9);
+          // With a tension model on the cone is the sibling app's 初期設定計算:
+          // the strip leaves a stand faster than its rolls by the forward slip,
+          // so a barrel pitched on mass flow alone runs slow by that much and
+          // the gap has to find the hundreds of MPa that shift the slips to
+          // cover it. Pitched on the Bland–Ford slip *at the schedule's
+          // tension*, the speeds already match there, and the model only has
+          // to carry what the FEM disagrees with the theory by. Feed-forward
+          // from the targets, not the live slip, so the cone closes no loop
+          // through the tension it is meant to leave alone.
+          const slip = tm !== 'off' ? this.coneSlip(k, hOut) : 0;
+          if (hOut > 0) st.params.omega = q / hOut / Math.max(st.params.R, 1e-9) / (1 + slip);
         }
       }
     }
+    if (tm !== 'off') this.applyTension();
 
     // A stand only starts hunting once its feed has stopped moving. The test is
     // the entry gauge itself, not whether the stand upstream calls itself
@@ -518,7 +663,110 @@ export class Mill {
       // and a NaN handed on is a line gone, not a stand.
       st.recoverIfDiverged(performance.now());
     }
+    if (tm !== 'off') this.updateTension(dt);
     this.collect();
+  }
+
+  /**
+   * What the gaps hand the stands this frame, applied before the solve.
+   *
+   * Three things per gap. The upstream stand's roll speed takes the
+   * controller's trim. The downstream stand's entry face is prescribed at the
+   * upstream exit speed - (5.52), and the reading that makes the reaction a
+   * tension. And both stands are given the carried tension as the pull on the
+   * side that faces the gap: one force per unit width, two stresses, by the
+   * two gauges it acts on (5.45).
+   */
+  private applyTension(): void {
+    const tp = this.tp;
+    for (let k = 0; k < this.gaps.length; k++) {
+      const g = this.gaps[k];
+      const up = this.stands[k], dn = this.stands[k + 1];
+      if (tp.control && Number.isFinite(g.trim)) up.params.omega *= 1 + g.trim;
+      const vOut = up.diag.exitSpeed;
+      if (vOut > 0 && Number.isFinite(vOut)) dn.params.feedSpeed = vOut;
+      const h1 = up.diag.exitThickness > 0 ? up.diag.exitThickness
+        : up.params.h0 * (1 - up.params.reduction);
+      up.params.frontTension = g.T / h1;
+      dn.params.backTension = g.T / Math.max(dn.params.h0, 1e-9);
+    }
+  }
+
+  /**
+   * Move each gap's tension by what the solves just said, then the controller.
+   *
+   * The downstream stand ran with its feed face at the upstream exit speed and
+   * the carried tension on it. Whatever longitudinal force that face had to
+   * supply is the force the strip would have carried instead: the tension the
+   * gap *would* hold if it were rigid is the carried one less the reaction
+   * over the face height. Rigid takes a fraction of that step every frame -
+   * a fraction, because the reaction is read off a Picard iteration that is
+   * itself still moving. The elastic models take the step of a first-order
+   * lag with the bar's own time constant, in model time.
+   */
+  private updateTension(dt: number): void {
+    const tp = this.tp;
+    const dtm = dt * tp.timeScale;
+    const doSens = ++this.sensTick % 8 === 0;
+    for (let k = 0; k < this.gaps.length; k++) {
+      const g = this.gaps[k];
+      const up = this.stands[k], dn = this.stands[k + 1];
+      const ud = up.diag, dd = dn.diag;
+      const h1 = ud.exitThickness > 0 ? ud.exitThickness : up.params.h0 * (1 - up.params.reduction);
+      // Transport: what left the upstream stand goes in at the back, what the
+      // downstream stand took comes off the front. The two are equal by
+      // construction here (the feed is prescribed at the exit speed), so the
+      // length in the gap is conserved and only the thickness profile moves.
+      if (ud.exitSpeed > 0 && dtm > 0) {
+        g.queue.push(ud.exitSpeed * dtm, h1);
+        g.queue.pop((dn.params.feedSpeed > 0 ? dn.params.feedSpeed : ud.exitSpeed) * dtm);
+      }
+      const valid = dn.params.feedSpeed > 0 && dd.feedFace > 0 && dd.contactNodes > 0
+        && Number.isFinite(dd.feedReaction) && Number.isFinite(g.T);
+      if (!valid) { g.Trigid = g.T; continue; }
+      const sigmaRigidB = dn.params.backTension - dd.feedReaction / dd.feedFace;
+      g.Trigid = sigmaRigidB * dn.params.h0;
+
+      // The slip sensitivity: the elastic time constant and the controller's
+      // plant gain both need it, rigid without control does not.
+      if ((tp.model !== 'rigid' || tp.control) && (doSens || !Number.isFinite(g.sens))) {
+        const s = speedSensitivity(
+          up.params, h1, ud.hitchcockR, up.entryStrain,
+          dn.params, dd.exitThickness, dd.hitchcockR, dn.entryStrain, g.T);
+        if (Number.isFinite(s)) g.sens = s;
+      }
+      let beta: number;
+      if (tp.model === 'rigid') {
+        beta = tp.follow;
+        g.tau = NaN;
+      } else {
+        // (5.44): K = E h1 / L for the uniform bar; (5.47): the series sum of
+        // the slices for the distributed one. Both per unit width, in N/m per
+        // m/s of mismatch.
+        const K = tp.model === 'simple'
+          ? (tp.E * h1) / Math.max(tp.L, 1e-6)
+          : tp.E / Math.max(g.queue.sumLenOverH, 1e-12);
+        const tau = Number.isFinite(g.sens) && g.sens > 0 ? 1 / (K * g.sens) : NaN;
+        g.tau = tau;
+        // No neutral point to differentiate (Bland–Ford failed on a side):
+        // fall back to the rigid step rather than freeze the gap.
+        beta = Number.isFinite(tau) && tau > 0 ? 1 - Math.exp(-dtm / tau) : tp.follow;
+      }
+      let T = g.T + beta * (g.Trigid - g.T);
+      // The strip cannot push, and it cannot carry more than it yields at:
+      // held at 90 % of the plane-strain flow stress it leaves upstream with.
+      const kf = (2 / Math.sqrt(3)) * ud.exitFlowStress;
+      const Tmax = kf > 0 ? 0.9 * kf * h1 : Infinity;
+      g.clamped = 0;
+      if (T < 0) { T = 0; g.clamped = -1; }
+      else if (T > Tmax) { T = Tmax; g.clamped = 1; }
+      g.T = T;
+
+      if (tp.control) {
+        const target = this.cond[k]?.frontTension ?? 0;
+        piStep(g, g.T / h1, target, plantGain(g, ud.exitSpeed, h1), dtm, tp.kp, tp.ki, tp.vLimit);
+      }
+    }
   }
 
   private collect(): void {
@@ -554,6 +802,39 @@ export class Mill {
     d.totalReduction = this.h0 > 0 && n > 0 ? 1 - d.h1[n - 1] / this.h0 : 0;
     d.flowError = this.mode === 'tandem' ? worst : NaN;
     d.settled = settled;
+    d.omega.length = n;
+    for (let k = 0; k < n; k++) d.omega[k] = this.stands[k].params.omega;
+
+    const tp = this.tp;
+    const m = this.gaps.length;
+    d.tensionModel = tp.model;
+    d.tensionActual.length = m; d.tensionTarget.length = m; d.tensionRigid.length = m;
+    d.tensionTrim.length = m; d.tensionTau.length = m; d.tensionError.length = m;
+    d.tensionClamped.length = m; d.tensionQueueLen.length = m;
+    let tSettled = true;
+    for (let k = 0; k < m; k++) {
+      const g = this.gaps[k];
+      const up = this.stands[k];
+      const h1 = up.diag.exitThickness > 0 ? up.diag.exitThickness
+        : up.params.h0 * (1 - up.params.reduction);
+      const target = this.cond[k]?.frontTension ?? 0;
+      d.tensionActual[k] = g.T / h1;
+      d.tensionTarget[k] = target;
+      d.tensionRigid[k] = g.Trigid / h1;
+      d.tensionTrim[k] = g.trim;
+      d.tensionTau[k] = g.tau;
+      d.tensionError[k] = tp.control ? g.err : 0;
+      d.tensionClamped[k] = g.clamped;
+      d.tensionQueueLen[k] = g.queue.length;
+      // Settled: the reaction agrees with the carried tension to a percent of
+      // it (or of 5 MPa on a slack gap) - the reaction is read off a solve
+      // that jitters at that level - and the controller, if it is on, has the
+      // error inside the same band.
+      const ref = Math.max(g.T, 5e6 * h1);
+      if (Math.abs(g.Trigid - g.T) > 1e-2 * ref) tSettled = false;
+      if (tp.control && Math.abs(g.err) > 1e-2) tSettled = false;
+    }
+    d.tensionSettled = tSettled;
   }
 }
 
@@ -561,5 +842,8 @@ function emptyMillDiag(): MillDiagnostics {
   return {
     h0: 0, h1: [], reduction: [], totalReduction: 0, force: [], forceError: [],
     exitSpeed: [], flow: [], flowError: 0, settled: false, windowStrain: [],
+    tensionModel: 'off', tensionActual: [], tensionTarget: [], tensionRigid: [],
+    tensionTrim: [], tensionTau: [], tensionError: [], tensionClamped: [],
+    tensionQueueLen: [], tensionSettled: true, omega: [],
   };
 }

@@ -261,6 +261,17 @@ export class FlowSolver {
   }
 
   /**
+   * Height of the prescribed feed face [m]: half the entry thickness in this
+   * symmetric model. A pull of σ on that face is a force σ times this, per unit
+   * width - the same conversion `applyTensions` makes - so a reaction divided
+   * by it is the pull the face is standing in for.
+   */
+  feedFaceHeight(): number {
+    const m = this.mesh;
+    return m.X[2 * m.ny + 1] - m.X[1];
+  }
+
+  /**
    * Everything this solver is holding.
    *
    * Counted array by array rather than by multiplying one length by a

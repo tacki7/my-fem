@@ -753,3 +753,136 @@ export class AgcScatterChart {
     }
   }
 }
+
+/* ── interstand tension over time ────────────────────────────────────────── */
+
+const GAP_COLORS = [
+  'rgba(127,228,255,0.95)', 'rgba(255,178,110,0.95)', 'rgba(170,255,150,0.95)',
+  'rgba(255,140,200,0.95)', 'rgba(220,200,120,0.95)', 'rgba(160,170,255,0.95)',
+  'rgba(255,120,120,0.95)',
+];
+
+/**
+ * Rolling time chart of each gap's tension: the carried value as a line and
+ * the table's target as a dashed one in the same colour. One sample per solved
+ * frame; the window is the last `len` samples, so at 60 Hz the default shows
+ * the last ten seconds of real time. Autoscaled from zero to the larger of the
+ * two, with a little headroom, so a gap sitting on its target reads as two
+ * lines on top of each other and one hunting reads as a wave around a rule.
+ */
+export class TensionChart {
+  private canvas: HTMLCanvasElement;
+  private len: number;
+  private head = 0;
+  private filled = 0;
+  private actual: Float32Array[] = [];
+  private target: Float32Array[] = [];
+
+  constructor(canvas: HTMLCanvasElement, len = 600) {
+    this.canvas = canvas;
+    this.len = len;
+  }
+
+  /** Forget the history: the line it was drawn for no longer exists. */
+  reset(): void {
+    this.head = 0;
+    this.filled = 0;
+    this.actual = [];
+    this.target = [];
+  }
+
+  /** one sample per gap, in MPa */
+  push(actual: number[], target: number[]): void {
+    const m = actual.length;
+    if (this.actual.length !== m) {
+      this.reset();
+      for (let k = 0; k < m; k++) {
+        this.actual.push(new Float32Array(this.len).fill(NaN));
+        this.target.push(new Float32Array(this.len).fill(NaN));
+      }
+    }
+    for (let k = 0; k < m; k++) {
+      this.actual[k][this.head] = actual[k];
+      this.target[k][this.head] = target[k];
+    }
+    this.head = (this.head + 1) % this.len;
+    if (this.filled < this.len) this.filled++;
+  }
+
+  draw(tags: string[]): void {
+    const ctx = fit(this.canvas);
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    const padL = 40, padR = 10, padT = 10, padB = 16;
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = FONT;
+    const m = this.actual.length;
+    if (m === 0 || this.filled < 2) {
+      ctx.fillStyle = 'rgba(190,206,230,0.4)';
+      ctx.textAlign = 'center';
+      ctx.fillText(m === 0 ? '張力モデル OFF のとき時系列は出ない' : 'データ待ち', w / 2, h / 2);
+      ctx.textAlign = 'left';
+      return;
+    }
+    let peak = 1;
+    for (let k = 0; k < m; k++) {
+      for (let i = 0; i < this.len; i++) {
+        const a = this.actual[k][i], t = this.target[k][i];
+        if (a > peak) peak = a;
+        if (t > peak) peak = t;
+      }
+    }
+    peak *= 1.15;
+    const X = (i: number) => padL + ((w - padL - padR) * i) / (this.len - 1);
+    const Y = (v: number) => h - padB - ((h - padT - padB) * v) / peak;
+
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const v = (peak * i) / 3;
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+      ctx.fillStyle = 'rgba(190,206,230,0.55)';
+      ctx.textAlign = 'right';
+      ctx.fillText(v.toFixed(v < 10 ? 1 : 0), padL - 5, y + 3);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(190,206,230,0.4)';
+    ctx.fillText('MPa', 2, padT + 2);
+
+    // Oldest sample at the left. The ring is read from `head` when full and
+    // from zero while it is filling, so the trace grows in from the left and
+    // then scrolls.
+    const start = this.filled < this.len ? 0 : this.head;
+    const count = this.filled;
+    const offset = this.len - count;
+    for (let k = 0; k < m; k++) {
+      const colour = GAP_COLORS[k % GAP_COLORS.length];
+      const passes: [Float32Array, number[]][] = [[this.target[k], [4, 3]], [this.actual[k], []]];
+      for (const [arr, dash] of passes) {
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = dash.length ? 1 : 1.5;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < count; i++) {
+          const v = arr[(start + i) % this.len];
+          if (!Number.isFinite(v)) { pen = false; continue; }
+          const x = X(offset + i), y = Y(v);
+          if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          pen = true;
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // Label at the right end of the live trace, where the eye lands.
+      const last = this.actual[k][(start + count - 1) % this.len];
+      if (Number.isFinite(last)) {
+        ctx.fillStyle = colour;
+        ctx.textAlign = 'right';
+        ctx.fillText(`${tags[k] ?? k + 1} ${last.toFixed(1)}`, w - padR - 2, Math.max(padT + 9, Y(last) - 3));
+        ctx.textAlign = 'left';
+      }
+    }
+  }
+}
