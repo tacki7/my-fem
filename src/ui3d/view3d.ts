@@ -13,7 +13,7 @@ import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
 import { el, section, slider, select, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
-import { LineChart, FrontView, EndView, SectionView, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { LineChart, FrontView, EndView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 
@@ -118,7 +118,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cGauge = cell('v3-gauge', '板厚プロファイル', '出側 h₁（実線）と入側 h₀（破線）の平均からの偏差');
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（平均比）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
-  chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cEps.root, cSig.root);
+  const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
+  const cFlow = cell('v3-flow', '横流れ速度 u_x(x, z)', '材料 FEM ／ ロール周速比 [%] ／ 正 = +x 側へ（板端へ広がる流れ）');
+  chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cEps.root, cSig.root, cPress.root, cFlow.root);
 
   // the headline numbers as chips over the front view, like the 2D top bar
   const status = el('div', 'v3-status');
@@ -148,6 +150,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const charts = {
     defl: new LineChart(cDefl.canvas), flat: new LineChart(cFlat.canvas), load: new LineChart(cLoad.canvas),
     gauge: new LineChart(cGauge.canvas), eps: new LineChart(cEps.canvas), sig: new LineChart(cSig.canvas),
+    press: new HeatChart(cPress.canvas), flow: new HeatChart(cFlow.canvas),
   };
 
   /* ── right panel: results ── */
@@ -166,7 +169,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
   into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
-  into(gNum, 'conv', '収束'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
+  into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
   const contactSec = section('接触力・支持反力', { open: true });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
@@ -210,7 +213,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   };
 
   const applyPreset = (pr: Preset3D) => {
-    params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)] };
+    params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)], asu2: [...(pr.patch.asu2 ?? defaultParams(pr.mill).asu2)] };
     solver.setParams(params); dirty = true; running = true; buildLeft();
   };
 
@@ -246,10 +249,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // actuators
     const actSec = section('アクチュエータ', { open: true });
     if (params.mill === '4hi' || params.mill === '6hi') {
-      actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
+      actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf/chock', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
     }
     if (params.mill === '6hi') {
-      actSec.body.append(num('irBender', 'IR ベンダー', 'tonf', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
+      actSec.body.append(num('irBender', 'IR ベンダー', 'tonf/chock', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
       actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上下逆向きのシフトを半モデルでは両端対称に扱う。'));
     }
     if (params.mill === '20hi') {
@@ -258,27 +261,41 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       actSec.body.append(num('taperDepth', 'テーパ深さ（半径）', 'µm', 0, 1000, 10, 1e-6));
     }
     if (params.mill === '12hi' || params.mill === '20hi') {
-      const asuWrap = el('div', 'ctrl');
-      const top = el('div', 'ctrl-top');
-      const lab = el('label', 'ctrl-label', 'AS-U サドル押し込み');
-      lab.append(helpMark(`${params.mill === '20hi' ? 'B・C 軸' : 'B 軸'}のバッキング軸を支えるサドルを個別に押し込む [µm]（正 = ワークロール側へ）。7 点のラックで胴長方向のクラウンを作る。`));
-      top.append(lab);
-      asuWrap.append(top);
-      const row = el('div', 'v3-asu');
-      params.asu.forEach((v, k) => {
-        row.append(numField({
-          value: v * 1e6, min: -500, max: 500, step: 10, digits: 0,
-          onChange: (x) => { params.asu[k] = x * 1e-6; params.asu = [...params.asu]; apply(); },
-        }).root);
-      });
-      asuWrap.append(row);
-      const presets = buttonRow([
-        { text: 'フラット', onClick: () => { params.asu = new Array(ASU_RACKS).fill(0); apply(); buildLeft(); } },
-        { text: '山形 +200', onClick: () => { params.asu = asuShape(200e-6); apply(); buildLeft(); } },
-        { text: '谷形 −200', onClick: () => { params.asu = asuShape(-200e-6); apply(); buildLeft(); } },
-      ]);
-      asuWrap.append(presets);
-      actSec.body.append(asuWrap);
+      // one rack row per AS-U: the 12Hi has one (B), the 20Hi two (A-B and C-D)
+      const racks: { key: 'asu' | 'asu2'; label: string; hint: string }[] = params.mill === '20hi'
+        ? [
+          { key: 'asu', label: 'AS-U 1（A–B 軸）', hint: 'バッキング A・B 軸のサドル 7 点の押し込み [µm]（正 = ワークロール側へ）。ダブル AS-U の駆動側の組。' },
+          { key: 'asu2', label: 'AS-U 2（C–D 軸）', hint: 'バッキング C・D 軸のサドル 7 点の押し込み [µm]。作業側の組。両組を同じにすれば従来の AS-U。' },
+        ]
+        : [{ key: 'asu', label: 'AS-U（B 軸）', hint: 'B 軸のバッキング軸を支えるサドルを個別に押し込む [µm]（正 = ワークロール側へ）。7 点のラックで胴長方向のクラウンを作る。' }];
+      for (const rk of racks) {
+        const asuWrap = el('div', 'ctrl');
+        const top = el('div', 'ctrl-top');
+        const lab = el('label', 'ctrl-label', rk.label);
+        lab.append(helpMark(rk.hint));
+        top.append(lab);
+        asuWrap.append(top);
+        const row = el('div', 'v3-asu');
+        params[rk.key].forEach((v, k) => {
+          row.append(numField({
+            value: v * 1e6, min: -500, max: 500, step: 10, digits: 0,
+            onChange: (x) => { params[rk.key][k] = x * 1e-6; params[rk.key] = [...params[rk.key]]; apply(); },
+          }).root);
+        });
+        asuWrap.append(row);
+        const set = (arr: number[]) => { params[rk.key] = arr; apply(); buildLeft(); };
+        asuWrap.append(buttonRow([
+          { text: 'フラット', onClick: () => set(new Array(ASU_RACKS).fill(0)) },
+          { text: '山形 +200', onClick: () => set(asuShape(200e-6)) },
+          { text: '谷形 −200', onClick: () => set(asuShape(-200e-6)) },
+        ]));
+        actSec.body.append(asuWrap);
+      }
+      if (params.mill === '20hi') {
+        actSec.body.append(buttonRow([
+          { text: '2 → 1 にコピー', title: 'AS-U 2 を AS-U 1 と同じにする', onClick: () => { params.asu2 = [...params.asu]; apply(); buildLeft(); } },
+        ]));
+      }
     }
     if (!actSec.body.children.length) actSec.body.append(el('div', 'ctrl-hint', '2Hi にはアクチュエータがない（圧下とレベリングのみ）。'));
     left.append(actSec.root);
@@ -297,6 +314,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
     // strip
     const stripSec = section('板・圧延条件', { open: true });
+    stripSec.body.append(select<'slab' | 'fem'>('材料の変形計算', [
+      { value: 'fem', text: '平面 FEM（幅 × 圧延方向、ロールと連成）' },
+      { value: 'slab', text: 'スラブ法（幅方向スライス）' },
+    ], params.stripModel, (v) => { params.stripModel = v; apply(); buildLeft(); },
+    '平面 FEM: 噛み込み域の板を幅方向 × 圧延方向に分割した剛塑性 FEM（板厚方向は一様速度の薄板近似、板厚はロールギャップ）。圧力・摩擦丘・横流れが結果として出て、ロールの撓み・扁平と連立して解く。スラブ法: 幅方向スライスごとの Bland & Ford。').root);
+    if (params.stripModel === 'fem') {
+      stripSec.body.append(num('stripNz', '材料 FEM 圧延方向 分割数', '', 4, 32, 1, 1, '噛み込み弧に沿った要素数。幅方向は「幅方向 分割数」の板上の点数に従う。'));
+    }
     stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3));
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
     stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差。出側クラウン比が入側と一致すれば平坦。'));
@@ -437,6 +462,23 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       marks: [{ y: params.frontTension / 1e6, label: '設定平均', color: '#8ea0bd' }],
     });
 
+    {
+      const f = R.fem;
+      const xs = R.x, arcs = R.arc;
+      // the FEM's grid: its columns are between the loaded stations; hand
+      // the heat map those stations' x and arcs
+      if (f) {
+        const idx: number[] = [];
+        for (let s = 0; s < xs.length; s++) if (Number.isFinite(R.h1[s])) idx.push(s);
+        const fx = idx.map((s) => xs[s]), fa = idx.map((s) => arcs[s]);
+        charts.press.draw(f.p, f.ncol, f.nrow, fx, fa, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05 });
+        charts.flow.draw(f.ux, f.ncol, f.nrow, fx, fa, { unit: '%', scale: 100, halfWidth: strip * 1.05, symmetric: true });
+      } else {
+        charts.press.draw(null, 0, 0, xs, arcs, { unit: 'MPa', scale: 1, halfWidth: strip });
+        charts.flow.draw(null, 0, 0, xs, arcs, { unit: '%', scale: 1, halfWidth: strip });
+      }
+    }
+
     // stats
     stats.set('force', (R.force / TONF).toFixed(1));
     stats.set('screw', (R.screw * 1e3).toFixed(3));
@@ -450,6 +492,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}`);
+    stats.set('fem', R.fem ? `${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];
       const inf = solver.ringFor(wr);

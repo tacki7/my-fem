@@ -133,7 +133,9 @@ export interface Params3D {
   irShift: number;
   /** 20Hi first intermediate taper: start relative to the strip edge [m] (+ outside), length and depth */
   taperShift: number; taperLen: number; taperDepth: number;
+  /** 12Hi: the B shaft's saddles. 20Hi: `asu` is the A-B pair, `asu2` the C-D pair (double AS-U) */
   asu: number[];
+  asu2: number[];
   /** cluster layout: first-intermediate angle from vertical [rad] - raised to the least that keeps the pair apart */
   angle1: number;
   /** the gap kept between rolls that sit side by side in a cluster [m] */
@@ -143,6 +145,10 @@ export interface Params3D {
   nuRoll: number;
   /** stations across the widest roll */
   stations: number;
+  /** how the strip is solved: slab passes per slice, or the plan-view rigid-plastic FEM (see stripfem.ts) */
+  stripModel: 'slab' | 'fem';
+  /** rows along the rolling direction of the strip FEM */
+  stripNz: number;
   /** how a roll flattens at a contact: the Hertz/Johnson closed form, or the cross-section ring FEM */
   flatModel: 'hertz' | 'ring';
   /** ring FEM: circumferential divisions, rings through the wall, radial grading, hub radius as a fraction of R */
@@ -174,10 +180,12 @@ export function defaultParams(mill: MillType): Params3D {
     wrBender: 0, irBender: 0, irShift: 0,
     taperShift: 0, taperLen: 0.3, taperDepth: 0.4e-3,
     asu: new Array(ASU_RACKS).fill(0),
+    asu2: new Array(ASU_RACKS).fill(0),
     angle1: (24 * Math.PI) / 180,
     clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
     stations: 81,
+    stripModel: 'fem', stripNz: 8,
     flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
   };
   switch (mill) {
@@ -368,8 +376,9 @@ export function buildStack(p: Params3D): Stack {
         support: 'saddle', shaftBeam: true, asu,
       });
       rolls.push(
-        bb('BB-A', 'バッキング A', cA), bb('BB-B', 'バッキング B (AS-U)', cB, p.asu),
-        bb('BB-C', 'バッキング C (AS-U)', cC, p.asu), bb('BB-D', 'バッキング D', cD),
+        // double AS-U: one rack setting on the A-B pair, another on C-D
+        bb('BB-A', 'バッキング A (AS-U 1)', cA, p.asu), bb('BB-B', 'バッキング B (AS-U 1)', cB, p.asu),
+        bb('BB-C', 'バッキング C (AS-U 2)', cC, p.asu2), bb('BB-D', 'バッキング D (AS-U 2)', cD, p.asu2),
       );
       screwRolls.push(6, 7, 8, 9);
       touch(0, 1); touch(0, 2);

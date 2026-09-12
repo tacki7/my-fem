@@ -155,6 +155,8 @@ export function slider(o: SliderOpts): SliderHandle {
   if (o.hint) lab.append(helpMark(o.hint));
   const out = el('input', 'ctrl-value');
   out.type = 'text';
+  // a long unit (tonf/chock) needs a wider field than the default 7.6em
+  if (o.unit && o.unit.length > 5) out.style.width = `${7.6 + (o.unit.length - 5) * 0.62}em`;
   out.inputMode = 'decimal';
   out.spellcheck = false;
   top.append(lab, out);

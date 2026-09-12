@@ -955,7 +955,7 @@ body.resizing * { cursor: inherit !important; }
 #view3d .v3-front-mode .btn { padding: 2px 8px; font-size: 10.5px; border-radius: 5px; }
 #view3d .v3-charts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 10px;
   min-height: 0;
@@ -964,6 +964,6 @@ body.resizing * { cursor: inherit !important; }
 #v3-section { width: 100%; height: 230px; display: block; border-radius: 6px; }
 .v3-asu { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .v3-asu .num-field { width: 100%; min-width: 0; padding: 3px 2px; text-align: center; font-size: 10.5px; }
-@media (max-width: 1400px) {
-  #view3d .v3-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 1500px) {
+  #view3d .v3-charts { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
 }

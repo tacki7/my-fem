@@ -698,3 +698,83 @@ export class SectionView {
     ctx.fillText(`変形 ×${magnify.toFixed(0)} ／ nt ${inf.nt} × nr ${inf.nr} ／ ハブ ${(inf.Rhub / inf.R).toFixed(2)} R`, 8, H - 6);
   }
 }
+
+/** a scalar field on the bite's (x, z) grid as a heat map: columns across the width, rows entry → exit */
+export class HeatChart {
+  constructor(private canvas: HTMLCanvasElement) {}
+
+  draw(
+    field: Float64Array | null, ncol: number, nrow: number, x: ArrayLike<number>, arc: ArrayLike<number>,
+    o: { unit: string; scale: number; halfWidth: number; symmetric?: boolean; note?: string },
+  ): void {
+    const ctx = fit(this.canvas);
+    const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = FONT;
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    if (!field || ncol < 1 || nrow < 1) { ctx.fillText(o.note ?? '材料モデルが平面 FEM のときに表示', 8, 8); return; }
+    const padL = 46, padR = 62, padT = 8, padB = 20;
+    const pw = W - padL - padR, ph = H - padT - padB;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < field.length; i++) { const v = field[i] * o.scale; if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (!Number.isFinite(lo)) return;
+    if (o.symmetric) { const m = Math.max(Math.abs(lo), Math.abs(hi), 1e-12); lo = -m; hi = m; }
+    if (hi - lo < 1e-12) hi = lo + 1;
+    const xr = o.halfWidth * 1e3;
+    const sx = (xx: number) => padL + ((xx + xr) / (2 * xr)) * pw;
+    const ramp = (t: number): string => {
+      const c = Math.max(0, Math.min(1, t));
+      if (o.symmetric) {
+        // blue - dark - orange
+        const u = c * 2 - 1;
+        const r = u > 0 ? 40 + 215 * u : 40, g = u > 0 ? 60 + 100 * u : 60 + 80 * -u, b = u < 0 ? 90 + 165 * -u : 90;
+        return `rgb(${r | 0},${g | 0},${b | 0})`;
+      }
+      const r = 30 + 225 * Math.min(1, c * 1.5), g = 40 + 170 * (c < 0.6 ? c / 0.6 : 1) - 120 * Math.max(0, c - 0.6) / 0.4, b = 110 - 100 * c;
+      return `rgb(${r | 0},${g | 0},${b | 0})`;
+    };
+    // columns sit between strip stations; each row is a slice of the arc
+    // from entry (top) to exit (bottom), the arc length its own per column
+    let arcMax = 1e-9;
+    for (let i = 0; i < x.length; i++) if (Number.isFinite(arc[i])) arcMax = Math.max(arcMax, arc[i]);
+    for (let c = 0; c < ncol; c++) {
+      const x0 = sx(x[c] * 1e3), x1 = sx(x[c + 1] * 1e3);
+      const L = 0.5 * ((Number.isFinite(arc[c]) ? arc[c] : 0) + (Number.isFinite(arc[c + 1]) ? arc[c + 1] : 0));
+      const hFrac = Math.max(L / arcMax, 0.04);
+      for (let r = 0; r < nrow; r++) {
+        const v = field[c * nrow + r] * o.scale;
+        ctx.fillStyle = ramp((v - lo) / (hi - lo));
+        const y0 = padT + ph * (1 - hFrac) + (ph * hFrac * r) / nrow;
+        const y1 = padT + ph * (1 - hFrac) + (ph * hFrac * (r + 1)) / nrow;
+        ctx.fillRect(x0, y0, Math.max(1, x1 - x0 + 0.5), y1 - y0 + 0.5);
+      }
+    }
+    // axes
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (let i = 0; i <= 4; i++) { const xx = -xr + (2 * xr * i) / 4; ctx.fillText(`${xx.toFixed(0)}`, sx(xx), padT + ph + 4); }
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('入側', padL - 5, padT + ph * 0.06);
+    ctx.fillText('出側', padL - 5, padT + ph - 6);
+    ctx.fillText(`弧 ${(arcMax * 1e3).toFixed(1)} mm`, padL - 5, padT + ph * 0.5);
+    // colour bar
+    const bx = W - padR + 10, bw = 10;
+    for (let k = 0; k < 40; k++) {
+      ctx.fillStyle = ramp(1 - k / 40);
+      ctx.fillRect(bx, padT + (ph * k) / 40, bw, ph / 40 + 0.5);
+    }
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(nice(hi), bx + bw + 4, padT);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(nice(lo), bx + bw + 4, padT + ph);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(o.unit, bx + bw + 4, padT + ph / 2);
+  }
+}

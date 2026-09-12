@@ -21,8 +21,9 @@
 import { BandMatrix, denseSolve } from './band';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
+import { StripFem, type StripFemResult } from './stripfem';
 import {
-  sliceLoad, springback, kfMean, kfExitOf, TENSION_CAP, type StripLaw,
+  sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
   buildStack, radiusProfile, onBarrel, type Params3D, type Stack, type RollDef,
@@ -51,6 +52,10 @@ const SCREW_MAX = 20e-3;
 /** outer iterations after which a solve that has not settled is called stuck */
 const STUCK_ITERS = 150;
 const NO_LOAD = { q: 0, arc: 0, runaway: false } as const;
+/** the FEM correction's change (load ratio, or elongation × 50) under which the coupled solve is taken as settled */
+const FEM_FIXED_TOL = 2e-3;
+/** relaxation of that correction between outer solves */
+const FEM_RELAX = 0.3;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -106,7 +111,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -116,6 +121,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   target: '制御目標に届かない',
   layout: 'ロール配置が成立していない（端面図の赤い線）',
   openContact: '上下のロールが離れている接触がある（端面図の破線）',
+  fem: '材料 FEM が反復上限で打ち切り（結果は近似）',
 };
 
 export interface Result3D {
@@ -158,6 +164,10 @@ export interface Result3D {
   warnings: Warning3D[];
   /** the layout's own complaints, spelled out (see `layoutIssues`) */
   notes: string[];
+  /** the strip FEM's last solution, when that model is on */
+  fem: StripFemResult | null;
+  /** arc of contact per station [m] (NaN off the strip) */
+  arc: Float64Array;
   /** last solve time [ms] */
   solveMs: number;
   dof: number;
@@ -236,6 +246,9 @@ export class StackSolver {
   private geomKey = '';
   /** ring influence functions by their inputs; a roll's is rebuilt only when one of them changes */
   private rings = new Map<string, RingInfluence>();
+  /** the strip FEM and its last result (strip model 'fem') */
+  private fem = new StripFem();
+  femResult: StripFemResult | null = null;
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -257,6 +270,7 @@ export class StackSolver {
     this.converged = false;
     this.yAge = -1;
     this.iterations = 0;
+    this.femRatio = null; this.femEps = null;
   }
 
   private rebuild(): void {
@@ -742,6 +756,80 @@ export class StackSolver {
     };
   }
 
+  /** the slices' current front tension, in slice order */
+  private sigmaSlices(): Float64Array {
+    return Float64Array.from(this.slices, (sl) => this.sigmaF[sl.s]);
+  }
+
+  /** per slice: FEM load over slab load, and FEM elongation minus slab elongation */
+  private femRatio: Float64Array | null = null;
+  private femEps: Float64Array | null = null;
+
+  /**
+   * The strip FEM at the current roll position and tension, and what it
+   * says the slab slices get wrong. Every slice's exit thickness comes from
+   * the roll gap with its last load (flattening and springback), the arc
+   * from that, then one FEM solve for the whole width gives the loads and
+   * the exit velocities. The elongation each slice hands to the tension
+   * model is its exit velocity against the entry speed - which is where
+   * lateral flow shows up: a slice that spreads sideways elongates less
+   * than ln(h₀/h₁).
+   */
+  private femCorrection(sigma: Float64Array): number {
+    const p = this.p;
+    const u = this.u;
+    const wrR = this.rolls[this.stack.wr];
+    const law = this.law;
+    const n = this.slices.length;
+    if (n === 0) return 0;
+    if (!this.femRatio || this.femRatio.length !== n) { this.femRatio = new Float64Array(n).fill(1); this.femEps = new Float64Array(n); }
+    const x = new Float64Array(n), w = new Float64Array(n), h0 = new Float64Array(n), h1 = new Float64Array(n);
+    const L = new Float64Array(n), sB = new Float64Array(n), sF = new Float64Array(n);
+    const qSlab = new Float64Array(n), epsSlab = new Float64Array(n);
+    this.slices.forEach((sl, i) => {
+      const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
+      const slab = this.sliceCore(sl, g, sigma[i], sl.q);
+      x[i] = sl.x; w[i] = sl.weight; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
+      sB[i] = p.backTension; sF[i] = sigma[i];
+      qSlab[i] = slab.q; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
+    });
+    let Lmax = 0, dhMax = 0;
+    for (let i = 0; i < n; i++) { Lmax = Math.max(Lmax, L[i]); dhMax = Math.max(dhMax, h0[i] - h1[i]); }
+    const e0 = Math.max(p.entryStrain, 0);
+    if (Lmax <= 0 || dhMax < 0.005 * p.h0) {
+      let change = 0;
+      for (let i = 0; i < n; i++) { change = Math.max(change, Math.abs(1 - this.femRatio[i]), Math.abs(this.femEps![i]) * 50); }
+      this.femRatio.fill(1); this.femEps!.fill(0); this.femResult = null;
+      return change;
+    }
+    // the FEM needs an arc everywhere; an unloaded slice borrows a sliver
+    for (let i = 0; i < n; i++) if (L[i] <= 0) L[i] = 0.05 * Lmax;
+    const r = this.fem.solve({
+      x, w, h0, h1, L, kf: (_i, e) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1,
+    });
+    this.femResult = r;
+    let change = 0;
+    for (let i = 0; i < n; i++) {
+      // Only a slice with a real draft is corrected. Under the elastic draft
+      // the slab load ramps to zero while the FEM (rigid-plastic, no elastic
+      // regime) does not, and the ratio of the two is meaningless there;
+      // applied, it made the corrected load jump between neighbouring
+      // slices and the Newton could not settle.
+      const sl = this.slices[i];
+      const dhEl = (sl.h0 * kfMean(law, e0, e0 + 0.1) * (1 - law.nu * law.nu)) / law.E;
+      const loaded = qSlab[i] > 0 && sl.h0 - h1[i] > Math.max(4 * dhEl, 0.005 * sl.h0);
+      const k = loaded && r.q[i] > 0 ? Math.max(0.5, Math.min(2.5, r.q[i] / qSlab[i])) : 1;
+      const de = loaded ? r.eps[i] - epsSlab[i] : 0;
+      change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * 50);
+      // Damped. The correction feeds back through the flattening (a heavier
+      // load opens the gap, which lightens the FEM's load) with a gain past
+      // one, and an undamped update cycled between two states.
+      this.femRatio[i] += FEM_RELAX * (k - this.femRatio[i]);
+      this.femEps![i] += FEM_RELAX * (de - this.femEps![i]);
+    }
+    return change;
+  }
+
   /**
    * The strip at the current roll position: tension and thickness solved
    * together, slice by slice, and the total derivative dσ/dv for the outer
@@ -812,14 +900,24 @@ export class StackSolver {
     const colTerm = new Float64Array(n);
     let lambda = 0;
 
+    // With the strip FEM on, the slab slices still drive the Newton (their
+    // tangents are smooth and cheap) but are corrected to the FEM: the load
+    // by a ratio and the elongation by an offset, both taken once per strip
+    // solve at the current state (see `femCorrection`). Across the outer
+    // iterations the corrections refresh, and the solution converges to the
+    // FEM's - a defect correction. Calling the FEM inside the tension Newton
+    // instead made that Newton chase a function whose tangent it did not
+    // have, and it never settled.
     const evalSlices = (onlyLive: boolean) => {
+      const ratio = this.femRatio, off = this.femEps;
       this.slices.forEach((sl, i) => {
         if (onlyLive && held[i] !== 0) return;
         const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
         const out = this.solveSlice(sl, g, sigma[i]);
-        sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
-        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds; sl.dqdg = out.dqdg; sl.dqds = out.dqds;
-        eps[i] = sl.q > 0 ? Math.log(sl.h0 / Math.max(sl.h1, 1e-9)) : 0;
+        const k = ratio ? ratio[i] : 1;
+        sl.g = g; sl.q = out.q * k; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
+        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds; sl.dqdg = out.dqdg * k; sl.dqds = out.dqds * k;
+        eps[i] = sl.q > 0 ? Math.log(sl.h0 / Math.max(sl.h1, 1e-9)) + (off ? off[i] : 0) : 0;
       });
     };
     /** D, λ and the free stress of every slice from the current ε */
@@ -869,6 +967,7 @@ export class StackSolver {
       }
     };
 
+    if (p.stripModel !== 'fem') { this.femRatio = null; this.femEps = null; this.femResult = null; }
     evalSlices(false);
     if (this.counters) this.counters.stripCalls++;
     for (let round = 0; round < 10; round++) {
@@ -979,6 +1078,14 @@ export class StackSolver {
       moved = true;
       const settled = this.residual < 2e-6 && this.stepMax < 5e-9;
       if (settled) {
+        // With the strip FEM on, a settled Newton is a solution of the
+        // corrected slab model; the FEM is then asked again at this state,
+        // and only once its correction stops changing is the state a
+        // solution of the coupled problem (or the screw moved).
+        if (this.p.stripModel === 'fem') {
+          const change = this.femCorrection(this.sigmaSlices());
+          if (change > FEM_FIXED_TOL) { this.converged = false; continue; }
+        }
         if (this.screwSettled()) { this.converged = true; break; }
         this.stepScrew();
         this.converged = false;
@@ -997,12 +1104,13 @@ export class StackSolver {
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, warnings: [], notes: [], solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
     };
   }
 
   private collect(iters: number, ms: number): void {
     const R = this.result;
+    const p_ = this.p;
     const { ns, nr, u } = this;
     for (let r = 0; r < nr; r++) {
       const roll = this.rolls[r];
@@ -1038,11 +1146,13 @@ export class StackSolver {
       if (r === this.stack.wr) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
       roll.flatMax = fm;
     }
+    R.fem = p_.stripModel === 'fem' ? this.femResult : null;
+    R.arc.fill(NaN);
     R.h0.fill(NaN); R.h1.fill(NaN); R.q.fill(NaN); R.flat.fill(NaN);
     R.dEps.fill(NaN); R.manifest.fill(NaN); R.sigmaF.fill(NaN);
     let lat0 = Infinity, lat1 = -Infinity, man = 0;
     for (const sl of this.slices) {
-      R.h0[sl.s] = sl.h0; R.h1[sl.s] = sl.h1; R.q[sl.s] = sl.q; R.flat[sl.s] = sl.flat;
+      R.h0[sl.s] = sl.h0; R.h1[sl.s] = sl.h1; R.q[sl.s] = sl.q; R.flat[sl.s] = sl.flat; R.arc[sl.s] = sl.arc;
       R.dEps[sl.s] = this.dEps[sl.s]; R.manifest[sl.s] = this.manifest[sl.s];
       R.sigmaF[sl.s] = this.sigmaF[sl.s];
       lat0 = Math.min(lat0, this.dEps[sl.s]); lat1 = Math.max(lat1, this.dEps[sl.s]);
@@ -1103,6 +1213,7 @@ export class StackSolver {
     const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
+    if (p.stripModel === 'fem' && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the
     // roll above has lifted off, which no cluster is built to do
     if (this.converged && this.contacts.some((c) => c.total <= 0)) w.push('openContact');
