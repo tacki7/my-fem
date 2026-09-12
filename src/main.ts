@@ -675,6 +675,7 @@ function scheduleRebuild(): void {
     gaugeChart.reset();
     speedChart.reset();
     stripChart.reset();
+    screwChart.reset();
     tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
@@ -2967,6 +2968,8 @@ const speedChart = new TrackChart(document.getElementById('speedchart') as HTMLC
   { unit: 'm/min', digits: 1, fromZero: false });
 const stripChart = new TrackChart(document.getElementById('stripchart') as HTMLCanvasElement, 600,
   { unit: 'm/min', digits: 1, fromZero: false });
+const screwChart = new TrackChart(document.getElementById('screwchart') as HTMLCanvasElement, 600,
+  { unit: 'mm', digits: 4, fromZero: false });
 
 /** The chart is only there while a model is on; with it off there is no history to draw. */
 function refreshTensionChart(): void {
@@ -3013,6 +3016,11 @@ function pushTensionSample(): void {
   stripChart.push(
     stands.map((st) => (st.diag.exitSpeed > 0 ? st.diag.exitSpeed * MPM : NaN)),
     stands.map((st) => (st.diag.entrySpeed > 0 ? st.diag.entrySpeed * MPM : NaN)));
+  // The screw position: what every gap loop actually moves. No rule to draw
+  // against - the loops aim at a gauge or a load, and the screw is the means.
+  screwChart.push(
+    stands.map((st) => (Number.isFinite(st.screwPosition) ? st.screwPosition * 1000 : NaN)),
+    stands.map(() => NaN));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
@@ -4266,6 +4274,7 @@ function updateStats(): void {
   gaugeChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   speedChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   stripChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
+  screwChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,

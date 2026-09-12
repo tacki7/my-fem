@@ -70,6 +70,13 @@
       <canvas id="agcscatter" title="軌跡の先頭の ΔP/Δh₁ は塑性曲線の勾配: スクリュー改訂ごとの荷重と出側板厚の対から同定（板幅ぶん tonf / µm、薄くすると荷重が増えるので負）。ゲージメータ式 dh₁/dS = M/(M+Q) の Q。"></canvas>
     </div>
     <div id="chart-track" class="chart-col">
+      <div id="chart-screw" class="chart-cell">
+        <div class="chart-head">
+          <span class="chart-title">圧下スクリュー位置</span>
+          <span class="chart-sub">実線 = 現在のスクリュー位置 S（無負荷ギャップ、ミルスプリング分を引いた読み。薄板では負になる）／ 直近 600 フレーム</span>
+        </div>
+        <canvas id="screwchart" title="各スタンドの圧下スクリュー位置 S [mm] の時系列。制御ループが動かす量そのもの。板厚一定・圧下率一定・荷重一定のどれでも、ループが締め込む／開く動きがここに出る。"></canvas>
+      </div>
       <div id="chart-tension" class="chart-cell" hidden>
         <div class="chart-head">
           <span class="chart-title">スタンド間張力</span>

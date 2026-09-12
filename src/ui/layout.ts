@@ -55,9 +55,9 @@ interface Gutter {
  * first column there.
  */
 const DEFAULTS: Record<Theme, Record<Prop, number>> = {
-  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 510, '--row-charts': 250, '--chart-nip': 50, '--chart-agc': 20 },
-  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 400, '--row-charts': 260, '--chart-nip': 48, '--chart-agc': 20 },
-  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 470, '--row-charts': 250, '--chart-nip': 50, '--chart-agc': 20 },
+  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 460, '--row-charts': 330, '--chart-nip': 50, '--chart-agc': 20 },
+  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 380, '--row-charts': 340, '--chart-nip': 48, '--chart-agc': 20 },
+  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 440, '--row-charts': 330, '--chart-nip': 50, '--chart-agc': 20 },
 };
 
 const GAP = 10;

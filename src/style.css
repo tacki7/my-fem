@@ -143,8 +143,8 @@ body {
      app shipped with; `resetLayout` puts them back. */
   --col-left: 292px;
   --col-right: 332px;
-  --row-line: 510px;
-  --row-charts: 250px;
+  --row-line: 460px;
+  --row-charts: 330px;
   grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   /* topbar / mill line / stage / charts. The line is always visible: it is the
      only view of the whole machine, and it doubles as the stand selector. */
@@ -643,7 +643,7 @@ body.resizing * { cursor: inherit !important; }
 .sw-tau { background: #ffb26e; }
 .sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
 .sw-kf  { background: #96e6b4; }
-#nip, #agcscatter, #tensionchart, #gaugechart, #speedchart, #stripchart { flex: 1; width: 100%; min-height: 0; display: block; }
+#nip, #agcscatter, #tensionchart, #gaugechart, #speedchart, #stripchart, #screwchart { flex: 1; width: 100%; min-height: 0; display: block; }
 
 /* Two charts share the bottom row; the scatter only appears under gap control,
    and the friction hill keeps the whole width whenever it is hidden. */
