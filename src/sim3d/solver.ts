@@ -61,6 +61,8 @@ const FEM_RELAX = 0.3;
 const FEM_MAX_ROUNDS = 25;
 /** rounds the correction has to stay within ten times the tolerance to count as settled */
 const FEM_LOOSE_RUNS = 6;
+/** outer iterations at one screw position after which a nearly settled Newton lets the screw move */
+const STEP_ESCAPE_ITERS = 60;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -95,6 +97,13 @@ export interface RollState {
   vMax: number;
   /** the roll's own largest compression at any of its contacts [m] */
   flatMax: number;
+  /** curvature of the axis per station, vertical and across [1/m] (NaN outside the roll) */
+  kv: Float64Array;
+  kw: Float64Array;
+  /** largest bending fibre stress on the barrel [Pa] */
+  bendMax: number;
+  /** largest Hertz peak pressure at any of its contacts [Pa] */
+  hertzMax: number;
 }
 
 export interface ContactState {
@@ -105,6 +114,8 @@ export interface ContactState {
   law: ContactLaw;
   /** per station: contact width weight [m], 0 outside */
   weight: Float64Array;
+  /** Hertz peak pressure per station [Pa] */
+  p0: Float64Array;
   /** load per width [N/m] */
   q: Float64Array;
   /** approach (both bodies) [m] */
@@ -116,7 +127,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -127,6 +138,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   layout: 'ロール配置が成立していない（端面図の赤い線）',
   openContact: '上下のロールが離れている接触がある（端面図の破線）',
   fem: '材料 FEM が反復上限で打ち切り（結果は近似）',
+  wrTouch: '板の外で上下のワークロール同士が接触している（対称モデルは考慮しない — 荷重配分が実機と変わる）',
 };
 
 export interface Result3D {
@@ -173,6 +185,8 @@ export interface Result3D {
   fem: StripFemResult | null;
   /** arc of contact per station [m] (NaN off the strip) */
   arc: Float64Array;
+  /** the rigid gap between the upper and lower work-roll surfaces at stations off the strip [m]; ≤ 0 means the rolls touch (NaN on the strip and off the barrel) */
+  wrGap: Float64Array;
   /** last solve time [ms] */
   solveMs: number;
   dof: number;
@@ -257,6 +271,8 @@ export class StackSolver {
   /** correction rounds since the screw last moved, and rounds in a row the correction has been loosely settled */
   private femRounds = 0;
   private femLooseRuns = 0;
+  /** outer iterations since the screw last moved */
+  private sinceStep = 0;
   /** the last correction round's change, for diagnostics */
   femLastChange = 0;
   private iterations = 0;
@@ -326,6 +342,7 @@ export class StackSolver {
         v: new Float64Array(this.ns).fill(NaN), w: new Float64Array(this.ns).fill(NaN),
         reactions: supports.map(() => 0),
         bow: 0, vMax: 0, flatMax: 0,
+        kv: new Float64Array(this.ns).fill(NaN), kw: new Float64Array(this.ns).fill(NaN), bendMax: 0, hertzMax: 0,
       };
     });
     this.contacts = this.stack.contacts.map((c) => {
@@ -334,7 +351,7 @@ export class StackSolver {
         a: c.a, b: c.b, ny: c.ny, nz: c.nz,
         law: makeContactLaw(A.E, A.nu, A.D / 2, B.E, B.nu, B.D / 2),
         weight: new Float64Array(this.ns), q: new Float64Array(this.ns), delta: new Float64Array(this.ns),
-        dA: new Float64Array(this.ns), dB: new Float64Array(this.ns),
+        dA: new Float64Array(this.ns), dB: new Float64Array(this.ns), p0: new Float64Array(this.ns),
         total: 0,
       };
     });
@@ -1102,7 +1119,14 @@ export class StackSolver {
       this.iterate();
       n++;
       moved = true;
-      const settled = this.residual < 2e-6 && this.stepMax < 5e-9;
+      // A Newton that cannot settle at this screw position for a long
+      // while (a barely touching strip at the start, where the tension's
+      // active set flips) is not allowed to hold the screw either: nearly
+      // settled after many iterations counts, and the next screw position
+      // is a better-posed problem.
+      this.sinceStep++;
+      const settled = (this.residual < 2e-6 && this.stepMax < 5e-9)
+        || (this.sinceStep > STEP_ESCAPE_ITERS && this.residual < 1e-2 && !this.screwSettled() && this.p.mode !== 'screw');
       if (settled) {
         // With the strip FEM on, a settled Newton is a solution of the
         // corrected slab model; the FEM is then asked again at this state,
@@ -1132,6 +1156,7 @@ export class StackSolver {
         this.stepScrew();
         this.femRounds = 0;
         this.femLooseRuns = 0;
+        this.sinceStep = 0;
         this.converged = false;
       }
       if (performance.now() - t0 > budgetMs) break;
@@ -1148,7 +1173,7 @@ export class StackSolver {
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
     };
   }
 
@@ -1189,6 +1214,45 @@ export class StackSolver {
       }
       if (r === this.stack.wr) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
       roll.flatMax = fm;
+      // curvature of the axis by central differences (the beam's bending
+      // stress on the barrel surface is E r κ), smoothed once
+      const dx2 = this.dx * this.dx;
+      const ww = (s: number) => (Number.isFinite(roll.w[s]) ? roll.w[s] : 0);
+      const kvRaw = new Float64Array(ns), kwRaw = new Float64Array(ns);
+      for (let s = roll.ia + 1; s < roll.ib; s++) {
+        kvRaw[s] = (vv(s + 1) - 2 * vv(s) + vv(s - 1)) / dx2;
+        kwRaw[s] = (ww(s + 1) - 2 * ww(s) + ww(s - 1)) / dx2;
+      }
+      roll.kv.fill(NaN); roll.kw.fill(NaN);
+      let bm = 0;
+      for (let s = roll.ia; s <= roll.ib; s++) {
+        const a = Math.max(roll.ia + 1, s - 1), b2 = Math.min(roll.ib - 1, s + 1);
+        let sv = 0, sw = 0, n = 0;
+        for (let k = a; k <= b2; k++) { sv += kvRaw[k]; sw += kwRaw[k]; n++; }
+        roll.kv[s] = n ? sv / n : 0; roll.kw[s] = n ? sw / n : 0;
+        const rad = onBarrel(d, this.x[s]) ? d.D / 2 : d.Dn / 2;
+        bm = Math.max(bm, d.E * rad * Math.hypot(roll.kv[s], roll.kw[s]));
+      }
+      roll.bendMax = bm;
+    }
+    // Hertz peak pressure per contact and station: p0 = 2 q / (π b)
+    for (const c of this.contacts) {
+      for (let s = 0; s < ns; s++) {
+        const q = c.q[s];
+        c.p0[s] = q > 0 ? (2 * q) / (Math.PI * Math.max(Math.sqrt(c.law.bCoef * q), c.law.bFloor, 1e-9)) : 0;
+      }
+    }
+    for (let r = 0; r < nr; r++) {
+      let hm = 0;
+      for (const c of this.contacts) if (c.a === r || c.b === r) for (let s = 0; s < ns; s++) hm = Math.max(hm, c.p0[s]);
+      if (r === this.stack.wr) {
+        for (const sl of this.slices) {
+          if (sl.q <= 0) continue;
+          const b = Math.max(Math.sqrt(this.wsLaw.bCoef * sl.q), sl.arc / 2, 1e-9);
+          hm = Math.max(hm, (2 * sl.q) / (Math.PI * b));
+        }
+      }
+      this.rolls[r].hertzMax = hm;
     }
     R.fem = p_.stripModel === 'fem' ? this.femResult : null;
     R.arc.fill(NaN);
@@ -1214,8 +1278,29 @@ export class StackSolver {
     R.latentIU = Number.isFinite(lat1 - lat0) ? (lat1 - lat0) * 1e5 : 0;
     R.manifestIU = man * 1e5;
     R.screw = this.screw;
+    // upper and lower work rolls meeting beside the strip: the symmetric
+    // model has nothing there to stop the roll, so it is only reported
+    {
+      const wr = this.rolls[this.stack.wr];
+      R.wrGap.fill(NaN);
+      for (let s = wr.ia; s <= wr.ib; s++) {
+        if (this.sliceW[s] > 0 || !onBarrel(wr.def, this.x[s]) || !Number.isFinite(wr.v[s])) continue;
+        R.wrGap[s] = p_.h0 + 2 * (wr.v[s] - wr.prof[s]);
+      }
+    }
     R.warnings = this.diagnose();
     R.notes = [...this.stack.issues];
+    {
+      let xMin = Infinity, xMax = -Infinity, deepest = 0;
+      for (let s = 0; s < ns; s++) {
+        const g = R.wrGap[s];
+        if (!(g <= 0)) continue;
+        xMin = Math.min(xMin, this.x[s]); xMax = Math.max(xMax, this.x[s]); deepest = Math.max(deepest, -g / 2);
+      }
+      if (Number.isFinite(xMin)) {
+        R.notes.push(`WR 同士の接触: x = ${(xMin * 1e3).toFixed(0)}〜${(xMax * 1e3).toFixed(0)} mm（板端 ±${(p_.width / 2 * 1e3).toFixed(0)} mm の外）、板厚中央面への食い込み 最大 ${(deepest * 1e6).toFixed(0)} µm`);
+      }
+    }
     R.residual = this.residual;
     R.stepMax = this.stepMax;
     R.iterations = iters;
@@ -1257,6 +1342,7 @@ export class StackSolver {
     const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
+    for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
     if (p.stripModel === 'fem' && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the
     // roll above has lifted off, which no cluster is built to do

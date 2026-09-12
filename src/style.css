@@ -951,7 +951,14 @@ body.resizing * { cursor: inherit !important; }
   font-family: var(--mono); font-size: 9.5px; line-height: 1.25; color: #dce6f5; white-space: pre; text-align: center;
   background: rgba(7, 10, 18, .78); border: 1px solid rgba(140, 170, 210, .18); border-radius: 4px; padding: 1px 6px;
 }
-#view3d .v3-front-mode { margin-left: auto; flex: none; gap: 3px; }
+#view3d .v3-front-mode { flex: none; gap: 3px; }
+#view3d .chart-head .v3-front-mode:first-of-type { margin-left: auto; }
+#view3d .v3-legend {
+  position: absolute; left: 8px; bottom: 6px; pointer-events: none;
+  font-family: var(--mono); font-size: 10px; color: #b7c4d8; white-space: nowrap;
+  background: rgba(7, 10, 18, .7); border-radius: 4px; padding: 2px 7px;
+}
+#view3d .v3-stage.flat > .v3-legend { display: none; }
 #view3d .v3-front-mode .btn { padding: 2px 8px; font-size: 10.5px; border-radius: 5px; }
 #view3d .v3-charts {
   display: grid;

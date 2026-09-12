@@ -244,10 +244,15 @@ function tangentTwo(c1: Pt, r1: number, c2: Pt, r2: number, r: number, side: 1 |
 
 export function buildStack(p: Params3D): Stack {
   const E = p.Eroll, nu = p.nuRoll;
-  const roll = (o: Partial<RollDef> & { id: string; label: string; D: number; Lb: number; Ls: number }): RollDef => ({
-    Dn: o.D * 0.6, cy: 0, cz: 0, shift: 0, crown: 0, thermal: 0, support: 'free',
-    benderForce: 0, saddles: ASU_RACKS, shaftBeam: false, E, nu, ...o,
-  });
+  // a neck is never wider than its barrel (it is what the barrel steps down to)
+  const roll = (o: Partial<RollDef> & { id: string; label: string; D: number; Lb: number; Ls: number }): RollDef => {
+    const r: RollDef = {
+      Dn: o.D * 0.6, cy: 0, cz: 0, shift: 0, crown: 0, thermal: 0, support: 'free',
+      benderForce: 0, saddles: ASU_RACKS, shaftBeam: false, E, nu, ...o,
+    };
+    r.Dn = Math.min(r.Dn, r.D);
+    return r;
+  };
   const Rw = p.wrD / 2;
   const rolls: RollDef[] = [];
   const contacts: ContactDef[] = [];

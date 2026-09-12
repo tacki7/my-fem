@@ -101,7 +101,22 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     { text: '正面図', onClick: () => setFrontMode('2d') },
   ]);
   modeBtns.classList.add('v3-front-mode');
-  front.root.querySelector('.chart-head')!.append(modeBtns);
+  let colorBy: 'load' | 'stress' = (() => { try { return localStorage.getItem('rollfem.v3.color') === 'stress' ? 'stress' : 'load'; } catch { return 'load'; } })();
+  const colorBtns = buttonRow([
+    { text: '荷重', title: '胴の色 = 接触線荷重、板 = 顕在形状', onClick: () => setColor('load') },
+    { text: '応力', title: 'ロール = 曲げ縁応力（青 圧縮／赤 引張）と接触線の Hertz 面圧、板 = 張力分布', onClick: () => setColor('stress') },
+  ]);
+  colorBtns.classList.add('v3-front-mode');
+  const setColor = (c: 'load' | 'stress') => {
+    colorBy = c;
+    [...colorBtns.children].forEach((b, i) => b.classList.toggle('active', (i === 0) === (c === 'load')));
+    try { localStorage.setItem('rollfem.v3.color', c); } catch { /* private mode */ }
+    dirty = true;
+  };
+  setColor(colorBy);
+  const legendBox = el('div', 'v3-legend');
+  stage.append(legendBox);
+  front.root.querySelector('.chart-head')!.append(colorBtns, modeBtns);
   const setFrontMode = (m: '3d' | '2d') => {
     if (m === '3d' && !stack3d) m = '2d';
     frontMode = m;
@@ -193,7 +208,18 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const dials = new Map<string, Dial>();
   let contactKeys: string[] = [];
 
+  /** a neck (or a backing shaft) never wider than its barrel: whichever dial moved, the other follows */
+  const NECKS: [keyof Params3D, keyof Params3D][] = [['wrDn', 'wrD'], ['irDn', 'irD'], ['burDn', 'burD'], ['bbShaft', 'bbD']];
+  const clampNecks = () => {
+    const pr = params as unknown as Record<string, number>;
+    for (const [dn, d] of NECKS) {
+      if (pr[dn as string] <= pr[d as string]) continue;
+      pr[dn as string] = pr[d as string];
+      dials.get(dn as string)?.set(pr[dn as string]);
+    }
+  };
   const apply = () => {
+    clampNecks();
     solver.setParams(params);
     dirty = true;
     running = true;
@@ -341,7 +367,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     geoSec.body.append(num('wrD', 'WR 直径', 'mm', 30, 900, 5, 1e-3));
     geoSec.body.append(num('wrLb', 'WR 胴長', 'mm', 500, 2500, 10, 1e-3));
     geoSec.body.append(num('wrLs', 'WR 支持スパン', 'mm', 600, 3000, 10, 1e-3));
-    geoSec.body.append(num('wrDn', 'WR ネック径', 'mm', 20, 700, 5, 1e-3));
+    geoSec.body.append(num('wrDn', 'WR ネック径', 'mm', 20, 700, 5, 1e-3, 'ロール直径を超えない（超える値は直径に丸められる）。'));
     if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
       geoSec.body.append(num('irD', params.mill === '20hi' ? '第1中間 直径' : 'IR 直径', 'mm', 50, 900, 5, 1e-3));
       geoSec.body.append(num('irLb', params.mill === '20hi' ? '第1中間 胴長' : 'IR 胴長', 'mm', 500, 2500, 10, 1e-3));
@@ -355,7 +381,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('burD', 'BUR 直径', 'mm', 400, 2000, 10, 1e-3));
       geoSec.body.append(num('burLb', 'BUR 胴長', 'mm', 500, 2500, 10, 1e-3));
       geoSec.body.append(num('burLs', 'BUR 支持スパン', 'mm', 600, 3200, 10, 1e-3));
-      geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3));
+      geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3, 'ロール直径を超えない。'));
     }
     if (params.mill === '12hi' || params.mill === '20hi') {
       geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
@@ -408,10 +434,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const strip = params.width / 2;
     if (frontMode === '3d' && stack3d) {
       const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
+      const mpa = (v: number) => `${(v / 1e6).toFixed(0)} MPa`;
       stack3d.draw(R, st, {
-        magnify, width: params.width, mirror: false,
-        labels: R.rolls.map((r) => `${r.def.id}\n撓み ${um(r.bow)} 扁平 ${um(r.flatMax)}`),
+        magnify, width: params.width, mirror: false, colorBy, backTension: params.backTension,
+        labels: R.rolls.map((r) => colorBy === 'stress'
+          ? `${r.def.id}\n曲げ σ ${mpa(r.bendMax)} 面圧 p₀ ${mpa(r.hertzMax)}`
+          : `${r.def.id}\n撓み ${um(r.bow)} 扁平 ${um(r.flatMax)}`),
       });
+      if (legendBox.textContent !== stack3d.legend) legendBox.textContent = stack3d.legend;
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
 

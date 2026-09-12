@@ -120,6 +120,22 @@ type Col = [number, number, number, number];
 const STEEL: Col = [0.60, 0.64, 0.70, 1];
 const NECK: Col = [0.42, 0.46, 0.52, 1];
 const CHOCK: Col = [0.22, 0.25, 0.30, 0.2];
+/** signed stress in [-1, 1] as a diverging colour on steel: blue = compression, red = tension */
+function diverge(t: number): Col {
+  const c = Math.max(-1, Math.min(1, t));
+  const blue = [0.25, 0.45, 1.0], red = [1.0, 0.30, 0.22];
+  // square-root mapping: the necks carry the largest fibre stress and would
+  // otherwise leave the barrel's own distribution one flat grey
+  const a = Math.sqrt(Math.abs(c));
+  const to = c < 0 ? blue : red;
+  return [STEEL[0] + (to[0] - STEEL[0]) * a, STEEL[1] + (to[1] - STEEL[1]) * a, STEEL[2] + (to[2] - STEEL[2]) * a, 1 - 0.5 * a];
+}
+/** a tension in [0, 1] on the strip's own yellow: dark when slack, bright when pulled */
+function tensionCol(t: number): Col {
+  const c = Math.max(0, Math.min(1, t));
+  return [0.45 + 0.5 * c, 0.42 + 0.4 * c, 0.20 + 0.16 * c, 0.35];
+}
+
 /** load share t in [0, 1] as a colour on steel */
 function heat(t: number): Col {
   const c = Math.max(0, Math.min(1, t));
@@ -142,8 +158,12 @@ export interface Stack3DOpts {
   width: number;
   /** draw the lower half as the mirror of the upper */
   mirror: boolean;
+  /** back tension [Pa], for the entry side's colour */
+  backTension: number;
   /** label text per roll index */
   labels: string[];
+  /** what the colours mean: the contact load under the barrel, or the stress (bending fibre stress on the rolls, tension on the strip) */
+  colorBy: 'load' | 'stress';
 }
 
 class Builder {
@@ -183,6 +203,9 @@ export class StackView3D {
   private ibo: WebGLBuffer;
   private lineVao: WebGLVertexArrayObject;
   private lineVbo: WebGLBuffer;
+  private axisVao: WebGLVertexArrayObject;
+  private axisVbo: WebGLBuffer;
+  private axisCount = 0;
   private count = 0;
   private lineCount = 0;
   private uMesh: Record<string, WebGLUniformLocation | null> = {};
@@ -196,6 +219,8 @@ export class StackView3D {
   private labelPts: { x: number; y: number; z: number; text: string }[] = [];
   private drag: { x: number; y: number; yaw: number; pitch: number } | null = null;
   private labelNodes: HTMLElement[] = [];
+  /** what the colours span, for a legend */
+  legend = '';
 
   constructor(private canvas: HTMLCanvasElement, private labelBox: HTMLElement) {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -237,6 +262,12 @@ export class StackView3D {
     this.lineVbo = gl.createBuffer()!;
     gl.bindVertexArray(this.lineVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
+    this.axisVao = gl.createVertexArray()!;
+    this.axisVbo = gl.createBuffer()!;
+    gl.bindVertexArray(this.axisVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.axisVbo);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     gl.bindVertexArray(null);
 
@@ -305,6 +336,18 @@ export class StackView3D {
       };
     };
 
+    // the stress scales: bending on the rolls (signed, one scale for all),
+    // Hertz peak pressure at the contacts, tension on the strip
+    let bendScale = 1e-9, p0Scale = 1e-9;
+    for (const r of rolls) { bendScale = Math.max(bendScale, r.bendMax); p0Scale = Math.max(p0Scale, r.hertzMax); }
+    const stress = o.colorBy === 'stress';
+    // Hertz pressure at a station on a roll, from whichever contact is heaviest there
+    const p0At = (ri: number, s: number): number => {
+      let m = 0;
+      for (const c of R.contacts) if (c.a === ri || c.b === ri) m = Math.max(m, c.p0[s]);
+      return m;
+    };
+
     const addRoll = (ri: number, sign: 1 | -1) => {
       const r = rolls[ri];
       const d = r.def;
@@ -343,12 +386,38 @@ export class StackView3D {
       for (const rg of rings) {
         const c = centre(rg);
         const ids: number[] = [];
+        const onB = onBarrel(d, rg.x);
+        const kv = Number.isFinite(r.kv[rg.s]) ? r.kv[rg.s] : 0, kw = Number.isFinite(r.kw[rg.s]) ? r.kw[rg.s] : 0;
+        const p0 = onB ? p0At(ri, rg.s) : 0;
         for (let k = 0; k < SEG; k++) {
           const th = (2 * Math.PI * k) / SEG;
           const ny = Math.cos(th), nz = Math.sin(th);
           // a chamfer ring leans its normal along the axis
           const nl = Math.hypot(1, rg.nx * 0.8);
-          ids.push(b.vertex([c[0], c[1] + rg.rad * ny, c[2] + rg.rad * nz], [rg.nx * 0.8 / nl, ny / nl, nz / nl], rg.col));
+          let col = rg.col;
+          // upper and lower work rolls touching beside the strip: red, in either mode
+          const touching = ri === stack.wr && R.wrGap[rg.s] <= 0;
+          if (touching) col = [1, 0.25, 0.3, 0.2];
+          else if (stress && rg.nx === 0) {
+            // bending fibre stress on the surface: σ = −E r (κ_v cos θ + κ_w sin θ),
+            // tension on the convex side; a contact line shows as a bright band
+            // whose strength is the Hertz peak pressure there
+            const sig = -d.E * rg.rad * (kv * sign * ny + kw * nz);
+            col = diverge(sig / bendScale);
+            if (p0 > 0) {
+              // where the roll touches: the direction to each contact partner
+              let band = 0;
+              for (const cc of R.contacts) {
+                if (cc.a !== ri && cc.b !== ri) continue;
+                const dirY = (cc.a === ri ? cc.ny : -cc.ny) * sign, dirZ = cc.a === ri ? cc.nz : -cc.nz;
+                const cosang = ny * dirY + nz * dirZ;
+                if (cosang > 0.985) band = Math.max(band, cc.p0[rg.s] / p0Scale);
+              }
+              if (ri === stack.wr && sign * ny < -0.985 && Number.isFinite(R.q[rg.s]) && R.q[rg.s] > 0) band = Math.max(band, 0.9);
+              if (band > 0) col = [1, 0.95, 0.75 + 0.25 * band, 0.1];
+            }
+          }
+          ids.push(b.vertex([c[0], c[1] + rg.rad * ny, c[2] + rg.rad * nz], [rg.nx * 0.8 / nl, ny / nl, nz / nl], col));
         }
         if (prev) for (let k = 0; k < SEG; k++) { const k2 = (k + 1) % SEG; b.quad(prev[k], ids[k], ids[k2], prev[k2]); }
         if (!prev) first = ids;
@@ -412,11 +481,21 @@ export class StackView3D {
           return (lambda * Math.sqrt(Math.max(m, 0))) / Math.PI;
         };
         const half = (s: number) => base + 0.5 * ((Number.isFinite(R.h1[s]) ? R.h1[s] : hm) - hm) * mag;
-        const colAt = (s: number): Col => {
+        let sigMax = 1;
+        for (let s = 0; s < R.x.length; s++) if (Number.isFinite(R.sigmaF[s])) sigMax = Math.max(sigMax, R.sigmaF[s]);
+        const colAt = (s: number, z: number): Col => {
+          if (stress) {
+            // exit side: the front tension this slice carries; entry side: the back tension
+            const sig = z > 0 ? (Number.isFinite(R.sigmaF[s]) ? R.sigmaF[s] : 0) : o.backTension;
+            return tensionCol(sig / sigMax);
+          }
           const m = Number.isFinite(R.manifest[s]) ? R.manifest[s] : 0;
           const t = Math.min(1, m / 4e-3);
           return [0.93, 0.78 - 0.3 * t, 0.36 - 0.2 * t, 0.35];
         };
+        this.legend = stress
+          ? `色: ロール = 曲げ縁応力 ±${(bendScale / 1e6).toFixed(0)} MPa（青 = 圧縮、赤 = 引張）／ 接触線 = Hertz 最大面圧 ≤ ${(p0Scale / 1e6).toFixed(0)} MPa ／ 板 = 張力 0〜${(sigMax / 1e6).toFixed(0)} MPa（暗 = 緩み）`
+          : `色: 胴 = 接触線荷重 0〜${(qmax / 1e6).toFixed(2)} kN/mm ／ 板 = 顕在形状（橙 = 波）`;
         // grid of the mid-surface: rows along z, columns at the slices
         const mid = (s: number, z: number) => {
           const ramp = z <= 0 ? 0 : Math.min(1, z / (0.12 * zl));
@@ -434,7 +513,7 @@ export class StackView3D {
             const dz = 1e-4 * zl;
             const slope = (mid(s, z + dz) - mid(s, z - dz)) / (2 * dz);
             const nl = Math.hypot(slope, 1);
-            const c = colAt(s);
+            const c = colAt(s, z);
             rowT.push(b.vertex([x, y + h, z], [0, 1 / nl, -slope / nl], c));
             rowB.push(b.vertex([x, y - h, z], [0, -1 / nl, slope / nl], c));
           }
@@ -464,6 +543,27 @@ export class StackView3D {
         end(STRIP_ROWS, 1); end(0, -1);
       }
     }
+
+    // the deflected axis of every roll, dashed, drawn through the body
+    // (depth test off) so the bending is read directly
+    const axes: number[] = [];
+    for (const r of rolls) {
+      const d = r.def;
+      const { v: vAt, w: wAt } = rel(r);
+      const dash = 3 * dx;
+      let pen = false, x0 = 0, y0 = 0, z0 = 0, run = 0;
+      for (let s = r.ia; s <= r.ib; s++) {
+        const x = R.x[s], y = d.cy + vAt(s) * mag, z = d.cz + wAt(s) * mag;
+        if (pen) {
+          // alternate drawn and skipped runs of `dash` length
+          const seg = Math.hypot(x - x0, y - y0, z - z0);
+          if (Math.floor(run / dash) % 2 === 0) axes.push(x0, y0, z0, x, y, z);
+          run += seg;
+        }
+        x0 = x; y0 = y; z0 = z; pen = true;
+      }
+    }
+    this.axisCount = axes.length / 3;
 
     // a floor grid under the mill, for depth
     const lines: number[] = [];
@@ -497,6 +597,8 @@ export class StackView3D {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
     this.lineCount = lines.length / 3;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.axisVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(axes), gl.DYNAMIC_DRAW);
     this.target = [0, o.mirror ? 0 : (top - rolls[stack.wr].def.D / 2) * 0.42, 0];
     this.extent = Math.max(xext * 1.1, top * (o.mirror ? 2 : 2.2), zext * 1.8);
     this.render();
@@ -543,6 +645,22 @@ export class StackView3D {
     gl.bindVertexArray(this.vao);
     gl.drawElements(gl.TRIANGLES, this.count, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
+
+    // the dashed axes, through everything
+    if (this.axisCount) {
+      gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.useProgram(this.progLine);
+      gl.uniformMatrix4fv(this.uLine.uProj, false, proj);
+      gl.uniformMatrix4fv(this.uLine.uView, false, view);
+      gl.uniform4f(this.uLine.uCol, 1.0, 0.95, 0.35, 1.0);
+      gl.bindVertexArray(this.axisVao);
+      gl.drawArrays(gl.LINES, 0, this.axisCount);
+      gl.bindVertexArray(null);
+      gl.disable(gl.BLEND);
+      gl.enable(gl.DEPTH_TEST);
+    }
 
     const mvp = mul(proj, view);
     const cw = c.clientWidth, ch = c.clientHeight;
