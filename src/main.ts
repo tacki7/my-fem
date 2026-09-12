@@ -664,6 +664,7 @@ function scheduleRebuild(): void {
     clearAgcTrail();
     // The traces were of a line that no longer exists.
     gaugeChart.reset();
+    speedChart.reset();
     tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
@@ -2919,6 +2920,8 @@ const tensionChart = new TrackChart(document.getElementById('tensionchart') as H
 const tensionChartCell = document.getElementById('chart-tension') as HTMLElement;
 const gaugeChart = new TrackChart(document.getElementById('gaugechart') as HTMLCanvasElement, 600,
   { unit: 'mm', digits: 4, fromZero: false });
+const speedChart = new TrackChart(document.getElementById('speedchart') as HTMLCanvasElement, 600,
+  { unit: 'm/min', digits: 1, fromZero: false });
 
 /** The chart is only there while a model is on; with it off there is no history to draw. */
 function refreshTensionChart(): void {
@@ -2944,6 +2947,17 @@ function pushTensionSample(): void {
       return c.agcMode === 'gauge' ? c.targetGauge * 1000
         : c.agcMode === 'force' ? NaN
           : st.params.h0 * (1 - c.reduction) * 1000;
+    }));
+  // Roll surface speed as the stand ran this frame, against the base speed
+  // the cone (or the dial, for #1) asked for before the tension controller's
+  // trim. With no trim the two lie on top of each other.
+  const trimOn = md.tensionModel !== 'off' && params.tensionControl;
+  speedChart.push(
+    stands.map((st, k) => (md.omega[k] ?? st.params.omega) * st.params.R * 60),
+    stands.map((st, k) => {
+      const v = (md.omega[k] ?? st.params.omega) * st.params.R * 60;
+      const trim = trimOn && k < md.tensionTrim.length ? md.tensionTrim[k] : 0;
+      return v / (1 + trim);
     }));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
@@ -3418,6 +3432,8 @@ if (DEBUG_TITLE) {
         timeScale: params.tensionTimeScale,
         settled: md.tensionSettled,
         flowError: md.flowError,
+        tensionMs: mill.lastTensionMs,
+        frameMs: frameEma,
         omega: [...md.omega],
         gaps: mill.gapStates.map((g, k) => ({
           k,
@@ -4189,6 +4205,7 @@ function updateStats(): void {
       (_, k) => `${standTag(k)}→${standTag(k + 1)}`));
   }
   gaugeChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
+  speedChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,

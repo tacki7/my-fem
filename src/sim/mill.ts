@@ -532,7 +532,7 @@ export class Mill {
       const h1 = this.stands[j].params.h0 * (1 - this.stands[j].params.reduction);
       g.T = this.cond[j]?.frontTension !== undefined ? this.cond[j].frontTension * h1 : g.T;
       g.queue.reset(this.tp.L, h1);
-      g.integ = 0; g.trim = 0; g.tau = NaN; g.warm = 0; g.warmed = false;
+      g.integ = 0; g.trim = 0; g.tau = NaN; g.warm = 0; g.warmed = false; g.fresh = false;
     }
   }
 
@@ -712,7 +712,16 @@ export class Mill {
    * itself still moving. The elastic models take the step of a first-order
    * lag with the bar's own time constant, in model time.
    */
+  /** wall time the last tension update took [ms], sensitivity included */
+  lastTensionMs = 0;
+
   private updateTension(dt: number): void {
+    const t0 = performance.now();
+    this.updateTensionInner(dt);
+    this.lastTensionMs = performance.now() - t0;
+  }
+
+  private updateTensionInner(dt: number): void {
     const tp = this.tp;
     const dtm = dt * tp.timeScale;
     const doSens = ++this.sensTick % 8 === 0;
@@ -750,7 +759,7 @@ export class Mill {
           && (this.steady[k] ?? false) && (this.steady[k + 1] ?? false)
           && Math.abs(front - h1) < 0.01 * h1;
         g.warm = ready ? g.warm + 1 : 0;
-        if (g.warm >= WARM_FRAMES) g.warmed = true;
+        if (g.warm >= WARM_FRAMES) { g.warmed = true; g.fresh = true; }
       }
       if (!bitten || !g.warmed) { g.Trigid = g.T; continue; }
       const sigmaRigidB = dn.params.backTension - dd.feedReaction / dd.feedFace;
@@ -765,7 +774,15 @@ export class Mill {
         if (Number.isFinite(s)) g.sens = s;
       }
       let beta: number;
-      if (tp.model === 'rigid') {
+      if (g.fresh) {
+        // The first read after the hold: the carried tension is whatever the
+        // gap was seeded with, not a state, and stepping toward the rigid
+        // value a fraction at a time from there rang the two gaps against
+        // each other for four cycles. Take it whole, once.
+        beta = 1;
+        g.fresh = false;
+        g.tau = NaN;
+      } else if (tp.model === 'rigid') {
         beta = tp.follow;
         g.tau = NaN;
       } else {

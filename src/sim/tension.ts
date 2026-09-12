@@ -149,12 +149,14 @@ export interface GapState {
   warm: number;
   /** the first read has happened; from here every transient is real */
   warmed: boolean;
+  /** the next read is the first: take the rigid value whole instead of stepping toward it */
+  fresh: boolean;
 }
 
 export function newGapState(T: number, L: number, h: number): GapState {
   return {
     T, queue: new StripQueue(L, h), integ: 0, trim: 0, tau: NaN, sens: NaN,
-    Trigid: T, err: 0, clamped: 0, warm: 0, warmed: false,
+    Trigid: T, err: 0, clamped: 0, warm: 0, warmed: false, fresh: false,
   };
 }
 
