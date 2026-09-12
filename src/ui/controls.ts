@@ -22,13 +22,23 @@ export interface SectionHandle {
  * reload is the kind of small tax that makes a tool feel disposable. Keyed by
  * title, so the state follows the section rather than its position.
  */
-const FOLD_KEY = 'rollfem.folded.v1';
-const folded: Set<string> = (() => {
-  try { return new Set(JSON.parse(localStorage.getItem(FOLD_KEY) ?? '[]')); }
-  catch { return new Set(); }
+const FOLD_KEY = 'rollfem.folded.v2';
+/**
+ * Remembered state per title: true = folded, false = opened. Both are kept,
+ * because the input sections now ship folded and "the reader opened this
+ * one" has to survive a reload as surely as "the reader folded this one".
+ * (v1 kept only the folds, and treated any remembered fold as a reason to
+ * ignore every section's default - which, with folded defaults, opened the
+ * whole panel the moment one section was folded by hand.)
+ */
+const folded: Map<string, boolean> = (() => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FOLD_KEY) ?? '{}');
+    return new Map(Object.entries(raw).filter(([, v]) => typeof v === 'boolean') as [string, boolean][]);
+  } catch { return new Map(); }
 })();
 const saveFolded = () => {
-  try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); }
+  try { localStorage.setItem(FOLD_KEY, JSON.stringify(Object.fromEntries(folded))); }
   catch { /* private mode; the app works, it just forgets */ }
 };
 
@@ -47,15 +57,14 @@ export function section(
   if (opts.hint) head.append(helpMark(opts.hint));
   const body = el('div', 'panel-body');
   root.append(head, body);
-  // A remembered choice wins over the default, but only once the reader has
-  // actually made one - `opts.open: false` still opens a section they opened.
-  const shut = folded.has(title) || (opts.open === false && !folded.size);
+  // A remembered choice wins over the default; without one, the default.
+  const shut = folded.get(title) ?? opts.open === false;
   if (shut) root.classList.add('collapsed');
   btn.setAttribute('aria-expanded', String(!shut));
   btn.addEventListener('click', () => {
     const nowShut = root.classList.toggle('collapsed');
     btn.setAttribute('aria-expanded', String(!nowShut));
-    if (nowShut) folded.add(title); else folded.delete(title);
+    folded.set(title, nowShut);
     saveFolded();
   });
   return { root, body };
