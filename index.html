@@ -106,6 +106,13 @@
           </div>
           <canvas id="stripchart" title="各スタンドの板速度 [m/min] の時系列。実線が出側 v₁、破線が入側 v₀（どちらも FEM の実測）。前段の v₁ と次段の v₀ の差がスタンド間の速度不整合で、張力モデル ON ではその差を張力が埋める。"></canvas>
         </div>
+        <div id="chart-mass" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">マスフロー</span>
+            <span class="chart-sub">実線 = 出側 v₁h₁ ／ 破線 = 入側 v₀h₀（単位幅あたり、FEM 実測）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="masschart" title="各スタンドの質量流量 v·h [mm²/s]（単位幅あたり）の時系列。実線が出側、破線が入側。同じスタンドの実線と破線の差が体積収支の誤差、スタンド間で実線がそろっていればライン全体でマスフローが一定。"></canvas>
+        </div>
       </div>
     </div>
   </footer>

@@ -680,6 +680,7 @@ function scheduleRebuild(): void {
     speedChart.reset();
     stripChart.reset();
     screwChart.reset();
+    massChart.reset();
     tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
@@ -2314,6 +2315,23 @@ function applyPanelMode(m: PanelMode): void {
 // The remembered mode goes on before anything measures the grid.
 paintPanelMode(panelMode);
 
+const HILL_KEY = 'rollfem.hill.v1';
+let hillShown = (() => {
+  try { return localStorage.getItem(HILL_KEY) !== 'off'; } catch { return true; }
+})();
+const hillCell = document.getElementById('chart-nip') as HTMLElement;
+function paintHillShown(on: boolean): void {
+  hillShown = on;
+  hillCell.hidden = !on;
+}
+function applyHillShown(on: boolean): void {
+  paintHillShown(on);
+  try { localStorage.setItem(HILL_KEY, on ? 'on' : 'off'); } catch { /* private mode */ }
+  layoutRef?.refresh();
+  relayout();
+}
+paintHillShown(hillShown);
+
 const MU_INV_LABEL = 'μ逆算';
 const MU_INV_LABEL_ON = 'μ逆算 解除';
 const MU_INV_LABEL_STALE = 'μ逆算 再計算';
@@ -2781,6 +2799,17 @@ function applyPanelStructure(theme: Theme): void {
   psel.addEventListener('change', () => applyPanelMode(psel.value as PanelMode));
   document.getElementById('topbar-actions')!.append(psel);
 
+  // The friction hill on its own switch: it is the one chart about a single
+  // stand's bite, and with it away the time-series column gets its width.
+  const hsel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  hsel.title = '下段左の摩擦丘（界面面圧・せん断分布）の表示。隠すと制御軌跡と時系列グラフが帯の幅を使う。';
+  for (const [v, text] of [['on', '摩擦丘: 表示'], ['off', '摩擦丘: 非表示']] as const) {
+    const o = el('option'); o.value = v; o.textContent = text; hsel.append(o);
+  }
+  hsel.value = hillShown ? 'on' : 'off';
+  hsel.addEventListener('change', () => applyHillShown(hsel.value === 'on'));
+  document.getElementById('topbar-actions')!.append(hsel);
+
   // Not next to 一時停止 and リセット, which are view controls: this one changes
   // the setup. It is one press and it answers immediately - there is nothing
   // to wait for, because it never asks the FEM anything.
@@ -3055,6 +3084,8 @@ const stripChart = new TrackChart(document.getElementById('stripchart') as HTMLC
   { unit: 'm/min', digits: 1, fromZero: false });
 const screwChart = new TrackChart(document.getElementById('screwchart') as HTMLCanvasElement, 600,
   { unit: 'mm', digits: 4, fromZero: false });
+const massChart = new TrackChart(document.getElementById('masschart') as HTMLCanvasElement, 600,
+  { unit: 'mm²/s', digits: 0, fromZero: false });
 
 /** The chart is only there while a model is on; with it off there is no history to draw. */
 function refreshTensionChart(): void {
@@ -3106,6 +3137,14 @@ function pushTensionSample(): void {
   screwChart.push(
     stands.map((st) => (Number.isFinite(st.screwPosition) ? st.screwPosition * 1000 : NaN)),
     stands.map((st) => (params.screwDyn && Number.isFinite(st.diag.screwCommand) ? st.diag.screwCommand * 1000 : NaN)));
+  // Mass flow per unit width, v·h in mm²/s: exit solid, entry dashed. The
+  // gap between the two on one stand is the volume-balance error of the
+  // solve; the solid lines lying on one another across the line is what a
+  // consistent speed cone looks like.
+  const mm2s = (v: number, h: number) => (v > 0 && h > 0 ? v * 1000 * h * 1000 : NaN);
+  massChart.push(
+    stands.map((st) => mm2s(st.diag.exitSpeed, st.diag.exitThickness)),
+    stands.map((st) => mm2s(st.diag.entrySpeed, st.params.h0)));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
@@ -4363,7 +4402,8 @@ function updateStats(): void {
   speedChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   stripChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   screwChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
-  hill.draw(samples, {
+  massChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
+  if (hillShown) hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
     flowStress: slab.kf / 1e6,
