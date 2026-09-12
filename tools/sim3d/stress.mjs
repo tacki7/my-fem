@@ -79,7 +79,7 @@ for (const c of cases) {
   let sv, err = null, it = 0, t0 = performance.now();
   try {
     sv = new StackSolver(p);
-    for (let f = 0; f < 50; f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
+    for (let f = 0; f < (+process.env.FRAMES || 50); f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
   } catch (e) { err = e.message; }
   const ms = performance.now() - t0;
   const R = sv?.result;

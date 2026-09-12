@@ -49,13 +49,16 @@ const F_SCALE_FLOOR = 1e4;
 /** the screw's travel [m]: negative is opened past the touching position */
 const SCREW_MIN = -10e-3;
 const SCREW_MAX = 20e-3;
-/** outer iterations after which a solve that has not settled is called stuck */
+/** outer iterations after which a solve that has not settled is called stuck (the coupled strip FEM needs several times more) */
 const STUCK_ITERS = 150;
+const STUCK_ITERS_FEM = 800;
 const NO_LOAD = { q: 0, arc: 0, runaway: false } as const;
 /** the FEM correction's change (load ratio, or elongation × 50) under which the coupled solve is taken as settled */
 const FEM_FIXED_TOL = 2e-3;
 /** relaxation of that correction between outer solves */
 const FEM_RELAX = 0.3;
+/** correction rounds without a screw step after which the screw steps anyway */
+const FEM_MAX_ROUNDS = 25;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -249,6 +252,8 @@ export class StackSolver {
   /** the strip FEM and its last result (strip model 'fem') */
   private fem = new StripFem();
   femResult: StripFemResult | null = null;
+  /** correction rounds since the screw last moved */
+  private femRounds = 0;
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -1084,10 +1089,21 @@ export class StackSolver {
         // solution of the coupled problem (or the screw moved).
         if (this.p.stripModel === 'fem') {
           const change = this.femCorrection(this.sigmaSlices());
-          if (change > FEM_FIXED_TOL) { this.converged = false; continue; }
+          this.femRounds++;
+          // A correction that keeps moving a little must not hold the screw:
+          // on a one-sided contact the set of loaded slices flips between
+          // rounds and the change never quite dies, and a screw that waits
+          // for it never moves (which is what would grow the contact and
+          // settle the flip). Loosely settled is enough to step; the tight
+          // tolerance is for calling the whole thing converged.
+          const tight = change <= FEM_FIXED_TOL;
+          const loose = change <= 10 * FEM_FIXED_TOL || this.femRounds > FEM_MAX_ROUNDS;
+          if (!tight && !(loose && !this.screwSettled())) { this.converged = false; continue; }
+          if (!tight && this.screwSettled()) { this.converged = false; continue; }
         }
         if (this.screwSettled()) { this.converged = true; break; }
         this.stepScrew();
+        this.femRounds = 0;
         this.converged = false;
       }
       if (performance.now() - t0 > budgetMs) break;
@@ -1217,8 +1233,9 @@ export class StackSolver {
     // a designated contact carrying nothing once the solve has settled: the
     // roll above has lifted off, which no cluster is built to do
     if (this.converged && this.contacts.some((c) => c.total <= 0)) w.push('openContact');
-    if (this.iterations > STUCK_ITERS && !this.converged) w.push('stuck');
-    if (p.mode !== 'screw' && this.iterations > STUCK_ITERS && !this.screwSettled()
+    const stuckAt = p.stripModel === 'fem' ? STUCK_ITERS_FEM : STUCK_ITERS;
+    if (this.iterations > stuckAt && !this.converged) w.push('stuck');
+    if (p.mode !== 'screw' && this.iterations > stuckAt && !this.screwSettled()
       && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');
     return w;
   }

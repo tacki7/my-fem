@@ -390,11 +390,14 @@ export class StackView3D {
       if (o.mirror) addRoll(ri, -1);
     }
 
-    // the strip: a plate through the pass line, thickness profile magnified,
-    // the manifest shape defect drawn as a wave on the exit side
+    // The strip: a plate under the work roll - its top surface on the
+    // roll's bottom (the pass line is the strip's mid-plane, a work-roll
+    // radius below the roll's axis) - thickness profile magnified, the
+    // manifest shape defect drawn as a wave on the exit side
     {
       const wr = rolls[stack.wr];
       const base = 0.025 * wr.def.D;
+      const yPass = -wr.def.D / 2 - base;
       let hm = 0, n = 0;
       for (let s = 0; s < R.x.length; s++) if (Number.isFinite(R.h1[s])) { hm += R.h1[s]; n++; }
       hm = n ? hm / n : 0;
@@ -426,7 +429,7 @@ export class StackView3D {
           for (let k = 0; k < xs.length; k++) {
             const s = xs[k];
             const x = Math.max(-o.width / 2, Math.min(o.width / 2, R.x[s]));
-            const y = mid(s, z), h = half(s);
+            const y = yPass + mid(s, z), h = half(s);
             // normal from the wave slope along z
             const dz = 1e-4 * zl;
             const slope = (mid(s, z + dz) - mid(s, z - dz)) / (2 * dz);
@@ -465,7 +468,7 @@ export class StackView3D {
     // a floor grid under the mill, for depth
     const lines: number[] = [];
     {
-      const yf = -(o.mirror ? top : 0.12 * top) - 0.05;
+      const yf = -rolls[stack.wr].def.D / 2 - (o.mirror ? top : 0.1 * top) - 0.05;
       const ext = Math.max(xext, zext, top) * 1.6;
       const step = ext / 8;
       for (let i = -8; i <= 8; i++) {
@@ -494,7 +497,7 @@ export class StackView3D {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineVbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
     this.lineCount = lines.length / 3;
-    this.target = [0, o.mirror ? 0 : top * 0.4, 0];
+    this.target = [0, o.mirror ? 0 : (top - rolls[stack.wr].def.D / 2) * 0.42, 0];
     this.extent = Math.max(xext * 1.1, top * (o.mirror ? 2 : 2.2), zext * 1.8);
     this.render();
   }
