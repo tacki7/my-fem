@@ -145,12 +145,16 @@ export interface GapState {
   err: number;
   /** −1 slack (clamped at zero), +1 held below the strip's yield, 0 free */
   clamped: -1 | 0 | 1;
+  /** consecutive frames the gap has been ready to read (see Mill.updateTension) */
+  warm: number;
+  /** the first read has happened; from here every transient is real */
+  warmed: boolean;
 }
 
 export function newGapState(T: number, L: number, h: number): GapState {
   return {
     T, queue: new StripQueue(L, h), integ: 0, trim: 0, tau: NaN, sens: NaN,
-    Trigid: T, err: 0, clamped: 0,
+    Trigid: T, err: 0, clamped: 0, warm: 0, warmed: false,
   };
 }
 

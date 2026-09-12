@@ -43,6 +43,11 @@ import {
 } from './tension';
 import { slabPointAt } from './slab';
 
+/** frames a gap must have been ready (see `updateTension`) before its reaction is first read */
+const WARM_FRAMES = 30;
+/** downstream mesh residual (columns) under which its bite is taken as placed */
+const MESH_WARM = 0.5;
+
 /** Hard cap on stands (tandem) or passes (reverse); the UI offers 1..MAX_STANDS. */
 export const MAX_STANDS = 8;
 
@@ -221,6 +226,8 @@ export class Mill {
     control: false, kp: 0, ki: 0, vLimit: 0.1,
   };
   private sensTick = 0;
+  /** each stand's exit gauge has stopped moving over the steadiness window */
+  private steady: boolean[] = [];
 
   diag: MillDiagnostics = emptyMillDiag();
 
@@ -525,7 +532,7 @@ export class Mill {
       const h1 = this.stands[j].params.h0 * (1 - this.stands[j].params.reduction);
       g.T = this.cond[j]?.frontTension !== undefined ? this.cond[j].frontTension * h1 : g.T;
       g.queue.reset(this.tp.L, h1);
-      g.integ = 0; g.trim = 0; g.tau = NaN;
+      g.integ = 0; g.trim = 0; g.tau = NaN; g.warm = 0; g.warmed = false;
     }
   }
 
@@ -646,6 +653,7 @@ export class Mill {
       const past = this.h1Hist[k][slot];
       this.h1Hist[k][slot] = h1;
       const drift = past > 0 && h1 > 0 ? Math.abs(h1 - past) / h1 : 1;
+      this.steady[k] = drift <= FEED_STEADY;
       if (drift > FEED_STEADY) upstreamSteady = false;
     }
     this.histAt++;
@@ -721,9 +729,30 @@ export class Mill {
         g.queue.push(ud.exitSpeed * dtm, h1);
         g.queue.pop((dn.params.feedSpeed > 0 ? dn.params.feedSpeed : ud.exitSpeed) * dtm);
       }
-      const valid = dn.params.feedSpeed > 0 && dd.feedFace > 0 && dd.contactNodes > 0
+      // The reaction means nothing until the gap is a gap: both stands biting,
+      // the downstream mesh placed on its bite, both exit gauges steady, and
+      // the strip at the front of the queue the strip the upstream stand is
+      // actually making. That last one is the trap. The queue is filled at the
+      // nominal gauge, the stand makes h0(1-r) plus its spring, and until the
+      // real gauge has travelled the gap (L/v, a few seconds) the prescribed
+      // feed carries a volume mismatch of several percent - which the reaction
+      // reads as a huge compressive tension. The gap then clamps to zero and
+      // the controller winds up to its limit chasing a target the line cannot
+      // yet hold, and takes 25 s to unwind. So the gap is held (and the
+      // controller with it) until it has been ready for WARM_FRAMES; after
+      // that every transient is real and is read.
+      const bitten = dn.params.feedSpeed > 0 && dd.feedFace > 0 && dd.contactNodes > 0
+        && ud.contactNodes > 0 && ud.exitSpeed > 0
         && Number.isFinite(dd.feedReaction) && Number.isFinite(g.T);
-      if (!valid) { g.Trigid = g.T; continue; }
+      if (!g.warmed) {
+        const front = g.queue.frontThickness();
+        const ready = bitten && dd.meshResidual <= MESH_WARM
+          && (this.steady[k] ?? false) && (this.steady[k + 1] ?? false)
+          && Math.abs(front - h1) < 0.01 * h1;
+        g.warm = ready ? g.warm + 1 : 0;
+        if (g.warm >= WARM_FRAMES) g.warmed = true;
+      }
+      if (!bitten || !g.warmed) { g.Trigid = g.T; continue; }
       const sigmaRigidB = dn.params.backTension - dd.feedReaction / dd.feedFace;
       g.Trigid = sigmaRigidB * dn.params.h0;
 
