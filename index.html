@@ -92,6 +92,13 @@
           </div>
           <canvas id="speedchart" title="各スタンドのロール周速 ωR [m/min] の時系列。実線が張力制御のトリムを含めた実際の周速、破線が速度コーン（#1 はダイヤル）の基準値。制御 OFF では両者が重なる。"></canvas>
         </div>
+        <div id="chart-strip" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">板速度</span>
+            <span class="chart-sub">実線 = 出側 v₁ ／ 破線 = 入側 v₀（FEM 実測）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="stripchart" title="各スタンドの板速度 [m/min] の時系列。実線が出側 v₁、破線が入側 v₀（どちらも FEM の実測）。前段の v₁ と次段の v₀ の差がスタンド間の速度不整合で、張力モデル ON ではその差を張力が埋める。"></canvas>
+        </div>
       </div>
     </div>
   </footer>

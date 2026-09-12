@@ -674,6 +674,7 @@ function scheduleRebuild(): void {
     // The traces were of a line that no longer exists.
     gaugeChart.reset();
     speedChart.reset();
+    stripChart.reset();
     tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
@@ -2964,6 +2965,8 @@ const gaugeChart = new TrackChart(document.getElementById('gaugechart') as HTMLC
   { unit: 'mm', digits: 4, fromZero: false });
 const speedChart = new TrackChart(document.getElementById('speedchart') as HTMLCanvasElement, 600,
   { unit: 'm/min', digits: 1, fromZero: false });
+const stripChart = new TrackChart(document.getElementById('stripchart') as HTMLCanvasElement, 600,
+  { unit: 'm/min', digits: 1, fromZero: false });
 
 /** The chart is only there while a model is on; with it off there is no history to draw. */
 function refreshTensionChart(): void {
@@ -3004,6 +3007,12 @@ function pushTensionSample(): void {
   speedChart.push(
     stands.map((st, k) => (md.omega[k] ?? st.params.omega) * st.params.R * 60),
     stands.map((st, k) => ((md.omega[k] ?? st.params.omega) * st.params.R * 60) / factor[k]));
+  // Strip speed leaving (solid) and entering (dashed) each stand, both as the
+  // FEM measures them: the gap between one stand's exit and the next stand's
+  // entry is the mismatch a tension model carries.
+  stripChart.push(
+    stands.map((st) => (st.diag.exitSpeed > 0 ? st.diag.exitSpeed * MPM : NaN)),
+    stands.map((st) => (st.diag.entrySpeed > 0 ? st.diag.entrySpeed * MPM : NaN)));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
@@ -4256,6 +4265,7 @@ function updateStats(): void {
   }
   gaugeChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   speedChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
+  stripChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
   hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
