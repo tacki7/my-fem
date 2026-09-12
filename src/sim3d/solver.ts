@@ -59,6 +59,8 @@ const FEM_FIXED_TOL = 2e-3;
 const FEM_RELAX = 0.3;
 /** correction rounds without a screw step after which the screw steps anyway */
 const FEM_MAX_ROUNDS = 25;
+/** rounds the correction has to stay within ten times the tolerance to count as settled */
+const FEM_LOOSE_RUNS = 6;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -252,8 +254,11 @@ export class StackSolver {
   /** the strip FEM and its last result (strip model 'fem') */
   private fem = new StripFem();
   femResult: StripFemResult | null = null;
-  /** correction rounds since the screw last moved */
+  /** correction rounds since the screw last moved, and rounds in a row the correction has been loosely settled */
   private femRounds = 0;
+  private femLooseRuns = 0;
+  /** the last correction round's change, for diagnostics */
+  femLastChange = 0;
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -807,8 +812,11 @@ export class StackSolver {
       this.femRatio.fill(1); this.femEps!.fill(0); this.femResult = null;
       return change;
     }
-    // the FEM needs an arc everywhere; an unloaded slice borrows a sliver
-    for (let i = 0; i < n; i++) if (L[i] <= 0) L[i] = 0.05 * Lmax;
+    // the FEM needs an arc everywhere: a floor, so an unloaded slice has a
+    // sliver and a slice coming into contact grows its arc continuously
+    // from it (a sliver swapped for the real arc at first contact made two
+    // FEM solutions alternate on a 0.06 µm difference in thickness)
+    for (let i = 0; i < n; i++) L[i] = Math.max(L[i], 0.05 * Lmax);
     const r = this.fem.solve({
       x, w, h0, h1, L, kf: (_i, e) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1,
     });
@@ -820,11 +828,19 @@ export class StackSolver {
       // regime) does not, and the ratio of the two is meaningless there;
       // applied, it made the corrected load jump between neighbouring
       // slices and the Newton could not settle.
+      // The correction fades in over a draft band rather than switching
+      // on at a threshold: a barely rolled edge column is dragged along by
+      // its neighbours in the FEM (it elongates like them and is fed
+      // sideways), so its FEM elongation is nothing like the slab's, and a
+      // column sitting on a hard threshold flipped its whole correction
+      // every round.
       const sl = this.slices[i];
       const dhEl = (sl.h0 * kfMean(law, e0, e0 + 0.1) * (1 - law.nu * law.nu)) / law.E;
-      const loaded = qSlab[i] > 0 && sl.h0 - h1[i] > Math.max(4 * dhEl, 0.005 * sl.h0);
-      const k = loaded && r.q[i] > 0 ? Math.max(0.5, Math.min(2.5, r.q[i] / qSlab[i])) : 1;
-      const de = loaded ? r.eps[i] - epsSlab[i] : 0;
+      const thr = Math.max(4 * dhEl, 0.005 * sl.h0);
+      const t = qSlab[i] > 0 ? Math.max(0, Math.min(1, (sl.h0 - h1[i] - thr) / thr)) : 0;
+      const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(0.5, Math.min(2.5, r.q[i] / qSlab[i])) : 1;
+      const k = 1 + t * (kRaw - 1);
+      const de = t * (r.eps[i] - epsSlab[i]);
       change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * 50);
       // Damped. The correction feeds back through the flattening (a heavier
       // load opens the gap, which lightens the FEM's load) with a gain past
@@ -874,8 +890,13 @@ export class StackSolver {
     this.slices.forEach((sl, i) => { w[i] = sl.weight; ws += w[i]; });
     // lateral flow: a slice cannot be much longer than its neighbours over a
     // distance of a few thicknesses - smooth the differential over lateralLen
+    // The smoothing never falls under one station spacing: slices coupled
+    // only through the mean tension can settle into a checkerboard (thin
+    // and tense, thick and slack, alternating) that the model has no
+    // lateral stiffness to resist, and a kernel narrower than the spacing
+    // couples no neighbours at all.
     const S = new Float64Array(n * n);
-    const sig = p.lateralLen;
+    const sig = Math.max(p.lateralLen, this.dx);
     const rad = sig > 0 ? Math.ceil((3 * sig) / this.dx) : 0;
     for (let i = 0; i < n; i++) {
       let norm = 0;
@@ -1090,13 +1111,19 @@ export class StackSolver {
         if (this.p.stripModel === 'fem') {
           const change = this.femCorrection(this.sigmaSlices());
           this.femRounds++;
+          this.femLastChange = change;
           // A correction that keeps moving a little must not hold the screw:
           // on a one-sided contact the set of loaded slices flips between
           // rounds and the change never quite dies, and a screw that waits
           // for it never moves (which is what would grow the contact and
           // settle the flip). Loosely settled is enough to step; the tight
           // tolerance is for calling the whole thing converged.
-          const tight = change <= FEM_FIXED_TOL;
+          // Settled tightly, or loosely for several rounds running: the
+          // relaxed fixed point can hold a limit cycle of a few 1e-3 in the
+          // load ratio (the FEM's own iterate moves with the roll position)
+          // that never dies but changes nothing anyone can see.
+          this.femLooseRuns = change <= 10 * FEM_FIXED_TOL ? this.femLooseRuns + 1 : 0;
+          const tight = change <= FEM_FIXED_TOL || this.femLooseRuns >= FEM_LOOSE_RUNS;
           const loose = change <= 10 * FEM_FIXED_TOL || this.femRounds > FEM_MAX_ROUNDS;
           if (!tight && !(loose && !this.screwSettled())) { this.converged = false; continue; }
           if (!tight && this.screwSettled()) { this.converged = false; continue; }
@@ -1104,6 +1131,7 @@ export class StackSolver {
         if (this.screwSettled()) { this.converged = true; break; }
         this.stepScrew();
         this.femRounds = 0;
+        this.femLooseRuns = 0;
         this.converged = false;
       }
       if (performance.now() - t0 > budgetMs) break;

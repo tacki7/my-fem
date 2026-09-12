@@ -332,7 +332,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stripSec.body.append(num('lmnM', 'M', '', 0, 0.2, 0.005, 1));
     stripSec.body.append(num('lmnN', 'N', '', 0, 0.6, 0.005, 1));
     stripSec.body.append(num('entryStrain', '入側予ひずみ', '', 0, 2, 0.05, 1));
-    stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。0 で平面ひずみ。'));
+    stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。下限は幅方向の分割点間隔（それより短いと隣接スライスが結合されず、市松状の数値モードが出る）。'));
     stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。'));
     left.append(stripSec.root);
 
