@@ -890,7 +890,7 @@ body.resizing * { cursor: inherit !important; }
 /* leftmost in the bar, so a crowded bar can never push them out of reach */
 #mode-tabs { display: flex; gap: 3px; flex: none; }
 #mode-tabs .btn { padding: 3px 8px; font-size: 10.5px; border-radius: 6px; font-weight: 600; }
-#app.mode-3d > :is(#millline, #left, #stage, #bottom, #right, .gutter) { display: none; }
+#app.mode-3d > :is(#millline, #left, #stage, #bottom, #right) { display: none; }
 #app.mode-3d :is(#topbar-presets, #topbar-actions, #topbar-badges) { display: none; }
 #view3d {
   grid-column: 1 / -1;
@@ -905,7 +905,8 @@ body.resizing * { cursor: inherit !important; }
 #view3d .v3-panel { overflow-y: auto; min-height: 0; }
 #view3d .v3-centre {
   display: grid;
-  grid-template-rows: auto minmax(0, 1.05fr) minmax(0, 1.5fr) auto;
+  /* the front view's height is a movable track, like the 2D tab's rows */
+  grid-template-rows: auto minmax(120px, min(var(--v3-front, 360px), 60vh)) minmax(0, 1fr) auto;
   gap: 8px;
   min-height: 0;
   min-width: 0;

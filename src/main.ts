@@ -3502,7 +3502,10 @@ function relayout(): void {
   paintStandGridSelection();
   millLine.draw(millViews());
   fieldDirty = true;
+  view3dRef?.relayout();
 }
+/** the 3D tab, once it exists - `relayout` runs during layout install, before it does */
+let view3dRef: View3DHandle | null = null;
 
 const layout = installLayout(document.getElementById('app')!, relayout);
 layoutRef = layout;
@@ -3519,6 +3522,7 @@ const qsMill = (QS.get('mill') ?? '').toLowerCase();
 const view3d: View3DHandle = installView3D(document.getElementById('view3d') as HTMLElement, {
   initialMill: MILL_TYPES.has(qsMill) ? (qsMill as MillType) : undefined,
 });
+view3dRef = view3d;
 {
   const appEl = document.getElementById('app') as HTMLElement;
   const tabs = document.getElementById('mode-tabs') as HTMLElement;
@@ -3527,6 +3531,9 @@ const view3d: View3DHandle = installView3D(document.getElementById('view3d') as 
     [...tabs.children].forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.mode === mode));
     view3d.setActive(mode === '3d');
     if (mode === '2d') { layout.refresh(); relayout(); }
+    // the handles measure the panels, which have just changed; after the
+    // browser has laid the new ones out
+    else requestAnimationFrame(() => { layout.refresh(); view3d.relayout(); });
     try { localStorage.setItem('rollfem.mode', mode); } catch { /* private mode */ }
   };
   tabs.addEventListener('click', (e) => {
