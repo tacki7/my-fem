@@ -13,10 +13,36 @@ import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
 import { el, section, slider, select, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
-import { LineChart, FrontView, EndView, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { LineChart, FrontView, EndView, SectionView, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { ringCompliance } from '../sim3d/ring';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
+
+/** ready-made setups, one click each; every one starts from its mill's defaults */
+interface Preset3D { name: string; note: string; mill: MillType; patch: Partial<Params3D> }
+const PRESETS: Preset3D[] = [
+  {
+    name: '冷間タンデム 4Hi', mill: '4hi',
+    note: 'W 1000 ／ 2.0 mm → 25% ／ BUR クラウン 300 µm ／ WR ベンダー 60 tonf',
+    patch: { width: 1.0, h0: 0.002, reduction: 0.25, burCrown: 300e-6, wrBender: 60 * TONF },
+  },
+  {
+    name: '薄板 6Hi', mill: '6hi',
+    note: '1.0 mm → 20% ／ IR 胴端 = 板端',
+    patch: { h0: 0.001, reduction: 0.2, irShift: 0 },
+  },
+  {
+    name: 'ステンレス 20Hi', mill: '20hi',
+    note: '0.5 mm → 20% ／ 張力 100/120 MPa ／ テーパ −50 mm',
+    patch: { h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, taperShift: -0.05 },
+  },
+  {
+    name: '箔 20Hi', mill: '20hi',
+    note: '0.1 mm → 20% ／ WR 径 40 mm',
+    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04 },
+  },
+];
 /** solve time allowed per frame [ms] */
 const FRAME_BUDGET = 14;
 
@@ -36,6 +62,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   let active = false;
   let running = true;
   let magnify = 200;
+  let sectionMagnify = 200;
   let dirty = true;
 
   /* ── DOM ── */
@@ -65,7 +92,30 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（平均比）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cEps.root, cSig.root);
-  centre.append(front.root, chartGrid);
+
+  // the headline numbers as chips over the front view, like the 2D top bar
+  const status = el('div', 'v3-status');
+  const chip = (unit: string, label?: string) => {
+    const b = el('div', 'badge');
+    b.innerHTML = `${label ? `<i>${label}</i>` : ''}<b>—</b><span>${unit}</span>`;
+    return b;
+  };
+  const chips = {
+    mill: chip('', 'ミル'), force: chip('tonf', '荷重'), h1: chip('mm', '平均板厚'),
+    crown: chip('µm', 'C25'), manifest: chip('I-unit', '顕在形状'), conv: chip('', ''), ms: chip('ms', '解法'),
+  };
+  chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
+  status.append(chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.ms);
+  const warnBox = el('div', 'v3-warnings');
+  status.append(warnBox);
+  const setChip = (c: HTMLElement, text: string, tone?: 'ok' | 'warn' | 'bad') => {
+    const b = c.querySelector('b')!;
+    if (b.textContent !== text) b.textContent = text;
+    const want = tone ? `badge ${tone}` : 'badge';
+    if (c.className !== want) c.className = want;
+  };
+  const hint = el('div', 'v3-hint', 'Space=一時停止 ／ R=再初期化 ／ 1–5=ミル形式（2Hi 4Hi 6Hi 12Hi 20Hi）／ チャート上にポインタで数値読み取り');
+  centre.append(status, front.root, chartGrid, hint);
 
   const frontView = new FrontView(front.canvas);
   const charts = {
@@ -74,13 +124,22 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   };
 
   /* ── right panel: results ── */
-  const statSec = section('計算結果', { open: true });
+  // One grid, three sections: the same `set` calls land wherever the row
+  // lives, so the split is a matter of which body each row is appended to.
   const stats = new StatGrid();
-  stats.add('force', '圧延荷重', 'tonf').add('screw', '圧下位置 S', 'mm').add('h1', '出側板厚 平均 / 中央', 'mm')
-    .add('crown', 'クラウン C25', 'µm').add('wedge', 'ウェッジ', 'µm').add('edge', 'エッジドロップ L / R', 'µm')
-    .add('latent', '潜在形状 (p-p)', 'I-unit').add('manifest', '顕在形状 (最大)', 'I-unit')
-    .add('conv', '収束').add('iter', '反復 / 残差').add('ms', '解法時間', 'ms/frame').add('dof', '自由度 / 半バンド幅');
-  statSec.body.append(stats.root);
+  const loadSec = section('荷重・圧下', { open: true });
+  const shapeSec = section('板形状', { open: true });
+  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅。' });
+  const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
+  const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
+  const into = (g: HTMLElement, key: string, label: string, unit?: string) => {
+    stats.add(key, label, unit);
+    g.append(stats.root.lastElementChild!);
+  };
+  into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
+  into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
+  into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
+  into(gNum, 'conv', '収束'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
   const contactSec = section('接触力・支持反力', { open: true });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
@@ -89,7 +148,16 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   endCanvas.id = 'v3-end';
   endSec.body.append(endCanvas);
   const endView = new EndView(endCanvas);
-  right.append(statSec.root, endSec.root, contactSec.root);
+  const secSec = section('ワークロール断面（扁平メッシュ）', {
+    open: true,
+    hint: '扁平モデルが「断面 FEM」のときのロール断面リング。板中央の接触線荷重による変形を倍率表示。刻み数は「解析・表示」で。',
+  });
+  const secCanvas = el('canvas');
+  secCanvas.id = 'v3-section';
+  secSec.body.append(secCanvas);
+  const sectionView = new SectionView(secCanvas);
+  into(gNum, 'flatCmp', '扁平コンプライアンス 断面FEM / Hertz');
+  right.append(loadSec.root, shapeSec.root, endSec.root, contactSec.root, secSec.root, numSec2.root);
 
   /* ── left panel: inputs ── */
   const dials = new Map<string, Dial>();
@@ -114,8 +182,17 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     return h.root;
   };
 
+  const applyPreset = (pr: Preset3D) => {
+    params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)] };
+    solver.setParams(params); dirty = true; running = true; buildLeft();
+  };
+
   const buildLeft = () => {
     left.replaceChildren();
+    // presets
+    const preSec = section('プリセット', { open: true, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
+    preSec.body.append(buttonRow(PRESETS.map((pr) => ({ text: pr.name, title: pr.note, onClick: () => applyPreset(pr) }))));
+    left.append(preSec.root);
     // mill type
     const millSec = section('ミル形式', { open: true, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えるとロール寸法と圧延条件はその形式の既定値に戻る。' });
     const millRow = buttonRow(MILLS.map((m) => ({
@@ -136,28 +213,28 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     ctlSec.body.append(num('targetForce', '目標荷重', 'tonf', 20, 4000, 10, TONF));
     ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。'));
     ctlSec.body.append(num('leveling', 'レベリング ΔS', 'µm', -300, 300, 5, 1e-6, '駆動側と作業側のスクリュー差。正で +x 側が締まる。'));
-    ctlSec.body.append(num('housingK', 'ハウジング剛性（支持点あたり）', 'MN/mm', 1, 30, 0.5, 1e9, 'チョックまたはサドル 1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
+    ctlSec.body.append(num('housingK', 'ハウジング剛性', 'MN/mm', 1, 30, 0.5, 1e9, '支持点（チョックまたはサドル）1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
     left.append(ctlSec.root);
 
     // actuators
     const actSec = section('アクチュエータ', { open: true });
     if (params.mill === '4hi' || params.mill === '6hi') {
-      actSec.body.append(num('wrBender', 'WR ベンダー（チョックあたり）', 'tonf', -60, 200, 2, TONF, '正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
+      actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
     }
     if (params.mill === '6hi') {
-      actSec.body.append(num('irBender', 'IR ベンダー（チョックあたり）', 'tonf', 0, 200, 2, TONF));
-      actSec.body.append(num('irShift', 'IR シフト（胴端の板端からの位置）', 'mm', -150, 150, 5, 1e-3, '中間ロール胴端が板端より外側に出る量。負で板端より内側に引き込む（エッジ部の WR 支持を外す）。上下逆向きのシフトを半モデルでは両端対称に扱う。'));
+      actSec.body.append(num('irBender', 'IR ベンダー', 'tonf', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
+      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上下逆向きのシフトを半モデルでは両端対称に扱う。'));
     }
     if (params.mill === '20hi') {
-      actSec.body.append(num('taperShift', '第1中間 テーパ位置（板端基準）', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置。負で板端より内側から細り始める。'));
+      actSec.body.append(num('taperShift', '第1中間 テーパ位置', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置（板端基準）。正で板端より外側、負で板端より内側から細り始める。'));
       actSec.body.append(num('taperLen', 'テーパ長', 'mm', 50, 500, 10, 1e-3));
       actSec.body.append(num('taperDepth', 'テーパ深さ（半径）', 'µm', 0, 1000, 10, 1e-6));
     }
     if (params.mill === '12hi' || params.mill === '20hi') {
       const asuWrap = el('div', 'ctrl');
       const top = el('div', 'ctrl-top');
-      const lab = el('label', 'ctrl-label', params.mill === '20hi' ? 'AS-U（B・C 軸 サドル押し込み）' : 'AS-U（B 軸 サドル押し込み）');
-      lab.append(helpMark('バッキング軸を支えるサドルを個別に押し込む（正 = ワークロール側へ）。7 点のラックで胴長方向のクラウンを作る。'));
+      const lab = el('label', 'ctrl-label', 'AS-U サドル押し込み');
+      lab.append(helpMark(`${params.mill === '20hi' ? 'B・C 軸' : 'B 軸'}のバッキング軸を支えるサドルを個別に押し込む [µm]（正 = ワークロール側へ）。7 点のラックで胴長方向のクラウンを作る。`));
       top.append(lab);
       asuWrap.append(top);
       const row = el('div', 'v3-asu');
@@ -181,13 +258,13 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
     // profiles
     const profSec = section('ロールプロファイル', { open: true });
-    profSec.body.append(num('wrCrown', 'WR 研削クラウン（直径）', 'µm', -400, 400, 5, 1e-6, '中央と胴端の直径差。正で中央が太い（放物線）。'));
-    profSec.body.append(num('wrThermal', 'WR サーマルクラウン（直径）', 'µm', 0, 200, 5, 1e-6));
+    profSec.body.append(num('wrCrown', 'WR 研削クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン: 中央と胴端の直径差。正で中央が太い（放物線）。'));
+    profSec.body.append(num('wrThermal', 'WR サーマルクラウン', 'µm', 0, 200, 5, 1e-6, '熱膨張による直径クラウン（入力値。温度分布は解かない）。'));
     if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
-      profSec.body.append(num('irCrown', params.mill === '20hi' ? '第1中間 クラウン（直径）' : 'IR クラウン（直径）', 'µm', -400, 400, 5, 1e-6));
+      profSec.body.append(num('irCrown', params.mill === '20hi' ? '第1中間 クラウン' : 'IR クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン。'));
     }
     if (params.mill === '4hi' || params.mill === '6hi') {
-      profSec.body.append(num('burCrown', 'BUR クラウン（直径）', 'µm', -600, 1000, 10, 1e-6));
+      profSec.body.append(num('burCrown', 'BUR クラウン', 'µm', -600, 1000, 10, 1e-6, '直径クラウン。'));
     }
     left.append(profSec.root);
 
@@ -195,11 +272,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const stripSec = section('板・圧延条件', { open: true });
     stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3));
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
-    stripSec.body.append(num('entryCrown', '入側クラウン（板厚差）', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差。出側クラウン比が入側と一致すれば平坦。'));
+    stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差。出側クラウン比が入側と一致すれば平坦。'));
     stripSec.body.append(num('backTension', '後方張力', 'MPa', 0, 300, 5, 1e6));
-    stripSec.body.append(num('frontTension', '前方張力（平均）', 'MPa', 0, 300, 5, 1e6));
+    stripSec.body.append(num('frontTension', '前方張力', 'MPa', 0, 300, 5, 1e6, '幅方向の平均値。分布は伸び差から決まる。'));
     stripSec.body.append(num('mu', '摩擦係数 μ', '', 0.01, 0.3, 0.005, 1));
-    stripSec.body.append(num('lmnL', '変形抵抗 L（kf = L(ε+M)ⁿ）', 'MPa', 200, 3000, 10, 1e6));
+    stripSec.body.append(num('lmnL', '変形抵抗 L', 'MPa', 200, 3000, 10, 1e6, 'kf = L (ε + M)ᴺ（平面ひずみ）。2D タブと同じ式。'));
     stripSec.body.append(num('lmnM', 'M', '', 0, 0.2, 0.005, 1));
     stripSec.body.append(num('lmnN', 'N', '', 0, 0.6, 0.005, 1));
     stripSec.body.append(num('entryStrain', '入側予ひずみ', '', 0, 2, 0.05, 1));
@@ -229,18 +306,30 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3));
     }
     if (params.mill === '12hi' || params.mill === '20hi') {
-      geoSec.body.append(num('bbD', 'バッキングベアリング 外径', 'mm', 100, 600, 5, 1e-3));
+      geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
       geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3));
       geoSec.body.append(num('bbLb', 'バッキング軸 支持長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('angle1', '第1中間 配置角（鉛直から）', '°', 10, 45, 1, Math.PI / 180));
+      geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 45, 1, Math.PI / 180, '鉛直からの角度。'));
     }
     geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 5, 1e9));
     left.append(geoSec.root);
 
     // numerics / display
     const numSec = section('解析・表示', { open: false });
-    numSec.body.append(num('stations', '幅方向 分割点数', '', 21, 241, 2, 1, '全ロール共通の節点数。増やすと帯行列の解法時間が線形に伸びる。'));
+    numSec.body.append(num('stations', '幅方向 分割数', '', 21, 241, 2, 1, '全ロール共通の節点数。増やすと帯行列の解法時間が線形に伸びる。'));
+    numSec.body.append(select<'hertz' | 'ring'>('扁平モデル', [
+      { value: 'hertz', text: 'Hertz 式（Johnson の円筒近似）' },
+      { value: 'ring', text: '断面 FEM（リングメッシュ nt × nr）' },
+    ], params.flatModel, (v) => { params.flatModel = v; apply(); buildLeft(); },
+    'ロールが接触で扁平する量の求め方。Hertz 式は半無限体の閉形式、断面 FEM は剛体ハブと胴の間の平面ひずみリングを Q4 要素で解いた影響関数（2D タブと同じ要素）。').root);
+    if (params.flatModel === 'ring') {
+      numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。接触半幅（数 mm）を数節点で解像するには 400 以上。'));
+      numSec.body.append(num('ringNr', 'ロール 半径方向 分割 nr', '', 2, 24, 1, 1));
+      numSec.body.append(num('ringGrade', '半径方向グレーディング', '', 1, 5, 0.1, 1, '1 で等間隔、大きいほど胴表面に要素を寄せる。'));
+      numSec.body.append(num('ringHub', '剛体ハブ半径 / R', '', 0.05, 0.85, 0.05, 1, 'ロール本体のうち軸として扱う部分。バッキングベアリングは軸径で決まる。'));
+    }
     numSec.body.append(slider({ label: '撓み表示倍率', min: 10, max: 2000, step: 10, log: true, value: magnify, onInput: (v) => { magnify = v; dirty = true; } }).root);
+    numSec.body.append(slider({ label: '断面変形 表示倍率', min: 10, max: 5000, step: 10, log: true, value: sectionMagnify, onInput: (v) => { sectionMagnify = v; dirty = true; } }).root);
     left.append(numSec.root);
 
     syncModeDials();
@@ -273,15 +362,21 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     })), { unit: 'µm', halfWidth, strip, zero: true });
 
     const contactLabel = (c: { a: number; b: number }) => `${st.rolls[c.a].id}–${st.rolls[c.b].id}`;
+    // an open gap is no flattening: zero where the contact carries no load,
+    // and nothing at all where the barrels do not overlap
+    const closed = (c: { delta: Float64Array; weight: Float64Array }) =>
+      Float64Array.from(c.delta, (d, i) => (c.weight[i] > 0 ? Math.max(d, 0) * 1e6 : NaN));
     charts.flat.draw([
       { label: 'WR–板', color: STRIP_COLOR, x: R.x, y: um(R.flat) },
-      ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: um(c.delta) })),
+      ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: closed(c) })),
     ], { unit: 'µm', halfWidth, strip, zero: true });
 
     const kn = (a: Float64Array) => Float64Array.from(a, (v) => v / 1e6);
+    const onBarrels = (c: { q: Float64Array; weight: Float64Array }) =>
+      Float64Array.from(c.q, (q, i) => (c.weight[i] > 0 ? q / 1e6 : NaN));
     charts.load.draw([
       { label: 'WR–板', color: STRIP_COLOR, x: R.x, y: kn(R.q), fill: true },
-      ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: kn(c.q) })),
+      ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: onBarrels(c) })),
     ], { unit: 'kN/mm', halfWidth, strip, zero: true });
 
     const dev = (a: Float64Array) => {
@@ -321,6 +416,39 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}`);
+    {
+      const wr = st.rolls[st.wr];
+      const inf = solver.ringFor(wr);
+      const mid = solver.slices[Math.floor(solver.slices.length / 2)];
+      const qc = mid?.q ?? 0;
+      const b = Math.max(Math.sqrt(solver.wsLaw.bCoef * Math.max(qc, 1)), (mid?.arc ?? 0) / 2);
+      if (inf) {
+        const johnson = ((1 - wr.nu * wr.nu) / (Math.PI * wr.E)) * (2 * Math.log((4 * wr.D) / (2 * b)) - 1);
+        stats.set('flatCmp', `${(ringCompliance(inf, b) / johnson).toFixed(3)} (b = ${(b * 1e3).toFixed(1)} mm)`);
+      } else stats.set('flatCmp', '—');
+      sectionView.draw(inf, qc, sectionMagnify, `WR ／ 板中央 q = ${(qc / 1e6).toFixed(2)} kN/mm`);
+    }
+
+    // chips
+    setChip(chips.mill, MILL_LABEL[params.mill]);
+    setChip(chips.force, (R.force / TONF).toFixed(0));
+    setChip(chips.h1, (R.h1Mean * 1e3).toFixed(3));
+    setChip(chips.crown, (R.crown * 1e6).toFixed(0));
+    setChip(chips.manifest, R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
+    setChip(chips.conv, R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
+    chips.conv.classList.toggle('busy', !R.converged && running);
+    setChip(chips.ms, R.solveMs.toFixed(0));
+    const warns = (R as { warnings?: string[] }).warnings ?? [];
+    const want = warns.join('\u0001');
+    if (warnBox.dataset.sig !== want) {
+      warnBox.dataset.sig = want;
+      warnBox.replaceChildren(...warns.map((w) => {
+        const b = el('div', 'badge warn');
+        b.innerHTML = `<b>⚠</b><span></span>`;
+        b.querySelector('span')!.textContent = w;
+        return b;
+      }));
+    }
 
     // contacts + reactions; the grid is rebuilt when the set changes (a new mill)
     const reactionLabel = (r: { def: { id: string; support: string } }) =>
@@ -380,6 +508,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     if (!active || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (e.code === 'Space') { e.preventDefault(); running = !running; dirty = true; }
     if (e.key === 'r' || e.key === 'R') { solver.setParams(params); solver.wake(); dirty = true; running = true; }
+    const k = Number(e.key);
+    if (k >= 1 && k <= MILLS.length && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      params = defaultParams(MILLS[k - 1]); solver.setParams(params); dirty = true; running = true; buildLeft();
+    }
   });
   void idleFrames;
   // a hook for headless checks, like the 2D tab's

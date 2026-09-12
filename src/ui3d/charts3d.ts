@@ -7,6 +7,7 @@
 
 import type { Result3D, RollState } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
+import type { RingInfluence } from '../sim3d/ring';
 
 const FONT = '11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 const BG = '#070a12';
@@ -68,9 +69,25 @@ const nice = (v: number): string => {
 
 /** A profile chart: several series against the width coordinate. */
 export class LineChart {
-  constructor(private canvas: HTMLCanvasElement) {}
+  /** what was last drawn, so a hover can be painted over it without recomputing */
+  private last: { series: XYSeries[]; o: LineChartOpts } | null = null;
+  /** the pointer's x on the canvas [css px], or null when it is off the chart */
+  private hoverX: number | null = null;
+
+  constructor(private canvas: HTMLCanvasElement) {
+    canvas.addEventListener('pointermove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      this.hoverX = e.clientX - r.left;
+      if (this.last) this.draw(this.last.series, this.last.o);
+    });
+    canvas.addEventListener('pointerleave', () => {
+      this.hoverX = null;
+      if (this.last) this.draw(this.last.series, this.last.o);
+    });
+  }
 
   draw(series: XYSeries[], o: LineChartOpts): void {
+    this.last = { series, o };
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     ctx.fillStyle = BG;
@@ -167,34 +184,98 @@ export class LineChart {
       }
       ctx.stroke();
       if (s.fill) {
-        ctx.globalAlpha = 0.16;
-        ctx.fillStyle = s.color;
-        ctx.lineTo(sx(s.x[s.x.length - 1] * 1e3), sy(0));
-        ctx.lineTo(sx(s.x[0] * 1e3), sy(0));
-        ctx.closePath();
-        ctx.fill();
-        ctx.globalAlpha = 1;
+        // close the area on the series' own first and last finite points,
+        // not on the grid's ends (the series is NaN off the strip)
+        let i0 = -1, i1 = -1;
+        for (let i = 0; i < s.y.length; i++) if (Number.isFinite(s.y[i])) { if (i0 < 0) i0 = i; i1 = i; }
+        if (i0 >= 0) {
+          ctx.globalAlpha = 0.16;
+          ctx.fillStyle = s.color;
+          ctx.lineTo(sx(s.x[i1] * 1e3), sy(0));
+          ctx.lineTo(sx(s.x[i0] * 1e3), sy(0));
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
       }
     }
     ctx.setLineDash([]);
     ctx.restore();
-    // legend
-    ctx.font = FONT;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    let lx = padL + 4, ly = padT + 14;
-    for (const s of series) {
-      const tw = ctx.measureText(s.label).width;
-      if (lx + tw + 22 > W - padR) { lx = padL + 4; ly += 13; }
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = 2;
-      ctx.setLineDash(s.dash ? [4, 3] : []);
-      ctx.beginPath(); ctx.moveTo(lx, ly + 6); ctx.lineTo(lx + 14, ly + 6); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = TEXT_BRIGHT;
-      ctx.fillText(s.label, lx + 18, ly);
-      lx += tw + 28;
+    // legend - inline while it fits; a cluster mill's twelve contacts would
+    // cover half the plot, so past six series the hover readout (which
+    // names every series) is the legend
+    if (series.length <= 6) {
+      // legend
+      ctx.font = FONT;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      let lx = padL + 4, ly = padT + 14;
+      for (const s of series) {
+        const tw = ctx.measureText(s.label).width;
+        if (lx + tw + 22 > W - padR) { lx = padL + 4; ly += 13; }
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash(s.dash ? [4, 3] : []);
+        ctx.beginPath(); ctx.moveTo(lx, ly + 6); ctx.lineTo(lx + 14, ly + 6); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = TEXT_BRIGHT;
+        ctx.fillText(s.label, lx + 18, ly);
+        lx += tw + 28;
+      }
     }
+
+    // hover readout: a crosshair at the nearest sample and every series'
+    // value there
+    const hx = this.hoverX;
+    if (hx === null || hx < padL || hx > W - padR || series.length === 0) return;
+    const xmm = -xr + ((hx - padL) / pw) * 2 * xr;
+    // the nearest grid x of the first series (they all share the grid)
+    const gx = series[0].x;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < gx.length; i++) {
+      const d = Math.abs(gx[i] * 1e3 - xmm);
+      if (d < bd) { bd = d; best = i; }
+    }
+    const px = Math.round(sx(gx[best] * 1e3)) + 0.5;
+    ctx.strokeStyle = 'rgba(220, 230, 245, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    const rows: { color: string; text: string }[] = [];
+    for (const s of series) {
+      const v = best < s.y.length ? s.y[best] : NaN;
+      rows.push({ color: s.color, text: Number.isFinite(v) ? nice(v) : '—' });
+      if (Number.isFinite(v)) {
+        ctx.fillStyle = s.color;
+        ctx.beginPath(); ctx.arc(px, sy(v), 2.6, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    const head = `x = ${(gx[best] * 1e3).toFixed(0)} mm`;
+    let bw = ctx.measureText(head).width;
+    for (const r of rows) bw = Math.max(bw, ctx.measureText(r.text).width + 16);
+    bw += 12;
+    const bh = 14 * (rows.length + 1) + 6;
+    // the box sits to the right of the crosshair unless that would leave the chart
+    let bx = px + 8;
+    if (bx + bw > W - padR) bx = px - 8 - bw;
+    const by = padT + 2;
+    ctx.fillStyle = 'rgba(7, 10, 18, 0.9)';
+    ctx.strokeStyle = 'rgba(140, 170, 210, 0.3)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill(); ctx.stroke();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = TEXT;
+    ctx.fillText(head, bx + 6, by + 4);
+    rows.forEach((r, i) => {
+      const y = by + 4 + 14 * (i + 1);
+      ctx.fillStyle = r.color;
+      ctx.fillRect(bx + 6, y + 3, 10, 3);
+      ctx.fillStyle = TEXT_BRIGHT;
+      ctx.fillText(r.text, bx + 20, y);
+    });
   }
 }
 
@@ -233,7 +314,7 @@ export class FrontView {
     const rolls = R.rolls;
     if (!rolls.length) return;
     const xr = -R.x[0];
-    const padL = 14, padR = 52, padT = 12, padB = 18;
+    const padL = 48, padR = 52, padT = 12, padB = 18;
     const pw = W - padL - padR, ph = H - padT - padB;
     const sx = (x: number) => padL + ((x + xr) / (2 * xr)) * pw;
     const dx = R.x[1] - R.x[0];
@@ -246,19 +327,27 @@ export class FrontView {
       if (last && Math.abs(rolls[last[0]].def.cy - rolls[i].def.cy) < 1e-6) last.push(i);
       else layers.push([i]);
     }
-    const stripBand = 44;
+    const stripBand = 60;
     const dref = Math.max(...rolls.map((r) => r.def.D));
-    const hOf = (D: number) => Math.pow(D / dref, 0.55);
+    const hOf = (D: number) => Math.pow(D / dref, 0.5);
     let sumH = 0;
     for (const L of layers) sumH += Math.max(...L.map((i) => hOf(rolls[i].def.D)));
-    const gap = 10;
-    const avail = ph - stripBand - gap * layers.length;
+    // room between layers: a fixed gap plus the largest magnified
+    // deflection, so a roll drawn sagging does not land on the one below
+    const pxPerM0 = pw / (2 * xr);
+    let vmax = 0;
+    for (const r of rolls) for (let s = r.ia; s <= r.ib; s++) if (Number.isFinite(r.v[s])) vmax = Math.max(vmax, Math.abs(r.v[s]));
+    // ...but never more than a third of the height across all the layers
+    const gap = 8 + Math.min(vmax * o.magnify * pxPerM0, Math.max(0, (0.33 * ph) / layers.length - 8));
+    let extra = 0;
+    for (const L of layers) if (L.length > 1) extra += (L.length - 1) * 12;
+    const avail = ph - stripBand - gap * layers.length - extra;
     const unit = avail / Math.max(sumH, 1e-9);
     // centre lines, from the strip upwards
     const cyPx = new Float64Array(rolls.length), halfPx = new Float64Array(rolls.length);
     let y = padT + ph - stripBand;
     for (const L of layers) {
-      const h = Math.max(...L.map((i) => hOf(rolls[i].def.D))) * unit;
+      const h = Math.max(...L.map((i) => hOf(rolls[i].def.D))) * unit + (L.length - 1) * 12;
       y -= gap + h / 2;
       for (const i of L) { cyPx[i] = y; halfPx[i] = (hOf(rolls[i].def.D) * unit) / 2; }
       y -= h / 2;
@@ -281,29 +370,34 @@ export class FrontView {
     for (const l of loads) for (let s = 0; s < l.length; s++) qmax = Math.max(qmax, l[s]);
 
     ctx.font = FONT;
-    // the rolls of a layer that sit side by side in the end view are drawn
-    // offset a little so both are seen
+    // The rolls of a layer that sit side by side in the end view are drawn
+    // with a vertical offset so both are seen, and their labels go to
+    // alternating sides so they do not land on each other.
+    const LAYER_OFF = 12;
     for (const L of layers) {
       L.forEach((ri, k) => {
         const r = rolls[ri];
         const d = r.def;
-        const off = L.length > 1 ? (k - (L.length - 1) / 2) * 6 : 0;
+        const off = L.length > 1 ? (k - (L.length - 1) / 2) * LAYER_OFF : 0;
         const cy = cyPx[ri] + off;
+        const labelLeft = L.length > 1 && k % 2 === 1;
         const hb = halfPx[ri], hn = Math.max(2, hb * (d.Dn / d.D));
         const color = ROLL_COLORS[ri % ROLL_COLORS.length];
         const xa = sx(d.shift - d.Ls / 2), xb = sx(d.shift + d.Ls / 2);
-        // necks / shaft
+        const x0 = d.shift - d.Lb / 2, x1 = d.shift + d.Lb / 2;
+        const s0 = Math.max(r.ia, Math.floor((x0 - R.x[0]) / dx)), s1 = Math.min(r.ib, Math.ceil((x1 - R.x[0]) / dx));
+        const vAt = (s: number) => (Number.isFinite(r.v[s]) ? r.v[s] : 0);
+        // necks / shaft, each end at the deflected axis there
         ctx.fillStyle = 'rgba(140,170,210,0.16)';
-        ctx.fillRect(xa, cy - hn, xb - xa, 2 * hn);
+        const yL = cy - vAt(r.ia) * mag * pxPerM, yR = cy - vAt(r.ib) * mag * pxPerM;
+        ctx.fillRect(xa, yL - hn, sx(x0) - xa, 2 * hn);
+        ctx.fillRect(sx(x1), yR - hn, xb - sx(x1), 2 * hn);
         // the undeflected axis, faint
         ctx.strokeStyle = 'rgba(140,170,210,0.22)';
         ctx.setLineDash([3, 5]);
         ctx.beginPath(); ctx.moveTo(xa, cy + 0.5); ctx.lineTo(xb, cy + 0.5); ctx.stroke();
         ctx.setLineDash([]);
         // barrel following the deflected axis, coloured by load
-        const x0 = d.shift - d.Lb / 2, x1 = d.shift + d.Lb / 2;
-        const s0 = Math.max(r.ia, Math.floor((x0 - R.x[0]) / dx)), s1 = Math.min(r.ib, Math.ceil((x1 - R.x[0]) / dx));
-        const vAt = (s: number) => (Number.isFinite(r.v[s]) ? r.v[s] : 0);
         for (let s = s0; s < s1; s++) {
           const xa2 = Math.max(x0, R.x[s]), xb2 = Math.min(x1, R.x[s + 1]);
           if (xb2 <= xa2) continue;
@@ -316,7 +410,23 @@ export class FrontView {
           ctx.closePath();
           ctx.fill();
         }
-        // taper / crown hint: none drawn; the axis line carries the shape
+        // the barrel's outline in the roll's own colour, so two rolls with
+        // the same load colour still read as two rolls
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        for (const sgn of [-1, 1]) {
+          let pen2 = false;
+          for (let s = s0; s <= s1; s++) {
+            const xx = Math.max(x0, Math.min(x1, R.x[s]));
+            const yy = cy - vAt(s) * mag * pxPerM + sgn * hb;
+            if (!pen2) { ctx.moveTo(sx(xx), yy); pen2 = true; } else ctx.lineTo(sx(xx), yy);
+          }
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        // the axis line carries the deflected shape
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
@@ -329,21 +439,22 @@ export class FrontView {
         }
         ctx.stroke();
         ctx.fillStyle = color;
-        ctx.textAlign = 'left';
+        ctx.textAlign = labelLeft ? 'right' : 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(d.id, xb + 5, cy);
+        ctx.fillText(d.id, labelLeft ? xa - 5 : xb + 5, cy);
         for (const s of r.supports) {
           const px = sx(R.x[s]);
+          const py = cy - vAt(s) * mag * pxPerM;
           ctx.fillStyle = d.support === 'saddle' ? '#ffc46b' : d.support === 'screw' ? '#ff6b81' : '#6ee7a5';
           ctx.beginPath();
-          ctx.moveTo(px, cy - hb - 2); ctx.lineTo(px - 4, cy - hb - 9); ctx.lineTo(px + 4, cy - hb - 9);
+          ctx.moveTo(px, py - hb - 2); ctx.lineTo(px - 4, py - hb - 9); ctx.lineTo(px + 4, py - hb - 9);
           ctx.closePath(); ctx.fill();
         }
       });
     }
 
     // the strip: the exit profile on an automatic scale
-    const yTop = padT + ph - stripBand + 8;
+    const yTop = padT + ph - stripBand + 6;
     let hmin = Infinity, hmax = -Infinity;
     for (let s = 0; s < R.x.length; s++) {
       const h = R.h1[s];
@@ -369,17 +480,28 @@ export class FrontView {
       ctx.closePath();
       ctx.fill();
       ctx.globalAlpha = 1;
+      // the label sits under the strip, centred, clear of the barrels above
+      // and the legend line below
       ctx.fillStyle = TEXT;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`板 h₁ (p-p ${(span * 1e6).toFixed(1)} µm, 自動スケール)`, sx(o.width / 2) + 6, yTop + bandPx / 2);
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'center';
+      ctx.fillText(`板 h₁ (p-p ${(span * 1e6).toFixed(1)} µm, 自動スケール)`, sx(0), yTop + bandPx + 8);
     }
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(`撓み ×${mag.toFixed(0)}`, padL, H - 4);
+    ctx.fillText(`撓み ×${mag.toFixed(0)}`, 8, H - 4);
+    // the support markers, spelled out
+    let lx = 8 + ctx.measureText(`撓み ×${mag.toFixed(0)}`).width + 18;
+    for (const [col, name] of [['#ff6b81', '圧下スクリュー'], ['#ffc46b', 'サドル'], ['#6ee7a5', 'ベンダー付きチョック']] as const) {
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.moveTo(lx, H - 5); ctx.lineTo(lx - 4, H - 12); ctx.lineTo(lx + 4, H - 12); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = TEXT;
+      ctx.fillText(name, lx + 7, H - 4);
+      lx += ctx.measureText(name).width + 22;
+    }
     ctx.textAlign = 'right';
-    ctx.fillText(`胴の色 = 接触線荷重 0 〜 ${(qmax / 1e6).toFixed(2)} kN/mm`, W - padR, H - 4);
+    ctx.fillText(`胴の色 = 接触線荷重 0 〜 ${(qmax / 1e6).toFixed(2)} kN/mm`, W - 8, H - 4);
   }
 }
 
@@ -474,3 +596,68 @@ export class EndView {
 }
 
 export type { RollState };
+
+/**
+ * The work roll's cross-section ring mesh, with the deformation under the
+ * contact load at the strip centre magnified. The half ring the solve uses
+ * is mirrored to a full one; the load axis points down, at the strip.
+ */
+export class SectionView {
+  constructor(private canvas: HTMLCanvasElement) {}
+
+  draw(inf: RingInfluence | undefined, q: number, magnify: number, label: string): void {
+    const ctx = fit(this.canvas);
+    const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = FONT;
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    if (!inf) {
+      ctx.fillText('扁平モデルが Hertz 式のときは断面メッシュはありません', 8, 8);
+      return;
+    }
+    const pad = 14;
+    const scale = (Math.min(W, H) / 2 - pad) / inf.R;
+    const cx = W / 2, cy = H / 2;
+    const { X, u, rows, cols } = inf;
+    const px = (x: number, y: number, ux: number, uy: number, side: 1 | -1): [number, number] =>
+      [cx + side * (x + ux * q * magnify) * scale, cy - (y + uy * q * magnify) * scale];
+    // element edges: radial lines and rings, mirrored
+    ctx.lineWidth = 0.7;
+    for (const side of [1, -1] as const) {
+      ctx.strokeStyle = side === 1 ? 'rgba(127, 228, 255, 0.45)' : 'rgba(127, 228, 255, 0.45)';
+      ctx.beginPath();
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          const n = i * rows + j;
+          const [x, y] = px(X[2 * n], X[2 * n + 1], u[2 * n], u[2 * n + 1], side);
+          if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+      }
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const n = i * rows + j;
+          const [x, y] = px(X[2 * n], X[2 * n + 1], u[2 * n], u[2 * n + 1], side);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+    // the undeformed barrel and hub, faint
+    ctx.strokeStyle = 'rgba(140,170,210,0.3)';
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath(); ctx.arc(cx, cy, inf.R * scale, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, inf.Rhub * scale, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    // the load
+    ctx.strokeStyle = STRIP_COLOR;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy + inf.R * scale + 10); ctx.lineTo(cx, cy + inf.R * scale + 2); ctx.stroke();
+    ctx.fillStyle = TEXT;
+    ctx.fillText(label, 8, 8);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`変形 ×${magnify.toFixed(0)} ／ nt ${inf.nt} × nr ${inf.nr} ／ ハブ ${(inf.Rhub / inf.R).toFixed(2)} R`, 8, H - 6);
+  }
+}

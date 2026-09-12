@@ -17,3 +17,4 @@ pic/
 
 # Plots and CSV written by tools/tandem_tension.py
 tools/out/
+tools/sim3d/build/

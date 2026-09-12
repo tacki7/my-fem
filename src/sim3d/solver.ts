@@ -20,8 +20,9 @@
 
 import { BandMatrix, denseSolve } from './band';
 import { makeContactLaw, loadAt, approach, type ContactLaw } from './contact';
+import { ringInfluence, type RingInfluence } from './ring';
 import {
-  sliceLoad, springback, kfMean, TENSION_CAP, type StripLaw,
+  sliceLoad, springback, kfMean, kfExitOf, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
   buildStack, radiusProfile, onBarrel, type Params3D, type Stack, type RollDef,
@@ -31,7 +32,7 @@ const DOF = 4;
 /** shear correction factor of a solid circular section */
 const KAPPA = 0.886;
 /** a spring on every node, to pin rigid modes of a roll whose contacts are all open [N/m] */
-const K_REG = 2e5;
+const K_REG = 2e4;
 /** the chock guides across the pass line [N/m] */
 const K_GUIDE = 2e9;
 /** the chock's own vertical compliance (a bender-held roll is otherwise free in y) [N/m] */
@@ -40,6 +41,16 @@ const K_CHOCK_Y = 1e6;
 const STEP_CLIP = 0.25e-3;
 /** the softest an active contact is allowed to look to the Jacobian [N/m²] */
 const KT_FLOOR = 1e9;
+/** the thinnest exit a slice may report, as a fraction of its entry thickness */
+const H_MIN_FRAC = 0.05;
+/** the residual is measured against the largest force in play, but never against less than this [N] */
+const F_SCALE_FLOOR = 1e4;
+/** the screw's travel [m]: negative is opened past the touching position */
+const SCREW_MIN = -10e-3;
+const SCREW_MAX = 20e-3;
+/** outer iterations after which a solve that has not settled is called stuck */
+const STUCK_ITERS = 150;
+const NO_LOAD = { q: 0, arc: 0, runaway: false } as const;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -86,6 +97,16 @@ export interface ContactState {
   total: number;
 }
 
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target';
+export const WARNING_TEXT: Record<Warning3D, string> = {
+  stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
+  bite: '噛み込み限界超過 (μ < tan α)',
+  gapClosed: 'ロールギャップが閉じている（圧下位置が深すぎる）',
+  tensionYield: '張力が降伏に近い（変形抵抗の 70% 超）',
+  stuck: '未収束（残差が下がらない）',
+  target: '制御目標に届かない',
+};
+
 export interface Result3D {
   x: Float64Array;
   rolls: RollState[];
@@ -122,10 +143,20 @@ export interface Result3D {
   stepMax: number;
   iterations: number;
   converged: boolean;
+  /** what is wrong with this pass, if anything - keys, see `WARNING_TEXT` */
+  warnings: Warning3D[];
   /** last solve time [ms] */
   solveMs: number;
   dof: number;
   bandwidth: number;
+}
+
+interface SliceState {
+  q: number;
+  h1: number;
+  flat: number;
+  arc: number;
+  runaway: boolean;
 }
 
 interface Slice {
@@ -140,11 +171,15 @@ interface Slice {
   arc: number;
   /** is the tension pinned at the buckling or yield limit */
   clipped: boolean;
-  /** dh1/dg and dh1/dσf from the last slice solve */
+  /** tangents from the last slice solve */
   dh1dg: number;
   dh1ds: number;
+  dqdg: number;
+  dqds: number;
   /** the rigid gap the slice was last solved at */
   g: number;
+  /** the pass at this slice has no steady solution (Stone's limit) */
+  runaway: boolean;
 }
 
 export class StackSolver {
@@ -172,10 +207,12 @@ export class StackSolver {
   private T!: Float64Array;
   /** any slice carrying tension feedback at all */
   private tensionLive = false;
+  /** profiling counters, when set */
+  counters: { coreIts: number; coreCalls: number; coreCap: number; rounds: number; inner: number; stripCalls: number } | null = null;
   /** last iteration's line-search record */
   debug: { alpha: number; res0: number; res: number; mx: number; tries: number } | null = null;
   private law!: StripLaw;
-  private wsLaw!: ContactLaw;
+  wsLaw!: ContactLaw;
   screw = 0;
   private sigmaF!: Float64Array;
   private dEps!: Float64Array;
@@ -184,6 +221,8 @@ export class StackSolver {
   private secant: { s: number; y: number } | null = null;
   result!: Result3D;
   private geomKey = '';
+  /** ring influence functions by their inputs; a roll's is rebuilt only when one of them changes */
+  private rings = new Map<string, RingInfluence>();
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -204,6 +243,7 @@ export class StackSolver {
     else this.refreshProfiles();
     this.converged = false;
     this.yAge = -1;
+    this.iterations = 0;
   }
 
   private rebuild(): void {
@@ -297,12 +337,16 @@ export class StackSolver {
         c.weight[s] = Math.max(0, hi - lo);
       }
     }
+    for (const c of this.contacts) {
+      c.law.ring1 = this.ringFor(rolls[c.a]);
+      c.law.ring2 = this.ringFor(rolls[c.b]);
+    }
     const wr = rolls[this.stack.wr];
     this.law = {
       lmnL: p.lmnL, lmnM: p.lmnM, lmnN: p.lmnN, E: p.Estrip, nu: p.nuStrip,
       entryStrain: p.entryStrain, mu: p.mu, R: wr.D / 2, Eroll: wr.E, nuRoll: wr.nu,
     };
-    this.wsLaw = makeContactLaw(wr.E, wr.nu, wr.D / 2, p.Estrip, p.nuStrip, Infinity);
+    this.wsLaw = makeContactLaw(wr.E, wr.nu, wr.D / 2, p.Estrip, p.nuStrip, Infinity, { ring1: this.ringFor(wr) });
     // strip slices: stations whose cell overlaps the strip
     const strip: [number, number] = [-p.width / 2, p.width / 2];
     const old = new Map(this.slices.map((sl) => [sl.s, sl]));
@@ -318,7 +362,7 @@ export class StackSolver {
       this.slices.push({
         s, x: xc, weight: w, h0,
         q: prev?.q ?? 0, h1: prev?.h1 ?? h0 * (1 - p.reduction), flat: prev?.flat ?? 0,
-        arc: prev?.arc ?? 0, clipped: prev?.clipped ?? false, dh1dg: prev?.dh1dg ?? 1, dh1ds: prev?.dh1ds ?? 0, g: prev?.g ?? h0,
+        arc: prev?.arc ?? 0, clipped: prev?.clipped ?? false, dh1dg: prev?.dh1dg ?? 1, dh1ds: prev?.dh1ds ?? 0, dqdg: prev?.dqdg ?? 0, dqds: prev?.dqds ?? 0, g: prev?.g ?? h0, runaway: false,
       });
       this.sliceW[s] = w;
     }
@@ -329,6 +373,25 @@ export class StackSolver {
   }
 
   private idx(s: number, r: number, d: number): number { return (s * this.nr + r) * DOF + d; }
+
+  /** the cross-section ring of a roll under the current ring settings, or nothing on the Hertz model */
+  ringFor(def: RollDef): RingInfluence | undefined {
+    const p = this.p;
+    if (p.flatModel !== 'ring') return undefined;
+    // a backing bearing's hub is its shaft; a roll's is the set fraction
+    const hub = def.shaftBeam ? Math.min(0.9, def.Dn / def.D) : p.ringHub;
+    const o = { R: def.D / 2, Rhub: (hub * def.D) / 2, nt: p.ringNt, nr: p.ringNr, grade: p.ringGrade, E: def.E, nu: def.nu };
+    const key = [o.R, o.Rhub, o.nt, o.nr, o.grade, o.E, o.nu].join('|');
+    let inf = this.rings.get(key);
+    if (!inf) {
+      inf = ringInfluence(o);
+      // the cache holds one function per distinct roll; an old setting's
+      // functions are dropped once it has grown past that
+      if (this.rings.size > 4 * this.nr + 4) this.rings.clear();
+      this.rings.set(key, inf);
+    }
+    return inf;
+  }
 
   /** diameter of the beam section of roll r at x */
   private beamDiameter(r: RollState, x: number): number {
@@ -348,7 +411,7 @@ export class StackSolver {
     if (withK) K.clear();
     rhs.fill(0);
     const rolls = this.rolls;
-    let fScale = 1;
+    let fScale = F_SCALE_FLOOR;
     const addK = withK ? (i: number, j: number, v: number) => K.add(i, j, v) : () => {};
 
     // ── beams: the internal force K_beam u goes straight into the residual ──
@@ -464,28 +527,23 @@ export class StackSolver {
     }
 
     // ── the strip under the work roll ──
-    const wrR = rolls[this.stack.wr];
+    // Already solved at this u and σ by `stripSolve`, which runs before
+    // every assembly; only its results are read here.
     let force = 0, h1w = 0, wsum = 0;
     this.slices.forEach((sl, i) => {
       const iv = this.idx(sl.s, this.stack.wr, 0);
-      const v = u[iv];
-      // the gap the rigid roll would leave, before its own flattening
-      const g = p.h0 + 2 * (v - wrR.prof[sl.s]);
-      const out = this.solveSlice(sl, g, this.sigmaF[sl.s]);
-      sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc;
-      sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds;
-      const f = out.q * sl.weight;
+      const f = sl.q * sl.weight;
       rhs[iv] += f;
       force += f;
-      h1w += out.h1 * sl.weight; wsum += sl.weight;
+      h1w += sl.h1 * sl.weight; wsum += sl.weight;
       fScale = Math.max(fScale, f);
       if (!withK) return;
       // The gap term of the tangent goes in the band. The tension term -
       // a slice rolled thinner is longer, goes slack, and is loaded harder,
       // through the whole strip's elongation balance - couples every slice
       // to every other and is applied in `iterate` as a Woodbury update.
-      K.add(iv, iv, Math.max(0, -2 * out.dqdg) * sl.weight);
-      this.dqds[i] = out.q > 0 ? out.dqds : 0;
+      K.add(iv, iv, Math.max(0, -2 * sl.dqdg) * sl.weight);
+      this.dqds[i] = sl.q > 0 ? sl.dqds : 0;
       if (TENSION_COUPLING === 'diag' && this.tensionLive) {
         const m = this.slices.length;
         K.add(iv, iv, Math.max(0, -sl.weight * this.dqds[i] * this.T[i * m + i]));
@@ -589,49 +647,84 @@ export class StackSolver {
 
   /**
    * The slice's load at a rigid gap g: q = P(h1), h1 = g + 2 δ_ws(q) + springback.
-   * Newton on q, warm-started; returns the load, thickness, flattening and the
-   * tangents dq/dg and dq/dσf.
+   *
+   * φ(q) = q − P(h1(q)) is increasing in q: a heavier load flattens the
+   * roll more, which opens the gap, which lowers the load the gap asks
+   * for. So the root is bracketed and a Newton step that leaves the
+   * bracket is replaced by a bisection - a plain Newton overshoots on a
+   * steep pass (high friction, foil), lands where the gap has opened, sees
+   * no contact, and oscillates between zero and a huge load.
    */
-  private solveSlice(sl: Slice, g: number, sigmaF: number): {
-    q: number; h1: number; flat: number; arc: number; dqdg: number; dqds: number; dh1dg: number; dh1ds: number;
-  } {
+  private sliceCore(sl: Slice, g: number, sigmaF: number, qStart: number): SliceState {
     const p = this.p;
     const law = this.law;
-    const ws = { ...this.wsLaw, bFloor: Math.max(0, sl.arc / 2) };
+    // The width the flattening is spread over is frozen for this call at
+    // the slice's last arc: φ(q) has to be one fixed function for the
+    // bracket to mean anything (an arc taken from the current iterate made
+    // a third of the calls run to the iteration cap). It catches up one
+    // outer iteration later, which is where the tangent is taken anyway.
+    const ws = this.wsLaw;
+    ws.bFloor = Math.max(0, sl.arc / 2);
+    const P = (h1: number, guess: number) => sliceLoad(law, sl.h0, h1, p.backTension, sigmaF, guess);
+    let q = Math.max(qStart, 0);
+    // a cold slice starts from the load the rigid gap would take, which is
+    // near the root; doubling up from nothing took a dozen rounds
+    if (q <= 0 && g < sl.h0) q = P(g, 0).q;
+    let h1 = sl.h0, flat = 0, arc = sl.arc, runaway = false;
+    const hMin = H_MIN_FRAC * sl.h0;
     const dh = 1e-3 * sl.h0;
-    const P = (h1: number, sig: number) => sliceLoad(law, sl.h0, h1, p.backTension, sig);
-    let q = sl.q;
-    let h1 = sl.h0, flat = 0, arc = 0, dflat = 0, Ph = 0;
-    for (let it = 0; it < 8; it++) {
+    let lo = 0, hi = Infinity;
+    let itDone = 0;
+    for (let it = 0; it < 25; it++) {
+      itDone = it + 1;
       const [d, dd] = approach(ws, q);
-      flat = d; dflat = dd;
-      const r0 = P(g + 2 * d, sigmaF);
-      h1 = g + 2 * d + springback(law, Math.min(g + 2 * d, sl.h0), r0.kfExit, sigmaF);
-      const r = h1 < sl.h0 ? P(h1, sigmaF) : { q: 0, Rp: law.R, arc: 0, kf: r0.kf, kfExit: r0.kfExit };
-      arc = r.arc;
-      if (r.q <= 0 && q <= 0) { q = 0; Ph = 0; break; }
-      const r2 = h1 + dh < sl.h0 ? P(h1 + dh, sigmaF) : { q: 0 };
-      Ph = (r2.q - r.q) / dh;
+      flat = d;
+      const hRigid = Math.max(g + 2 * d, hMin);
+      h1 = hRigid + springback(law, Math.min(hRigid, sl.h0), kfExitOf(law, sl.h0, hRigid), sigmaF);
+      const open = h1 >= sl.h0;
+      const r = open ? NO_LOAD : P(h1, q);
+      arc = r.arc; runaway = r.runaway;
       const phi = q - r.q;
-      const dphi = 1 - Ph * 2 * dd;
-      const step = -phi / Math.max(dphi, 1e-3);
-      const next = q + step;
-      q = next < 0 ? q * 0.3 : next;
-      if (Math.abs(step) < 1e-6 * Math.max(q, 1)) break;
+      if (Math.abs(phi) <= 1e-6 * Math.max(q, 1)) { if (open) q = 0; break; }
+      if (phi < 0) lo = q; else hi = q;
+      if (phi > 0 && q === 0) break;
+      // Newton on the load's own slope; a step outside the bracket is
+      // replaced by a bisection (or a doubling while the top is unknown)
+      let Ph = 0;
+      if (!open && h1 + dh < sl.h0) Ph = (P(h1 + dh, r.q).q - r.q) / dh;
+      let next = q - phi / (1 - 2 * Ph * dd);
+      if (!(next > lo && next < hi)) next = Number.isFinite(hi) ? 0.5 * (lo + hi) : Math.max(2 * q, lo + 1e3);
+      q = next;
     }
     if (h1 >= sl.h0) { q = 0; h1 = Math.min(h1, sl.h0); }
-    const den = 1 - 2 * Ph * dflat;
-    const dqdg = q > 0 ? Ph / den : 0;
-    let dqds = 0;
-    if (q > 0) {
-      const ds = 1e6;
-      const rs = P(h1, sigmaF + ds);
-      dqds = (rs.q - q) / ds / den;
-    }
-    // at a fixed gap, a tension change moves the thickness through the
-    // flattening (dh1 = 2 δ' dq) and the springback
-    const dh1ds = q > 0 ? 2 * dflat * dqds - (h1 * (1 - law.nu * law.nu)) / law.E : 0;
-    return { q, h1, flat, arc, dqdg, dqds, dh1dg: q > 0 ? 1 / den : 1, dh1ds };
+    if (this.counters) { this.counters.coreIts += itDone; this.counters.coreCalls++; if (itDone >= 25) this.counters.coreCap++; }
+    return { q, h1, flat, arc, runaway };
+  }
+
+  /**
+   * The slice at (g, σf) and its tangents dq/dg, dq/dσ, dh1/dg, dh1/dσ, by
+   * finite differences of the whole slice solve. That is twice the work of
+   * an analytic tangent, but it is consistent with everything the slice
+   * does - the elastic ramp, the arc-dependent contact width, the load cap,
+   * the springback - and an inconsistent tangent costs far more in
+   * shortened outer steps than the extra solves cost here.
+   */
+  private solveSlice(sl: Slice, g: number, sigmaF: number): SliceState & {
+    dqdg: number; dqds: number; dh1dg: number; dh1ds: number;
+  } {
+    const base = this.sliceCore(sl, g, sigmaF, sl.q);
+    if (base.q <= 0) return { ...base, dqdg: 0, dqds: 0, dh1dg: 1, dh1ds: 0 };
+    const dg = 2e-3 * sl.h0;
+    const ds = Math.max(1e6, 0.02 * Math.abs(sigmaF));
+    const atG = this.sliceCore(sl, g - dg, sigmaF, base.q);
+    const atS = this.sliceCore(sl, g, sigmaF + ds, base.q);
+    return {
+      ...base,
+      dqdg: (base.q - atG.q) / dg,
+      dqds: (atS.q - base.q) / ds,
+      dh1dg: (base.h1 - atG.h1) / dg,
+      dh1ds: (atS.h1 - base.h1) / ds,
+    };
   }
 
   /**
@@ -709,8 +802,8 @@ export class StackSolver {
         if (onlyLive && held[i] !== 0) return;
         const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
         const out = this.solveSlice(sl, g, sigma[i]);
-        sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc;
-        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds;
+        sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
+        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds; sl.dqdg = out.dqdg; sl.dqds = out.dqds;
         eps[i] = sl.q > 0 ? Math.log(sl.h0 / Math.max(sl.h1, 1e-9)) : 0;
       });
     };
@@ -762,9 +855,12 @@ export class StackSolver {
     };
 
     evalSlices(false);
+    if (this.counters) this.counters.stripCalls++;
     for (let round = 0; round < 10; round++) {
+      if (this.counters) this.counters.rounds++;
       // Newton on the live slices, the held ones fixed
       for (let it = 0; it < 8; it++) {
+        if (this.counters) this.counters.inner++;
         evalFree();
         let rn = 0;
         for (let i = 0; i < n; i++) { r[i] = held[i] === 0 ? sigma[i] - free[i] : 0; rn = Math.max(rn, Math.abs(r[i])); }
@@ -843,7 +939,7 @@ export class StackSolver {
     step = Math.max(-cap, Math.min(cap, step));
     // negative = opened past the touching position; an AS-U or crown that
     // pre-loads the stack can need that to hit a light reduction
-    this.screw = Math.max(-10e-3, Math.min(20e-3, this.screw + step));
+    this.screw = Math.max(SCREW_MIN, Math.min(SCREW_MAX, this.screw + step));
   }
 
   /** whether the screw sits on its target */
@@ -886,7 +982,7 @@ export class StackSolver {
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, converged: false, warnings: [], solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
     };
   }
 
@@ -923,6 +1019,7 @@ export class StackSolver {
     R.latentIU = Number.isFinite(lat1 - lat0) ? (lat1 - lat0) * 1e5 : 0;
     R.manifestIU = man * 1e5;
     R.screw = this.screw;
+    R.warnings = this.diagnose();
     R.residual = this.residual;
     R.stepMax = this.stepMax;
     R.iterations = iters;
@@ -930,6 +1027,43 @@ export class StackSolver {
     R.solveMs = ms;
     R.dof = u.length;
     R.bandwidth = this.K.hb;
+  }
+
+  /** the pass's problems, from the slices' own flags and the control state */
+  private diagnose(): Warning3D[] {
+    const p = this.p;
+    const w: Warning3D[] = [];
+    let runaway = 0, closed = 0, bite = 0, loaded = 0;
+    for (const sl of this.slices) {
+      if (sl.q <= 0) continue;
+      loaded++;
+      if (sl.runaway) runaway++;
+      if (sl.h1 <= H_MIN_FRAC * sl.h0 * 1.0001 + 1e-12) closed++;
+      // bite: the entry angle on the flattened arc must be under the friction angle
+      const dh = sl.h0 - sl.h1;
+      if (dh > 0 && sl.arc > 0 && dh / sl.arc > p.mu) bite++;
+    }
+    // Stone's minimum rollable thickness, as the 2D tab computes it:
+    // h_min = C μ R (k̄f − σ̄t), C = 16 (1 − ν²)/(π E_roll). A target under
+    // it has no steady pass whether or not a slice has hit the load cap yet.
+    {
+      const wr = this.stack.rolls[this.stack.wr];
+      const e0 = Math.max(p.entryStrain, 0);
+      const kfM = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
+      const C = (16 * (1 - wr.nu * wr.nu)) / (Math.PI * wr.E);
+      const hMinStone = C * p.mu * (wr.D / 2) * Math.max(kfM - 0.5 * (p.backTension + p.frontTension), 0);
+      const target = p.mode === 'gauge' ? p.h0 * (1 - p.reduction) : this.h1Mean;
+      if (runaway > 0 || target < hMinStone) w.push('stone');
+    }
+    if (closed > 0) w.push('gapClosed');
+    if (loaded > 0 && bite > loaded / 2) w.push('bite');
+    const e0 = Math.max(p.entryStrain, 0);
+    const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
+    if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
+    if (this.iterations > STUCK_ITERS && !this.converged && this.residual > 1e-4) w.push('stuck');
+    if (p.mode !== 'screw' && this.iterations > STUCK_ITERS && !this.screwSettled()
+      && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');
+    return w;
   }
 
   /** exit thickness at x by linear interpolation between slices */

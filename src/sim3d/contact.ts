@@ -19,10 +19,15 @@
  * overshoot. The tangent dq/dδ is what the stack's Jacobian takes.
  */
 
+import { ringCompliance, type RingInfluence } from './ring';
+
 export interface ContactLaw {
   /** per-body compliance (1-ν²)/(πE) for body 1, 2 - zero for a body left out */
   A1: number;
   A2: number;
+  /** a body's cross-section ring FEM, when that model is selected; replaces its log term */
+  ring1?: RingInfluence;
+  ring2?: RingInfluence;
   R1: number;
   R2: number;
   /** 4 R_eq / (π E*): b² = this · q */
@@ -33,7 +38,7 @@ export interface ContactLaw {
 
 export function makeContactLaw(
   E1: number, nu1: number, R1: number, E2: number, nu2: number, R2: number,
-  opts: { bodyTwoRigid?: boolean; bFloor?: number } = {},
+  opts: { bodyTwoRigid?: boolean; bFloor?: number; ring1?: RingInfluence; ring2?: RingInfluence } = {},
 ): ContactLaw {
   const c1 = (1 - nu1 * nu1) / E1;
   const c2 = (1 - nu2 * nu2) / E2;
@@ -45,6 +50,8 @@ export function makeContactLaw(
     R1, R2,
     bCoef: (4 * Req * invE) / Math.PI,
     bFloor: opts.bFloor ?? 0,
+    ring1: opts.ring1,
+    ring2: opts.ring2,
   };
 }
 
@@ -54,11 +61,26 @@ export function approach(c: ContactLaw, q: number): [number, number] {
   const bh = Math.sqrt(c.bCoef * q);
   const hertz = bh >= c.bFloor;
   const b = hertz ? bh : c.bFloor;
-  const t1 = 2 * Math.log((4 * c.R1) / b) - 1;
-  const t2 = c.A2 > 0 ? 2 * Math.log((4 * c.R2) / b) - 1 : 0;
-  const d = q * (c.A1 * t1 + c.A2 * t2);
-  // b ∝ √q: d/dq [q (2 ln(4R/b) - 1)] = (2 ln(4R/b) - 1) - 1
-  const dd = hertz ? c.A1 * (t1 - 1) + c.A2 * (t2 - 1) : c.A1 * t1 + c.A2 * t2;
+  // per body: the compliance G(b) [m per N/m] and its slope in b
+  let G = 0, dG = 0;
+  const db = 0.05 * b;
+  if (c.ring1) {
+    const g0 = ringCompliance(c.ring1, b);
+    G += g0; dG += (ringCompliance(c.ring1, b + db) - g0) / db;
+  } else {
+    G += c.A1 * (2 * Math.log((4 * c.R1) / b) - 1); dG += (-2 * c.A1) / b;
+  }
+  if (c.A2 > 0) {
+    if (c.ring2) {
+      const g0 = ringCompliance(c.ring2, b);
+      G += g0; dG += (ringCompliance(c.ring2, b + db) - g0) / db;
+    } else {
+      G += c.A2 * (2 * Math.log((4 * c.R2) / b) - 1); dG += (-2 * c.A2) / b;
+    }
+  }
+  const d = q * G;
+  // b ∝ √q on the Hertz branch: dδ/dq = G + q G' db/dq = G + G' b / 2
+  const dd = hertz ? G + (dG * b) / 2 : G;
   return [d, Math.max(dd, 1e-30)];
 }
 
