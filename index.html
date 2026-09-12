@@ -14,6 +14,10 @@
 <body>
 <div id="app">
   <header id="topbar">
+    <div id="mode-tabs" class="btn-row" role="tablist" aria-label="解析モード">
+      <button class="btn active" data-mode="2d" role="tab" title="2D 剛塑性流れ解析（既存）">2D 解析</button>
+      <button class="btn" data-mode="3d" role="tab" title="3D ロールスタック・板の幅方向変形（2Hi〜20Hi）">3D 解析</button>
+    </div>
     <div id="theme-switch" class="btn-row" role="group" aria-label="表示テーマ">
       <button class="btn" data-theme="classic" title="現在の UI（既定）">現在</button>
       <button class="btn" data-theme="modern" title="モダンな UI: フラットで角の丸い、無彩色＋青のアクセント">モダン</button>
@@ -118,6 +122,8 @@
   </footer>
 
   <aside id="right" class="panel"></aside>
+
+  <div id="view3d" hidden></div>
 </div>
 <div id="fatal" hidden></div>
 <script type="module" src="/src/main.ts"></script>

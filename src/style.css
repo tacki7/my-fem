@@ -881,3 +881,53 @@ body.resizing * { cursor: inherit !important; }
   grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
   grid-template-areas: "topbar topbar" "millline millline" "bottom left";
 }
+
+
+/* ── the 3D tab ──────────────────────────────────────────────────────────────
+   One container spanning every row under the top bar; the 2D panels and
+   their gutters are hidden while it is up, and it lays out its own three
+   columns on the same movable track widths. */
+/* leftmost in the bar, so a crowded bar can never push them out of reach */
+#mode-tabs { display: flex; gap: 3px; flex: none; }
+#mode-tabs .btn { padding: 3px 8px; font-size: 10.5px; border-radius: 6px; font-weight: 600; }
+#app.mode-3d > :is(#millline, #left, #stage, #bottom, #right, .gutter) { display: none; }
+#app.mode-3d :is(#topbar-presets, #topbar-actions, #topbar-badges) { display: none; }
+#view3d {
+  grid-column: 1 / -1;
+  grid-row: 2 / -1;
+  display: grid;
+  grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+#view3d[hidden] { display: none; }
+#view3d .v3-panel { overflow-y: auto; min-height: 0; }
+#view3d .v3-centre {
+  display: grid;
+  grid-template-rows: minmax(0, 1.05fr) minmax(0, 1.5fr);
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+}
+#view3d .v3-cell {
+  background: var(--panel-grad);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+  min-height: 0;
+}
+#view3d .v3-cell canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+#view3d .v3-charts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+}
+#v3-end { width: 100%; height: 240px; display: block; border-radius: 6px; }
+.v3-asu { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.v3-asu .num-field { width: 100%; min-width: 0; padding: 3px 2px; text-align: center; font-size: 10.5px; }
+@media (max-width: 1400px) {
+  #view3d .v3-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+}

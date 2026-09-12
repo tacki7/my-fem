@@ -28,6 +28,8 @@ import {
 import { probe, heap, bytes, type SysInfo } from './ui/sysinfo';
 import { installLayout, type LayoutHandle, type Theme, currentTheme } from './ui/layout';
 import * as settings from './ui/settings';
+import { installView3D, type View3DHandle } from './ui3d/view3d';
+import type { MillType } from './sim3d/stack';
 
 /* ── presets ─────────────────────────────────────────────────────────────── */
 
@@ -3508,7 +3510,34 @@ layoutRef = layout;
 // structure (tabs, handle positions) is applied here, once the panels exist.
 applyPanelStructure(currentTheme());
 layout.refresh();
-window.addEventListener('resize', () => { layout.refresh(); relayout(); });
+window.addEventListener('resize', () => { layout.refresh(); relayout(); view3d?.relayout(); });
+
+/* ── the 2D / 3D tabs ────────────────────────────────────────────────────── */
+
+const MILL_TYPES = new Set(['2hi', '4hi', '6hi', '12hi', '20hi']);
+const qsMill = (QS.get('mill') ?? '').toLowerCase();
+const view3d: View3DHandle = installView3D(document.getElementById('view3d') as HTMLElement, {
+  initialMill: MILL_TYPES.has(qsMill) ? (qsMill as MillType) : undefined,
+});
+{
+  const appEl = document.getElementById('app') as HTMLElement;
+  const tabs = document.getElementById('mode-tabs') as HTMLElement;
+  const setMode = (mode: '2d' | '3d') => {
+    appEl.classList.toggle('mode-3d', mode === '3d');
+    [...tabs.children].forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.mode === mode));
+    view3d.setActive(mode === '3d');
+    if (mode === '2d') { layout.refresh(); relayout(); }
+    try { localStorage.setItem('rollfem.mode', mode); } catch { /* private mode */ }
+  };
+  tabs.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest('button') as HTMLElement | null;
+    if (b?.dataset.mode) setMode(b.dataset.mode as '2d' | '3d');
+  });
+  const qsTab = QS.get('tab');
+  let remembered: string | null = null;
+  try { remembered = localStorage.getItem('rollfem.mode'); } catch { /* private mode */ }
+  if (qsTab === '3d' || (qsTab === null && remembered === '3d')) setMode('3d');
+}
 
 /* ── loop ────────────────────────────────────────────────────────────────── */
 
@@ -3857,6 +3886,10 @@ if (DEBUG_TITLE) {
 function frame(now: number): void {
   const wall = Math.min(now - last, 100);
   last = now;
+  // The 3D tab has the screen: the 2D line holds still (its state is kept,
+  // not advanced) and nothing here is drawn, so the two solves never share a
+  // frame.
+  if (view3d?.active) { requestAnimationFrame(frame); return; }
   frameEma += (wall - frameEma) * 0.1;
   fpsEma += (1000 / Math.max(wall, 1e-3) - fpsEma) * 0.08;
   if (!stageHidden()) renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
