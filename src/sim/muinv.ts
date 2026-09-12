@@ -30,10 +30,12 @@
  * the stand table, so pressing the button twice on unchanged inputs gives the
  * same answer twice, and the answer is available immediately rather than after
  * the line has re-settled. The load it reproduces is this model's load, not the
- * FEM's - see `slabLoad` for what that does and does not include.
+ * FEM's - see `slabLoad` for what that does and does not include, and
+ * `slab.ts` for the three theories it can be.
  */
 
-import { meanPlaneStrainLmnRange, type RollingParams } from './solver';
+import type { RollingParams } from './solver';
+import { slabPointAt, type SlabCase, type SlabPoint } from './slab';
 
 /**
  * The friction the search will look between.
@@ -49,112 +51,99 @@ import { meanPlaneStrainLmnRange, type RollingParams } from './solver';
 export const MU_MIN = 0.005;
 export const MU_MAX = 1.0;
 
-/** One pass, as the back-calculation sees it. */
-export interface SlabCase {
-  /** entry thickness [m] */
-  h0: number;
-  /** exit thickness [m] */
-  h1: number;
-  /** ground work-roll radius [m] */
-  R: number;
-  /** pull on the entry side [Pa] */
-  backTension: number;
-  /** pull on the exit side [Pa] */
-  frontTension: number;
-  /** equivalent plastic strain the strip arrives with */
-  entryStrain: number;
-}
+export { exitStrain, slabKfProfile, slabPressureProfile, SLAB_THEORY_LABEL, FLATTENING_LABEL } from './slab';
+export type { SlabCase, SlabPoint } from './slab';
 
-/** What the forward model says about a pass at one friction coefficient. */
-export interface SlabPoint {
-  /** rolling load per unit width [N/m]; Infinity if the flattening runs away */
-  load: number;
-  /** mean interface pressure [Pa] */
-  meanPressure: number;
-  /** contact arc, on the flattened radius [m] */
-  arc: number;
-  /** flattened radius R' [m] */
-  Rflat: number;
-  /** strain-averaged plane-strain resistance across this pass [Pa] */
-  kf: number;
-  /** what the friction hill is actually built on, kf - (sigma_b + sigma_f)/2 [Pa] */
-  kEff: number;
-  /** friction hill factor (e^a - 1)/a */
-  Qp: number;
-  /** a = mu L / h̄ */
-  a: number;
-}
-
-/** 2/sqrt(3): the draft ln(h0/h1) as a plane-strain equivalent strain. */
-const EQ = 2 / Math.sqrt(3);
-
-/** Equivalent strain the strip leaves this pass with. */
-export function exitStrain(c: SlabCase): number {
-  return Math.max(c.entryStrain, 0) + EQ * Math.log(c.h0 / c.h1);
+/**
+ * The flattened radius a load P [N/m] gives a roll of radius R on a draft dh,
+ * by the selected model. Both are increasing in P, which is what the fixed
+ * point below relies on.
+ *
+ *   hitchcock  R' = R (1 + C P/dh), C = 16 (1 - nu^2)/(pi E). The classical
+ *              form: an elliptical pressure over the arc, the deformed arc
+ *              still circular. Its contact length is L = sqrt(R' dh), so
+ *              L^2 = R dh + C R P, and at zero draft L = sqrt(C R P) - twice
+ *              the Hertz half-width b, b^2 = C R P / 4.
+ *   roberts    the arc of contact written as the plastic parabola plus one
+ *              Hertz half-width, L = b + sqrt(b^2 + R dh) - the form Roberts
+ *              (Cold Rolling of Steel, 1978) gave against Hitchcock's for
+ *              thin strip, where the elastic contact is a large share of the
+ *              arc. Same L = 2b at zero draft; a longer arc, i.e. more
+ *              flattening, at any real draft (on the default pass 12.1 mm
+ *              against Hitchcock's 10.5). The equivalent radius the slab
+ *              theories then roll with is R' = L^2/dh.
+ *
+ * The constant in Roberts' x0 follows this reading of the form, with the
+ * Hertz half-width as the added length; a reference that quotes a different
+ * coefficient changes one line here.
+ */
+export function flatRadius(p: RollingParams, c: SlabCase, load: number): number {
+  const dh = c.h0 - c.h1;
+  const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
+  if (p.flattening === 'roberts') {
+    const b2 = (C * c.R * load) / 4;
+    const L = Math.sqrt(b2) + Math.sqrt(b2 + c.R * dh);
+    return (L * L) / dh;
+  }
+  return c.R * (1 + (C * load) / dh);
 }
 
 /**
- * Rolling load per unit width at one friction coefficient.
+ * Rolling load per unit width at one friction coefficient, on the selected
+ * slab theory (`p.slabTheory` - see `slab.ts` for the three), with the roll
+ * flattened by the selected model (`p.flattening` - see `flatRadius`) unless
+ * a radius `Rp` is handed in.
  *
- *     kf   strain-averaged over *this pass's* span, e0..e1, not from zero -
- *          every stand after the first is handed metal that has already been
- *          hardened (see `meanPlaneStrainLmnRange`)
- *     k*   kf - (sigma_b + sigma_f)/2; both pulls hold the strip apart, so
- *          they come off the resistance the hill is raised from, the same way
- *          they do in Stone's minimum thickness a few hundred lines away in
- *          `solver.ts`
- *     Qp   (e^a - 1)/a with a = mu L / h̄ - Siebel's friction hill
- *     P    kf* Qp L, on the flattened arc L = sqrt(R' dh)
- *
- * Deliberately *not* in here: the FEM's own contact solution, the elastic
- * entry and exit zones, work hardening across the arc as anything but an
- * average, and any heating. This is the textbook estimate the app already
- * plots as スラブ法 荷重, plus tension, and the mu it hands back is the mu that
- * makes *this* formula reproduce the load - which is what makes the round trip
- * exact and also what keeps it a few percent away from the FEM.
+ * Deliberately *not* in any of them: the FEM's own contact solution, the
+ * elastic entry and exit zones, and any heating. This is the textbook
+ * estimate the app plots as スラブ法 荷重, plus tension, and the mu that
+ * `muFromLoad` hands back is the mu that makes *this* formula reproduce the
+ * load - which is what makes the round trip exact and also what keeps it a
+ * few percent away from the FEM.
  */
-export function slabLoad(p: RollingParams, c: SlabCase, mu: number): SlabPoint {
-  const dh = c.h0 - c.h1;
-  const hm = (c.h0 + c.h1) / 2;
-  const e0 = Math.max(c.entryStrain, 0);
-  const kf = meanPlaneStrainLmnRange(p, e0, exitStrain(c));
-  const kEff = Math.max(kf - (c.backTension + c.frontTension) / 2, 0);
-  const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
-
-  const at = (Rp: number): SlabPoint => {
-    const arc = Math.sqrt(Rp * dh);
-    const a = (mu * arc) / hm;
-    // expm1, not exp - 1: a is 0.1-ish here and the subtraction throws away
-    // the low bits of exactly the quantity the hill is made of.
-    const Qp = a > 1e-12 ? Math.expm1(a) / a : 1;
-    const meanPressure = kEff * Qp;
-    return { load: meanPressure * arc, meanPressure, arc, Rflat: Rp, kf, kEff, Qp, a };
-  };
-
+export function slabLoad(p: RollingParams, c: SlabCase, mu: number, Rp?: number): SlabPoint {
+  const at = (R: number): SlabPoint => slabPointAt(p, c, mu, R);
+  if (Rp !== undefined) return at(Rp);
   if (!p.rollCoupling) return at(c.R);
 
-  // Hitchcock, approached from below. R' = R (1 + C P(R')/dh) is an increasing
-  // map of R', and R' = R sits under its own image, so the iteration climbs
-  // monotonically onto the *smallest* fixed point - the physical one. The map
-  // also has a second, spurious crossing further out where the exponential has
-  // taken over, and every method that does not start below and climb can land
-  // on it.
+  // The flattening fixed point, approached from below. R' = flat(P(R')) is
+  // an increasing map of R' for either model, and R' = R sits under its own
+  // image, so the iteration climbs monotonically onto the *smallest* fixed
+  // point - the physical one. The map also has a second, spurious crossing
+  // further out where the exponential has taken over, and every method that
+  // does not start below and climb can land on it.
   //
   // No fixed point at all is a real answer, not a failure: past Stone's
   // minimum rollable thickness the roll flattens faster than the gap closes
   // and the pass has no steady solution. Reported as an infinite load, which
   // is exactly what the bisection outside needs to hear - "mu is too high".
-  const cap = c.R * 1e4;
-  let Rp = c.R;
-  for (let i = 0; i < 4000; i++) {
-    const next = c.R * (1 + (C * at(Rp).load) / dh);
+  //
+  // Bounded, because two of the theories integrate numerically and cost a
+  // few thousand evaluations of the yield law each: a climb that is not
+  // going to arrive must be given up early. R'/R of a hundred is far past
+  // anything a pass survives (Stone's limit is reached long before), and a
+  // sequence whose steps have been growing for five rounds is diverging,
+  // not converging. A climb still shrinking its steps at the iteration cap
+  // is accepted where it is - within the tolerance of the integrators.
+  const cap = c.R * 100;
+  let R = c.R;
+  let lastStep = Infinity, growing = 0;
+  for (let i = 0; i < 400; i++) {
+    const next = flatRadius(p, c, at(R).load);
     if (!(next > 0) || next > cap) break;
-    if (Math.abs(next - Rp) <= 1e-14 * next) return at(next);
-    Rp = next;
+    const step = next - R;
+    if (step <= 1e-12 * next) return at(next);
+    growing = step > lastStep ? growing + 1 : 0;
+    if (growing >= 5) break;
+    lastStep = step;
+    R = next;
+    if (i === 399) return at(R);
   }
+  const last = at(R);
   return {
+    ...last,
     load: Infinity, meanPressure: Infinity, arc: Infinity, Rflat: Infinity,
-    kf, kEff, Qp: Infinity, a: Infinity,
+    Qp: Infinity, a: Infinity, torque: Infinity, neutralX: NaN, forwardSlip: NaN,
   };
 }
 

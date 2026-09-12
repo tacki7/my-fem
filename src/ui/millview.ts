@@ -40,8 +40,10 @@ export interface StandView {
   frontTension: number;
   /** work roll radius [mm], for drawing the barrels to relative size */
   R: number;
-  /** 'off' | 'lock' | 'work' | 'sat' | 'stall' */
-  state: 'off' | 'lock' | 'work' | 'sat' | 'stall' | 'idle';
+  /** 'off' | 'lock' | 'work' | 'sat' | 'stall' | 'idle' | 'recalc' (just restarted after a NaN solve) | 'diverged' (given up) */
+  state: 'off' | 'lock' | 'work' | 'sat' | 'stall' | 'idle' | 'recalc' | 'diverged';
+  /** restarts after a NaN solve so far, for the recalc label */
+  restarts: number;
   /** which quantity this stand's loop is holding; decides what is emphasised */
   mode: 'off' | 'gauge' | 'force';
   /**
@@ -84,6 +86,19 @@ export interface StandView {
    * and the quantity a tandem line's speed cone is set from.
    */
   forwardSlip: number;
+  /**
+   * Under the slab load `forwardSlip` is the theory's own (from its neutral
+   * point, by volume constancy) and this is the FEM's measured value beside
+   * it; NaN under the FEM load, where the two are one number. Kept in view
+   * because they are different models and disagree - a theory with its
+   * neutral point inside the arc next to a FEM that is skidding.
+   */
+  forwardSlipFem: number;
+  /**
+   * Screw revisions it took the gap loop to settle - frozen once it has, live
+   * while it is still working. 0 with the loop off or the stand parked.
+   */
+  agcIters: number;
   /** roll torque and power at the real strip width, both rolls [kN·m], [kW] */
   torque: number;
   power: number;
@@ -98,6 +113,8 @@ export interface StandView {
    */
   biteLimit: number;
   stoneLimit: number;
+  /** screw position as the stand would read it [mm]; negative with the housing stretch in */
+  screw: number;
   /** strip temperature entering and leaving this stand [degC] */
   tempIn: number;
   tempOut: number;
@@ -114,12 +131,15 @@ const STATE_COLOR: Record<StandView['state'], string> = {
   sat: '255,110,140',
   stall: '255,110,140',
   idle: '150,168,192',
+  recalc: '255,196,107',
+  diverged: '255,110,140',
 };
 // The same words the AGC panel uses for the same conditions - `stall` here and
 // `agcStalled` there are one flag, and two names for it read as two states.
 const STATE_LABEL: Record<StandView['state'], string> = {
   off: '—', lock: '収束', work: '調整中', sat: 'ギャップ端に張り付き',
   stall: '内側ループ待ち', idle: '保留（目標 ≥ 入側）',
+  recalc: '再計算中（解が NaN）', diverged: '発散（再計算停止）',
 };
 
 export class MillLineView {
@@ -172,7 +192,7 @@ export class MillLineView {
     // rows are dropped from the bottom, in reverse order of what a schedule is
     // read for, and the strip keeps a band worth looking at either way.
     const ROW = 13;
-    const wanted = anyHeat ? 11 : 10;
+    const wanted = anyHeat ? 14 : 13;
     const BLOCK_EXTRA = 27;
     const rowsFit = Math.max(0, Math.min(wanted,
       Math.floor((H - padT - 34 - BLOCK_EXTRA) / ROW)));
@@ -357,6 +377,7 @@ export class MillLineView {
        */
       const row = (
         label: string, target: string | null, actual: string, unit: string, hot: boolean,
+        colour?: string,
       ) => {
         if (left-- <= 0) return;
         ctx.font = FONT_S;
@@ -365,7 +386,10 @@ export class MillLineView {
         ctx.fillStyle = 'rgba(150,168,192,0.45)';
         if (unit) ctx.fillText(unit, bx + barW, ry);
         const xr = bx + barW - uw;
-        ctx.fillStyle = hot ? `rgba(${col},0.95)` : 'rgba(226,238,255,0.88)';
+        // `hot` paints in the loop's state colour (this row is what the loop
+        // holds); `colour` is for a verdict of the row's own, independent of
+        // the loop - a limit crossed is red whether or not the loop is happy.
+        ctx.fillStyle = colour ?? (hot ? `rgba(${col},0.95)` : 'rgba(226,238,255,0.88)');
         ctx.fillText(actual, xr, ry);
         let lim = xr - ctx.measureText(actual).width - 5;
         if (target !== null) {
@@ -416,14 +440,35 @@ export class MillLineView {
       // constrain anything here comes out negative, and printing a negative
       // thickness invites reading it as one - so it is dashed instead.
       const lim = (v: number) => (v > 0 ? v.toFixed(3) : '—');
-      row('h₁ 実/噛込/Stone', null,
-        `${s.hOut.toFixed(3)} / ${lim(s.biteLimit)} / ${lim(s.stoneLimit)}`, 'mm', false);
+      row('h₁ 実/噛込', null, `${s.hOut.toFixed(3)} / ${lim(s.biteLimit)}`, 'mm', false);
+      // The screw a stand would read, and the floor under the gauge. Both
+      // used to be elsewhere - the screw in the stand table only, Stone's
+      // limit packed into the h1 row as a third number - and both are what a
+      // thin pass is actually about: how far the screws had to go, and
+      // whether the gauge they made is one this roll can make at all.
+      row('スクリュー S', null, s.screw.toFixed(4), 'mm', false,
+        s.screw < 0 ? 'rgba(255,196,107,0.95)' : undefined);
+      const stoneRatio = s.stoneLimit > 0 ? s.hOut / s.stoneLimit : Infinity;
+      row('Stone 最小板厚', null, lim(s.stoneLimit), 'mm', false,
+        stoneRatio < 1 ? 'rgba(255,110,140,0.95)'
+          : stoneRatio < 2 ? 'rgba(255,196,107,0.95)' : undefined);
       row('接触弧長 L', null, s.arc.toFixed(2), 'mm', false);
       // What the stand costs to run, at the real strip width and for both
       // barrels - the numbers that size a drive rather than describe a bite.
       row('トルク (両ロール)', null, s.torque.toFixed(1), 'kN·m', false);
       row('動力 (両ロール)', null, s.power.toFixed(0), 'kW', false);
-      row('先進率 f', null, s.forwardSlip.toFixed(2), '%', false);
+      // Under the slab load the theory's value is the result and the FEM's
+      // sits in the commanded slot as 'FEM x.xx ->', so the two are read as
+      // two answers and not one.
+      row('先進率 f', Number.isFinite(s.forwardSlipFem) ? `FEM ${s.forwardSlipFem.toFixed(2)}` : null,
+        Number.isFinite(s.forwardSlip) ? s.forwardSlip.toFixed(2) : '—', '%', false);
+      // How many moves the loop needed - the one number that compares FEM
+      // and スラブ法 as the thing the loop measures. Painted in the loop's
+      // colour while it is still counting, so a stand that is stuck reads as
+      // a number that keeps growing in amber rather than a finished result.
+      const counting = s.state === 'work' || s.state === 'stall' || s.state === 'sat';
+      row('収束 反復', null, s.state === 'off' || s.state === 'idle' ? '—' : String(s.agcIters),
+        '回', counting);
 
       /*
        * How close this stand is to what it was asked for.
@@ -458,6 +503,8 @@ export class MillLineView {
         // far, the word says why it is not closing when it is not.
         const pct = s.agcError * 100;
         const txt = s.state === 'idle' ? STATE_LABEL[s.state]
+          : s.state === 'recalc' ? `再計算中（解が NaN、${s.restarts} 回目）`
+          : s.state === 'diverged' ? `発散（${s.restarts} 回再計算しても NaN — 自動再計算停止、条件を見直す）`
           : `${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(3)} %  ${STATE_LABEL[s.state]}`;
         ctx.fillText(txt, x, by + 17);
       } else {

@@ -4,11 +4,21 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Roll FEM Lab — 金属圧延 剛塑性FEM</title>
+<script>
+  /* the remembered look, before first paint - a flash of the wrong theme is
+     worse than an inline script */
+  try { var t = localStorage.getItem('rollfem.theme'); if (t && t !== 'classic') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='14' r='11' fill='none' stroke='%2358d5ff' stroke-width='3'/><rect x='2' y='27' width='28' height='3' fill='%23ffc46b'/></svg>" />
 </head>
 <body>
 <div id="app">
   <header id="topbar">
+    <div id="theme-switch" class="btn-row" role="group" aria-label="表示テーマ">
+      <button class="btn" data-theme="classic" title="現在の UI（既定）">現在</button>
+      <button class="btn" data-theme="modern" title="モダンな UI: フラットで角の丸い、無彩色＋青のアクセント">モダン</button>
+      <button class="btn" data-theme="chic" title="シックな UI: 暖色のチャコールにゴールドのアクセント、見出しは明朝">シック</button>
+    </div>
     <div class="brand">
       <span class="brand-mark"></span>
       <div class="brand-text">
@@ -48,16 +58,16 @@
     <div id="chart-nip" class="chart-cell">
       <div class="chart-head">
         <span class="chart-title">摩擦丘 — 界面面圧と せん断分布</span>
-        <span class="chart-sub">FEM 面圧 p <i class="sw sw-fem"></i> ／ せん断 τ <i class="sw sw-tau"></i> ／ 理論基準線 <i class="sw sw-hz"></i></span>
+        <span class="chart-sub"><span id="hill-p-label">FEM 面圧 p</span> <i class="sw sw-fem"></i> ／ せん断 τ <i class="sw sw-tau"></i> ／ 変形抵抗 kf 分布 <i class="sw sw-kf"></i>（FEM は FEM の値、スラブ法はその式の分布）／ 理論基準線 <i class="sw sw-hz"></i></span>
       </div>
       <canvas id="nip"></canvas>
     </div>
     <div id="chart-agc" class="chart-cell" hidden>
       <div class="chart-head">
         <span class="chart-title">制御軌跡</span>
-        <span class="chart-sub">制御中の全スタンド ／ 横軸 h₁ 最終スタンド目標−0.2 〜 #1 目標+0.2 mm ／ 圧下率 10–55% <i class="sw sw-fem"></i> ／ 荷重 600–2400 tonf <i class="sw sw-tau"></i></span>
+        <span class="chart-sub">制御中の全スタンド ／ 先頭の数字 = ΔP/Δh₁ [tonf/µm] ／ 横軸 h₁ 最終スタンド目標−0.2 〜 #1 目標+0.2 mm ／ 圧下率 10–55% <i class="sw sw-fem"></i> ／ 荷重 600–2400 tonf <i class="sw sw-tau"></i></span>
       </div>
-      <canvas id="agcscatter"></canvas>
+      <canvas id="agcscatter" title="軌跡の先頭の ΔP/Δh₁ は塑性曲線の勾配: スクリュー改訂ごとの荷重と出側板厚の対から同定（板幅ぶん tonf / µm、薄くすると荷重が増えるので負）。ゲージメータ式 dh₁/dS = M/(M+Q) の Q。"></canvas>
     </div>
   </footer>
 

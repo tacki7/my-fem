@@ -124,7 +124,8 @@ gh pr create --fill                # main へのマージは PR 経由
 - `pic/` は書籍のスキャン画像。**著作物なので push しない**（`.gitignore` 済み）。
   ローカルには残るので参照には使える
 
-リポジトリは private。
+リポジトリは **public**（2026-09 に履歴を GitHub の noreply メールに書き換えた上で公開）。
+コミットのメールはその noreply アドレス（ローカル git config 済み）— 個人のメールに戻さない。
 
 ## ビルド
 

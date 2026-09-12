@@ -121,6 +121,12 @@ export interface HillSample {
 export interface HillMarkers {
   /** neutral point [mm], null when the whole arc slips */
   neutralX: number | null;
+  /**
+   * The FEM's own neutral point [mm] when the hill drawn is a theory's, so
+   * the two are seen apart; null under the FEM load (they are the same) or
+   * when the FEM has none (the strip is skidding).
+   */
+  neutralFemX: number | null;
   /** plane strain flow stress [MPa], drawn as a reference line */
   flowStress: number;
   /** slab-method mean pressure [MPa] */
@@ -128,6 +134,20 @@ export interface HillMarkers {
   /** entry and exit edges of the contact arc [mm] */
   arcIn: number;
   arcOut: number;
+  /**
+   * The deformation resistance along the arc [mm, MPa] - the FEM's own
+   * column by column under the FEM load, the selected slab theory's along
+   * its own arc under the slab load - and what to call it.
+   */
+  kfCurve: { x: number; kf: number }[];
+  kfLabel: string;
+  /**
+   * The other stands' pressure profiles, drawn as thin outlines behind the
+   * selected stand's filled hill, each named at its entry end - so a line
+   * reads as a line, the way the control trail does, while the numbers on
+   * the axes belong to the stand that was clicked.
+   */
+  others: { tag: string; samples: HillSample[] }[];
 }
 
 /**
@@ -159,6 +179,18 @@ export class FrictionHillChart {
       if (s.p > pmax) pmax = s.p;
       if (s.x < xlo) xlo = s.x;
       if (s.x > xhi) xhi = s.x;
+    }
+    // The theory's arc is its own - longer than the FEM's where it flattens
+    // the roll more - and the window has to hold it, and the other stands.
+    for (const k of mk.kfCurve) {
+      if (k.kf > pmax) pmax = k.kf;
+      if (k.x < xlo) xlo = k.x;
+    }
+    for (const o of mk.others) {
+      for (const s of o.samples) {
+        if (s.p > pmax) pmax = s.p;
+        if (s.x < xlo) xlo = s.x;
+      }
     }
     this.peakHold = Math.max(pmax, this.peakHold * 0.985);
     // The window is asymmetric because the arc is: it runs from the entry edge
@@ -225,6 +257,26 @@ export class FrictionHillChart {
       ctx.fillText(tag, padL + 4, Y(v) - 3);
     }
 
+    // The other stands first, under the selected one's fill. Named at the
+    // exit end, where the reference lines are not, each tag dropping past
+    // the one before if they would land on each other.
+    const tagYs: number[] = [];
+    for (const o of mk.others) {
+      if (o.samples.length < 2) continue;
+      ctx.beginPath();
+      o.samples.forEach((s, i) => (i ? ctx.lineTo(X(s.x), Y(s.p)) : ctx.moveTo(X(s.x), Y(s.p))));
+      ctx.strokeStyle = 'rgba(127,228,255,0.42)';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+      const tail = o.samples[o.samples.length - 1];
+      let y = Y(tail.p) - 4;
+      while (tagYs.some((t) => Math.abs(t - y) < 11)) y -= 11;
+      tagYs.push(y);
+      ctx.fillStyle = 'rgba(127,228,255,0.6)';
+      ctx.textAlign = 'right';
+      ctx.fillText(o.tag, X(tail.x) - 3, y);
+      ctx.textAlign = 'left';
+    }
     if (samples.length > 1) {
       const grad = ctx.createLinearGradient(0, Y(py), 0, Y(0));
       grad.addColorStop(0, 'rgba(96,214,255,0.5)');
@@ -258,6 +310,35 @@ export class FrictionHillChart {
       ctx.textAlign = 'left';
     }
 
+    // The resistance the load is built on, along the arc: rising through
+    // the bite as the metal hardens, flat where the theory has a single
+    // number for it. Solid, against the dashed mean it averages to.
+    if (mk.kfCurve.length > 1) {
+      ctx.beginPath();
+      mk.kfCurve.forEach((k, i) => (i ? ctx.lineTo(X(k.x), Y(k.kf)) : ctx.moveTo(X(k.x), Y(k.kf))));
+      ctx.strokeStyle = 'rgba(150,230,180,0.95)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // named at the exit end, whichever way the profile was listed
+      const head = mk.kfCurve.reduce((a, b) => (b.x > a.x ? b : a));
+      ctx.fillStyle = 'rgba(150,230,180,0.95)';
+      ctx.textAlign = 'right';
+      ctx.fillText(`kf ${mk.kfLabel}`, X(head.x) - 3, Y(head.kf) - 4);
+      ctx.textAlign = 'left';
+    }
+
+    if (mk.neutralFemX !== null && mk.neutralFemX >= x0 && mk.neutralFemX <= x1) {
+      const x = Math.round(X(mk.neutralFemX)) + 0.5;
+      ctx.strokeStyle = 'rgba(255,110,140,0.45)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,140,165,0.6)';
+      ctx.textAlign = 'center';
+      ctx.fillText('FEM', x, h - padB - 4);
+      ctx.textAlign = 'left';
+    }
     if (mk.neutralX !== null && mk.neutralX >= x0 && mk.neutralX <= x1) {
       const x = Math.round(X(mk.neutralX)) + 0.5;
       ctx.strokeStyle = 'rgba(255,110,140,0.9)';
@@ -300,6 +381,13 @@ export interface AgcTrail {
   samples: AgcSample[];
   /** what this stand's loop is holding; null when its screws are parked */
   target: AgcTargets | null;
+  /**
+   * The plastic-curve slope the loop has identified, dP/dh1 in tonf per
+   * micron over the strip width - negative, thinner is heavier. Null until
+   * two revisions have been far enough apart to read it. Drawn beside the
+   * head of the trail with the stand's name.
+   */
+  slope: number | null;
 }
 
 /**
@@ -383,6 +471,7 @@ export class AgcScatterChart {
     ctx.font = FONT;
 
     const live = trails.filter((t) => t.target && t.samples.length > 0);
+    const slopeLabels: { x: number; y: number; toRight: boolean; text: string }[] = [];
     if (live.length === 0) {
       const anyControlled = trails.some((t) => t.target);
       ctx.fillStyle = 'rgba(190,206,230,0.4)';
@@ -567,19 +656,25 @@ export class AgcScatterChart {
     for (const tr of live) {
       const samples = tr.samples;
       const n = samples.length;
-      const age = (k: number) => (n < 2 ? 1 : 0.3 + 0.7 * (k / (n - 1)));
+      // Quadratic in age, floored near invisible: the oldest points are
+      // context, not data, and at a linear 0.3 floor fifty of them read as a
+      // cloud the newest could not be picked out of. Squared, the back half
+      // of a trail sits under 0.3 and the last few samples own the eye.
+      const age = (k: number) => (n < 2 ? 1 : 0.05 + 0.95 * (k / (n - 1)) ** 2);
       for (const [pick, Y, col, square] of [
         [(s: AgcSample) => s.reduction, YR, '127,228,255', false],
         [(s: AgcSample) => s.load, YP, '255,178,110', true],
       ] as [(s: AgcSample) => number, (v: number) => number, string, boolean][]) {
-        ctx.strokeStyle = `rgba(${col},0.42)`;
+        // The joining line fades with the points it joins: one path at one
+        // alpha put a bright thread through the faded tail and undid the fade.
         ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        samples.forEach((s, k) => {
-          const x = X(s.h1), y = Y(pick(s));
-          if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-        });
-        ctx.stroke();
+        for (let k = 1; k < n; k++) {
+          ctx.strokeStyle = `rgba(${col},${0.45 * age(k)})`;
+          ctx.beginPath();
+          ctx.moveTo(X(samples[k - 1].h1), Y(pick(samples[k - 1])));
+          ctx.lineTo(X(samples[k].h1), Y(pick(samples[k])));
+          ctx.stroke();
+        }
         samples.forEach((s, k) => {
           const last = k === n - 1;
           const x = X(s.h1), y = Y(pick(s));
@@ -600,16 +695,50 @@ export class AgcScatterChart {
       // no room above, and clamping the caption down puts it on the ring it is
       // supposed to be naming. With one stand there is nothing to tell apart
       // and the tag is pure noise.
-      if (many) {
+      // The identified plastic-curve slope goes with it, on the line
+      // below: the number is a property of the trail's own operating
+      // point, so it belongs next to the trail, not in a legend. Collected
+      // here and drawn after every trail, so that stands rolling close
+      // together can dodge each other.
+      {
         const s = samples[n - 1];
         const x = X(s.h1);
+        const y = YR(s.reduction) + 4;
         const toRight = x < w - padR - 30;
-        ctx.fillStyle = 'rgba(220,230,245,0.92)';
-        ctx.textAlign = toRight ? 'left' : 'right';
-        ctx.fillText(tr.tag, x + (toRight ? 10 : -10), YR(s.reduction) + 4);
-        ctx.textAlign = 'left';
+        const tx = x + (toRight ? 10 : -10);
+        if (many) {
+          ctx.fillStyle = 'rgba(220,230,245,0.92)';
+          ctx.textAlign = toRight ? 'left' : 'right';
+          ctx.fillText(tr.tag, tx, y);
+          ctx.textAlign = 'left';
+        }
+        if (tr.slope !== null) {
+          slopeLabels.push({ x: tx, y: y + (many ? 12 : 0), toRight, text: `${tr.slope.toFixed(2)} tonf/µm` });
+        }
       }
     }
+
+    // The slope labels, after every trail is drawn, left to right, each dropping a row when the one
+    // before ends where it would start - three stands within a label's
+    // width of each other is an ordinary schedule.
+    slopeLabels.sort((a, b) => a.x - b.x);
+    const slopeRowRight = [-Infinity, -Infinity, -Infinity];
+    ctx.fillStyle = 'rgba(255,178,110,0.9)';
+    for (const l of slopeLabels) {
+      const lw = ctx.measureText(l.text).width;
+      // The stand's tag is short and sits on the side the marker left room
+      // for; this label is wider, so it takes the other side when it would
+      // otherwise run off the plot.
+      const toRight = l.toRight && l.x + lw <= w - padR;
+      const x = toRight ? l.x : (l.toRight ? l.x - 20 : l.x);
+      const left = toRight ? x : x - lw;
+      let row = 0;
+      while (row < slopeRowRight.length - 1 && left < slopeRowRight[row] + 6) row++;
+      ctx.textAlign = toRight ? 'left' : 'right';
+      ctx.fillText(l.text, x, l.y + row * 12);
+      slopeRowRight[row] = left + lw;
+    }
+    ctx.textAlign = 'left';
 
     // Said last, because it is only known once everything has been placed. On
     // a fixed scale a marker sitting on the frame is ambiguous - it could be a

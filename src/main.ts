@@ -1,11 +1,12 @@
 import './style.css';
 import {
   RollingSim, fieldUnit, planeStrain, AGC_METHODS, setSlabHook,
-  type RollingParams, type FieldKind, type AgcMode, type AgcMethod, type LoadModel,
+  type RollingParams, type FieldKind, type AgcMode, type AgcMethod, type LoadModel, type SlabTheory,
+  type FlatteningModel,
 } from './sim/solver';
 import { Mill, MAX_STANDS, type StandSetup, type LineMode } from './sim/mill';
 import {
-  muFromLoad, slabLoad, exitStrain, MU_MIN, MU_MAX,
+  muFromLoad, slabLoad, exitStrain, slabKfProfile, slabPressureProfile, MU_MIN, MU_MAX, SLAB_THEORY_LABEL, FLATTENING_LABEL,
   type SlabCase, type MuInverseResult,
 } from './sim/muinv';
 
@@ -24,7 +25,7 @@ import {
   type NumFieldHandle,
 } from './ui/controls';
 import { probe, heap, bytes, type SysInfo } from './ui/sysinfo';
-import { installLayout } from './ui/layout';
+import { installLayout, type LayoutHandle, type Theme, currentTheme } from './ui/layout';
 import * as settings from './ui/settings';
 
 /* ── presets ─────────────────────────────────────────────────────────────── */
@@ -162,9 +163,9 @@ const params: RollingParams = {
   h0: 0.002, reduction: 0.25, stripNx: 100, stripNy: 8,
   windowIn: -0.040, windowOut: 0.025, autoFit: true,
   lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255,
-  // Off by default: every figure in docs/validation.md was measured isothermal,
-  // and the switch is only worth anything as a clean A/B against them.
-  heatOn: false, tempEntry: 20, taylorQuinney: 0.9,
+  // On by default. Every figure in docs/validation.md was measured isothermal,
+  // so switch this off to reproduce them as a clean A/B.
+  heatOn: true, tempEntry: 20, taylorQuinney: 0.9,
   rhoStrip: 7850, cpStrip: 470, tempMelt: 1500, softenExp: 1.0,
   Estrip: 2.1e11, nuStrip: 0.30, elasticZones: true,
   mu: 0.06, slipFrac: 0.02,
@@ -201,10 +202,13 @@ const params: RollingParams = {
   // and once that is fed forward the hold has nothing left to do.
   lineHold: false,
   loadModel: 'fem',
+  slabTheory: 'karman',
+  flattening: 'hitchcock',
   agcMethod: 'secant',
-  // off by default: with a rigid stand the only spring is the roll flattening,
-  // which is what every number in docs/validation.md was measured against
-  millSpringOn: false, millModulus: (5 * MN_PER_MM) / 1.0,
+  // on by default. With a rigid stand the only spring is the roll flattening,
+  // which is what every number in docs/validation.md was measured against -
+  // switch this off to reproduce them.
+  millSpringOn: true, millModulus: (5 * MN_PER_MM) / 1.0,
   // 2 %, not the 30 % this used to be. The 30 % was a validity guard - the
   // mass balance was said to break past 70 % reduction - and it stopped
   // every deep pass at a rail with a red 'saturated' and no way through.
@@ -316,6 +320,10 @@ if (QS.has('nogrid')) view.showGrid = false;
   // Load model, so a measurement run can start on the slab estimate.
   const qlm = QS.get('loadmodel');
   if (qlm === 'fem' || qlm === 'slab') params.loadModel = qlm;
+  const qst = QS.get('slab');
+  if (qst === 'karman' || qst === 'orowan' || qst === 'blandford') params.slabTheory = qst;
+  const qfl = QS.get('flat');
+  if (qfl === 'hitchcock' || qfl === 'roberts') params.flattening = qfl;
   const qs = Number(QS.get('stands'));
   if (Number.isFinite(qs) && qs >= 1) pendingStands = Math.min(MAX_STANDS, Math.round(qs));
   const ql = Number(QS.get('load'));   // target total load in tonf
@@ -528,12 +536,28 @@ class Tracers {
   }
 }
 
+/**
+ * The column interval holding x, and where in it x sits, 0..1.
+ *
+ * A search, not a division: the columns are laid out to keep one on the bite
+ * entry and one on the exit plane, so their spacing is not uniform in x.
+ */
+function columnAt(x: number): [number, number] {
+  const m = sim.flow.mesh;
+  let lo = 0, hi = m.nx;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (m.xs[mid] <= x) lo = mid; else hi = mid;
+  }
+  const w = m.xs[lo + 1] - m.xs[lo];
+  const f = w > 0 ? Math.max(0, Math.min(1, (x - m.xs[lo]) / w)) : 0;
+  return [lo, f];
+}
+
 /** Strip surface height at x, interpolated between mesh columns. */
 function surfaceAt(x: number): number {
   const m = sim.flow.mesh;
-  const t = ((x - sim.winIn) / (sim.winOut - sim.winIn)) * m.nx;
-  const i = Math.max(0, Math.min(m.nx - 1, Math.floor(t)));
-  const f = Math.max(0, Math.min(1, t - i));
+  const [i, f] = columnAt(x);
   const a = m.X[2 * m.topNodes[i] + 1];
   const b = m.X[2 * m.topNodes[i + 1] + 1];
   return a + (b - a) * f;
@@ -544,9 +568,7 @@ const tracers = new Tracers();
 /** Bilinear velocity lookup on the structured, gap-conforming mesh. */
 function sampleVelocity(x: number, y: number): [number, number] {
   const m = sim.flow.mesh;
-  const t = ((x - sim.winIn) / (sim.winOut - sim.winIn)) * m.nx;
-  const i = Math.max(0, Math.min(m.nx - 1, Math.floor(t)));
-  const fx = Math.max(0, Math.min(1, t - i));
+  const [i, fx] = columnAt(x);
   const topA = m.X[2 * m.topNodes[i] + 1];
   const topB = m.X[2 * m.topNodes[i + 1] + 1];
   const top = topA + (topB - topA) * fx;
@@ -644,6 +666,33 @@ const millLine = new MillLineView(
 const millSub = document.getElementById('millline-sub') as HTMLElement;
 
 /** One frame's worth of the whole line, in the units the line view draws in. */
+/** how long the mill line says 再計算中 after a restart, so it is seen at all */
+const RECALC_BADGE_MS = 4000;
+/** the restart count last announced per stand, so each restart is announced once */
+const restartsSeen: number[] = [];
+const giveUpSeen: boolean[] = [];
+/**
+ * Say so when a stand has just restarted after a NaN solve, or has stopped
+ * trying. Once per event: the line is read every frame, the toast is not.
+ */
+function announceRestarts(): void {
+  activeStands().forEach((st, k) => {
+    if ((restartsSeen[k] ?? 0) !== st.restarts) {
+      restartsSeen[k] = st.restarts;
+      if (st.restarts > 0) {
+        toast(`${standTag(k)}: 圧下率が NaN（解が発散）— スタンドを初期状態から再計算します（${st.restarts} 回目）`);
+      }
+    }
+    if ((giveUpSeen[k] ?? false) !== st.divergedGiveUp) {
+      giveUpSeen[k] = st.divergedGiveUp;
+      if (st.divergedGiveUp) {
+        toast(`${standTag(k)}: ${st.restarts} 回再計算しても発散 — 自動再計算を止めました。`
+          + 'メッシュ品質・圧下量・摩擦係数・張力を見直す（条件を変えると再開）', true);
+      }
+    }
+  });
+}
+
 function millViews(): StandView[] {
   const out: StandView[] = [];
   const b = view.stripWidth;
@@ -652,6 +701,12 @@ function millViews(): StandView[] {
     const p = st.params;
     const hIn = p.h0;
     const c = standSetups[k];
+    const slabTop = d.loadModel === 'slab' && Number.isFinite(d.kfSlab) && d.kfSlab > 0;
+    // Stone's limit on the theory's own kf: C mu R (kf - sigma_mean)
+    const stoneSlab = slabTop
+      ? ((16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll)) * p.mu * p.R
+        * Math.max(d.kfSlab - (getBackTension(k) + c.frontTension) / 2, 0)
+      : d.stoneHMin;
     out.push({
       hIn: hIn * 1000,
       hOut: (d.exitThickness > 0 ? d.exitThickness : hIn) * 1000,
@@ -681,18 +736,26 @@ function millViews(): StandView[] {
       // reads as the previous stand's `kf 出`, which is what the metal is
       // actually doing.
       kfEntry: planeStrain(p, d.entryStrain, d.entryTemp) / 1e6,
-      kfMean: d.meanPlaneStrainStress / 1e6,
+      // Under the slab load the block reads what the theory computed: its
+      // strain-averaged kf, its arc, its forward slip and its Stone limit,
+      // with the load, torque, power and R' already the theory's. The exit
+      // gauge and the screw stay the FEM's - the theory has no gauge of its
+      // own, it is handed the FEM's.
+      kfMean: (slabTop ? d.kfSlab : d.meanPlaneStrainStress) / 1e6,
       kfExit: ((2 / Math.sqrt(3)) * d.exitFlowStress) / 1e6,
       hitchR: d.hitchcockR * 1000,
       hitchRatio: p.R > 0 ? d.hitchcockR / p.R : 1,
-      forwardSlip: d.forwardSlip * 100,
+      forwardSlip: (slabTop ? d.forwardSlipSlab : d.forwardSlip) * 100,
+      forwardSlipFem: slabTop ? d.forwardSlip * 100 : NaN,
+      agcIters: d.agcIterations,
       // Width scaled and doubled: the solve is per unit width and turns one
       // barrel, a drive turns two across the whole strip.
       torque: (Math.abs(d.torque) * b * 2) / 1000,
       power: (d.power * b * 2) / 1000,
-      arc: d.arcLength * 1000,
+      arc: (slabTop ? d.arcLengthSlab : d.arcLength) * 1000,
       biteLimit: d.biteLimitH1 * 1000,
-      stoneLimit: d.stoneHMin * 1000,
+      stoneLimit: (slabTop ? stoneSlab : d.stoneHMin) * 1000,
+      screw: st.screwPosition * 1000,
       tempIn: d.entryTemp > 0 ? d.entryTemp : p.tempEntry,
       tempOut: d.exitTemp > 0 ? d.exitTemp : d.entryTemp,
       heatOn: p.heatOn,
@@ -712,11 +775,14 @@ function millViews(): StandView[] {
       // verdict from before the edit. The idle test needs no solve: it is the
       // setpoint against the entry gauge and the spring, both of which are
       // current. The three below do need one, and stay as they are.
-      state: p.agcMode === 'off' ? 'off'
-        : st.gaugeIdle ? 'idle'
-          : d.agcSaturated ? 'sat'
-            : d.agcStalled ? 'stall'
-              : d.agcSettled ? 'lock' : 'work',
+      state: st.divergedGiveUp ? 'diverged'
+        : performance.now() - st.restartAt < RECALC_BADGE_MS ? 'recalc'
+          : p.agcMode === 'off' ? 'off'
+            : st.gaugeIdle ? 'idle'
+              : d.agcSaturated ? 'sat'
+                : d.agcStalled ? 'stall'
+                  : d.agcSettled ? 'lock' : 'work',
+      restarts: st.restarts,
     });
   }
   return out;
@@ -730,7 +796,6 @@ interface StandRowCells {
   head: HTMLElement;
   redNow: HTMLElement;
   gaugeNow: HTMLElement;
-  screwNow: HTMLElement;
   loadNow: HTMLElement;
   mode: HTMLSelectElement;
   red: NumFieldHandle;
@@ -910,17 +975,6 @@ function buildStandGrid(): void {
   });
   const redNow = mk(() => el('div', 'sg-now', '—'));
   const gaugeNow = mk(() => el('div', 'sg-now', '—'));
-  // The screw position a stand would read: what the loop (or the command)
-  // asks for as loaded separation, less flattening, springback and - with
-  // ミル剛性 on - the housing stretch P/M. Negative on thin gauge with the
-  // stretch in, as on a real mill; it is the one number here that is neither
-  // a target nor a gauge, so it gets its own row rather than a tooltip.
-  const screwNow = mk(() => {
-    const d = el('div', 'sg-now', '—');
-    d.title = '圧下スクリューの現在位置（無負荷ギャップ）。出側板厚からミルスプリング'
-      + '（扁平＋弾性回復＋ハウジング伸び P/M）を引いた値。ミル剛性 ON では薄板で負になる';
-    return d;
-  });
   const loadNow = mk(() => el('div', 'sg-now', '—'));
   const resets = mk((k) => {
     const b = el('button', 'sg-btn', RECALC_LABEL);
@@ -946,7 +1000,6 @@ function buildStandGrid(): void {
   row('　　　現在', redNow, '%');
   row('出側板厚 目標', gauges.map((x) => x.root), 'mm');
   row('　　　現在', gaugeNow, 'mm');
-  row('スクリュー位置 S', screwNow, 'mm');
   row('圧延荷重 目標', loads.map((x) => x.root), 'tonf');
   row('　　　現在', loadNow, 'tonf');
   row('後方張力 σb', backs.map((x) => x.root), 'MPa');
@@ -957,8 +1010,7 @@ function buildStandGrid(): void {
 
   for (let k = 0; k < n; k++) {
     standCells.push({
-      head: heads[k], redNow: redNow[k], gaugeNow: gaugeNow[k], screwNow: screwNow[k],
-      loadNow: loadNow[k],
+      head: heads[k], redNow: redNow[k], gaugeNow: gaugeNow[k], loadNow: loadNow[k],
       mode: modes[k],
       red: reds[k], gauge: gauges[k], load: loads[k], backT: backs[k], ten: tens[k],
       mu: mus[k], rad: rads[k],
@@ -1042,7 +1094,11 @@ function refreshStandGrid(): void {
           : Math.abs(r - want) < 0.5 ? 'warn' : 'bad');
     c.loadNow.textContent = Number.isFinite(load) ? load.toFixed(1) : '—';
     const tgt = (standSetups[k].targetForce * b) / TONF;
-    c.loadNow.className = 'sg-now ' + (st.params.agcMode !== 'force' ? ''
+    // A slab load the theory could not solve is flagged whatever the mode,
+    // and the cell says why.
+    const slabNote = d.loadModel === 'slab' ? slabWhy(st) : '';
+    c.loadNow.title = slabNote ? `⚠ スラブ法が計算不能 — ${slabNote}` : '';
+    c.loadNow.className = 'sg-now ' + (slabNote ? 'bad' : st.params.agcMode !== 'force' ? ''
       : Math.abs(load - tgt) / Math.max(tgt, 1e-9) < 1e-3 ? 'ok'
         : Math.abs(load - tgt) / Math.max(tgt, 1e-9) < 1e-2 ? 'warn' : 'bad');
     // Only the mode actually holding this quantity gets a verdict on it. On a
@@ -1051,9 +1107,6 @@ function refreshStandGrid(): void {
     const h1 = d.exitThickness * 1000;
     const hTgt = standSetups[k].targetGauge * 1000;
     c.gaugeNow.textContent = h1 > 0 ? h1.toFixed(4) : '—';
-    const sMm = st.screwPosition * 1000;
-    c.screwNow.textContent = Number.isFinite(sMm) ? sMm.toFixed(4) : '—';
-    c.screwNow.className = 'sg-now ' + (sMm < 0 ? 'warn' : '');
     c.gaugeNow.className = 'sg-now ' + (st.params.agcMode !== 'gauge' ? ''
       : Math.abs(h1 - hTgt) / Math.max(hTgt, 1e-9) < 1e-3 ? 'ok'
         : Math.abs(h1 - hTgt) / Math.max(hTgt, 1e-9) < 1e-2 ? 'warn' : 'bad');
@@ -1069,9 +1122,6 @@ function refreshStandGrid(): void {
       && (st.params.h0 - st.agcSetpoint) / st.params.h0 < SHALLOW_BITE_DRAFT && !st.gaugeIdle) {
       why = `圧下量が小さすぎて接触弧が板メッシュ ${d.contactNodes} 列にしか乗らず、解けない。`
         + 'メッシュ品質を上げるか圧下量を増やす（既定メッシュで 3% は整定、1% 以下は整定しない）';
-    } else if (st.params.agcMode !== 'off' && !d.agcSettled && d.contactToggling && !st.gaugeIdle) {
-      why = '噛み込み入口が板メッシュの列境界に乗り、接触列が出入りしている（離散化の振動）。'
-        + '目標をわずかにずらして入口を列境界から外す — 量は右パネル「自動制御」の説明に出る';
     } else if (st.params.agcMode === 'gauge') {
       if (st.gaugeIdle) {
         why = `目標 ${hTgt.toFixed(4)} mm が入側板厚 ${(st.gaugeFloor * 1000).toFixed(4)} mm`
@@ -2020,11 +2070,14 @@ let muInvStale = false;
  * averaged from zero instead, three stands each taking 25 % all come out at the
  * same 740 MPa when the metal they are working is at 740, 1006 and 1147.
  *
- * The exit gauge is the 出側板厚 目標 cell. When that cell is not a usable exit
- * for this stand - it is above the entry gauge, which happens when the schedule
- * has been driven by 圧下率 and the gauge column left behind - the commanded
- * reduction is used instead and the row says so. Nothing here reads the solver,
- * which is the point: the answer is a function of the table alone.
+ * The exit gauge is the 出側板厚 目標 cell, but only for a stand that is aiming
+ * at it. Under 圧下率一定, 荷重一定 and off the cell is locked (`paintTargetLock`)
+ * and still holds whatever was typed last, and solving against that gave a mu
+ * for a pass the stand is not rolling. There, and when the cell is not a usable
+ * exit at all - above the entry gauge, which happens when the schedule has been
+ * driven by 圧下率 and the gauge column left behind - the commanded reduction is
+ * used instead and the row says so. Nothing here reads the solver, which is the
+ * point: the answer is a function of the table alone.
  */
 function muInvCases(): { c: SlabCase; fromReduction: boolean }[] {
   const out: { c: SlabCase; fromReduction: boolean }[] = [];
@@ -2032,7 +2085,7 @@ function muInvCases(): { c: SlabCase; fromReduction: boolean }[] {
   let e0 = 0;
   for (let k = 0; k < standCount; k++) {
     const s = standSetups[k];
-    let h1 = s.targetGauge;
+    let h1 = s.agcMode === 'gauge' ? s.targetGauge : NaN;
     let fromReduction = false;
     if (!(h1 > 0) || h1 >= h0) { h1 = h0 * (1 - s.reduction); fromReduction = true; }
     const c: SlabCase = {
@@ -2057,6 +2110,7 @@ function muInvSig(k: number, c: SlabCase): string {
     standSetups[k].targetForce,
     params.lmnL, params.lmnM, params.lmnN,
     params.Eroll, params.nuRoll, params.rollCoupling ? 1 : 0,
+    params.slabTheory, params.flattening,
   ].join(',');
 }
 
@@ -2142,7 +2196,7 @@ function runMuInverse(): void {
         mu: r.mu,
         sig: muInvSig(k, c),
         note: `圧延荷重 ${asTonf(target).toFixed(1)} tonf から逆算した μ`
-          + `（${gauge}, R′ ${(r.point.Rflat * 1000).toFixed(1)} mm, kf ${(r.point.kf / 1e6).toFixed(0)} MPa,`
+          + `（${SLAB_THEORY_LABEL[params.slabTheory]}${params.flattening === 'roberts' ? '・Roberts 偏平' : ''}, ${gauge}, R′ ${(r.point.Rflat * 1000).toFixed(1)} mm, kf ${(r.point.kf / 1e6).toFixed(0)} MPa,`
           + ` 順方向照合の誤差 ${(r.residual * 100).toExponential(1)} %）`,
       });
       standSetups[k].mu = r.mu;
@@ -2245,9 +2299,30 @@ document.getElementById('topbar-presets')!.append(buttonRow(PRESETS.map((p) => (
 
 let playBtn: HTMLButtonElement;
 let loadModelBtns: HTMLButtonElement[] = [];
-/** Paint the pair: the selected model reads as pressed. */
+let theorySel: HTMLSelectElement | null = null;
+let flatSel: HTMLSelectElement | null = null;
+/**
+ * Paint the pair: the selected model reads as pressed. The slab theory and
+ * flattening selects go with it - greyed out under FEM, where the load and
+ * the flattening are the FEM's own and no formula is in use.
+ */
 function paintLoadModel(): void {
   loadModelBtns.forEach((b, i) => b.classList.toggle('active', (i === 0) === (params.loadModel === 'fem')));
+  if (theorySel) theorySel.disabled = params.loadModel !== 'slab';
+  if (flatSel) flatSel.disabled = params.loadModel !== 'slab';
+}
+/** Which flattening model the slab theories - and the mu back-calculation - roll with. */
+function setFlattening(m: FlatteningModel): void {
+  if (params.flattening === m) return;
+  params.flattening = m;
+  if (params.loadModel === 'slab') {
+    for (const st of mill.stands) if (st.params.agcMode === 'force') st.resetAgc();
+    clearAgcTrail();
+  }
+  toast(`ロール偏平の式: ${FLATTENING_LABEL[m]}`
+    + (m === 'roberts' ? '（L = b + √(b² + RΔh)、b は Hertz 接触半幅、R′ = L²/Δh）'
+      : '（R′ = R(1 + 16(1−ν²)P/(πEΔh))）')
+    + (params.loadModel === 'slab' ? '。スラブ法の荷重・μ逆算がこの偏平になる' : '。μ逆算がこの偏平になる（荷重は FEM のまま）'));
 }
 function setLoadModel(m: LoadModel): void {
   if (params.loadModel === m) return;
@@ -2258,8 +2333,87 @@ function setLoadModel(m: LoadModel): void {
   clearAgcTrail();
   paintLoadModel();
   toast(m === 'slab'
-    ? '荷重をスラブ法（Siebel / von Kármán ＋ 張力 ＋ Hitchcock 扁平）で計算する。板厚・中立点・面圧分布は FEM のまま'
+    ? `荷重をスラブ法（${SLAB_THEORY_LABEL[params.slabTheory]} ＋ 張力 ＋ Hitchcock 扁平）で計算する。板厚・中立点・面圧分布は FEM のまま`
     : '荷重を FEM の界面面圧の積分で計算する');
+}
+/** Which slab theory the slab load and the mu back-calculation run on. */
+function setSlabTheory(t: SlabTheory): void {
+  if (params.slabTheory === t) return;
+  params.slabTheory = t;
+  if (params.loadModel === 'slab') {
+    // Same as switching the load model: the load being held has just been
+    // redefined, so what the loops had identified about it is void.
+    for (const st of mill.stands) if (st.params.agcMode === 'force') st.resetAgc();
+    clearAgcTrail();
+  }
+  toast(`スラブ法の式: ${SLAB_THEORY_LABEL[t]}`
+    + (params.loadModel === 'slab' ? '。荷重・μ逆算・理論照合がこの式になる'
+      : '。μ逆算と理論照合がこの式になる（荷重は FEM のまま）'));
+}
+{
+  // The three looks. A theme is a `data-theme` on the root and a set of
+  // tokens in the stylesheet; the choice is remembered and re-applied before
+  // first paint by the inline script in index.html.
+  const sw = document.getElementById('theme-switch') as HTMLElement;
+  const paintTheme = () => {
+    const cur = currentTheme();
+    sw.querySelectorAll('button').forEach((b) => b.classList.toggle('active', (b.dataset.theme ?? 'classic') === cur));
+  };
+  sw.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest('button');
+    if (!b) return;
+    const t = (b.dataset.theme ?? 'classic') as Theme;
+    if (t === 'classic') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+    try { localStorage.setItem('rollfem.theme', t); } catch { /* private mode */ }
+    paintTheme();
+    applyPanelStructure(t);
+    // The panels have moved: the handles go where they now are, and every
+    // canvas takes the box it now has.
+    layoutRef?.setTheme(t);
+    relayout();
+  });
+  paintTheme();
+}
+
+/**
+ * What a look does to the side panels beyond colour.
+ *
+ * The modern look tabs them: a strip of the section titles at the top of
+ * the panel, one section shown at a time, the choice remembered. The other
+ * looks put every section back in its column. Same nodes throughout - the
+ * sections are never rebuilt, only shown or hidden.
+ */
+function applyPanelStructure(theme: Theme): void {
+  for (const id of ['left', 'right']) {
+    const panel = document.getElementById(id) as HTMLElement;
+    panel.querySelector(':scope > .tabstrip')?.remove();
+    const sections = [...panel.querySelectorAll(':scope > .panel-section')] as HTMLElement[];
+    if (theme !== 'modern') {
+      panel.classList.remove('tabbed');
+      sections.forEach((s) => s.classList.remove('tab-active'));
+      continue;
+    }
+    panel.classList.add('tabbed');
+    const strip = el('div', 'tabstrip');
+    const key = `rollfem.tab.${id}`;
+    const select = (i: number) => {
+      sections.forEach((s, j) => s.classList.toggle('tab-active', j === i));
+      [...strip.children].forEach((b, j) => b.classList.toggle('active', j === i));
+      try { localStorage.setItem(key, String(i)); } catch { /* private mode */ }
+    };
+    sections.forEach((s, i) => {
+      const title = s.querySelector('.panel-head-title')?.textContent ?? `${i + 1}`;
+      const b = el('button', 'btn', title) as HTMLButtonElement;
+      b.type = 'button';
+      b.addEventListener('click', () => select(i));
+      strip.append(b);
+    });
+    panel.prepend(strip);
+    let remembered = 0;
+    try { remembered = Number(localStorage.getItem(key) ?? 0) || 0; } catch { /* private mode */ }
+    select(Math.max(0, Math.min(sections.length - 1, remembered)));
+  }
 }
 {
   // Which model the reported load comes from. A pair rather than a toggle
@@ -2272,14 +2426,47 @@ function setLoadModel(m: LoadModel): void {
     },
     {
       text: 'スラブ法',
-      title: '圧延荷重をスラブ法で求める: p̄ = kf*·(e^a−1)/a, a = μL/h̄, kf* = kf − (σb+σf)/2,'
-        + ' L = √(R′Δh)（Hitchcock 扁平）。μ逆算が逆に解いているのと同じ式。'
+      title: '圧延荷重をスラブ法で求める。式は右の選択（Kármán / Orowan / Bland & Ford）、'
+        + '張力と Hitchcock 扁平込み。μ逆算が逆に解いているのと同じ式。'
         + '板厚・中立点・面圧分布は FEM のまま。',
       onClick: () => setLoadModel('slab'),
     },
   ]);
   loadModelBtns = [...modelRow.querySelectorAll('button')] as HTMLButtonElement[];
   document.getElementById('topbar-actions')!.append(modelRow);
+  paintLoadModel();
+
+  // Which slab theory. A select rather than three more buttons: the names
+  // are long, only one is ever in use, and the bar is out of room.
+  const sel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  sel.title = 'スラブ法の式（スラブ法を選んだときだけ有効。FEM のときは荷重は FEM で計算）。'
+    + 'Kármán: Siebel の閉形式 p̄ = kf*·(e^a−1)/a（教科書の式）。'
+    + 'Bland & Ford: Coulomb 摩擦・小角近似で von Kármán 式を中立点の両側で閉形式に解く（冷間圧延の標準）。'
+    + 'Orowan: 円弧そのまま・板厚方向の応力不均一（Prandtl の w(a)）・滑りと固着の摩擦を数値積分（最も厳密）。'
+    + 'スラブ法モードの荷重、μ逆算、理論照合パネルがこの式を使う。';
+  for (const [v, text] of Object.entries(SLAB_THEORY_LABEL)) {
+    const o = el('option'); o.value = v; o.textContent = text; sel.append(o);
+  }
+  sel.value = params.slabTheory;
+  sel.addEventListener('change', () => setSlabTheory(sel.value as SlabTheory));
+  document.getElementById('topbar-actions')!.append(sel);
+  theorySel = sel;
+
+  // And how those theories flatten the roll. The FEM solves its own
+  // flattening, so this too is greyed out under FEM.
+  const fsel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  fsel.title = 'スラブ法のロール偏平式（スラブ法を選んだときだけ有効。FEM は弾性ロール FEM が偏平を解く）。'
+    + 'Hitchcock: R′ = R(1 + 16(1−ν²)P/(πEΔh))、弧上の楕円圧力・変形後も円弧。'
+    + 'Roberts: 接触弧長 L = b + √(b² + RΔh)、b = √(4(1−ν²)PR/(πE))（Hertz の接触半幅）、R′ = L²/Δh。'
+    + '圧下ゼロで両式とも L = 2b、薄板では Roberts の方が偏平（弧）が大きい。'
+    + 'スラブ法 3 式の荷重とμ逆算がこの式で扁平を解く。';
+  for (const [v, text] of Object.entries(FLATTENING_LABEL)) {
+    const o = el('option'); o.value = v; o.textContent = text; fsel.append(o);
+  }
+  fsel.value = params.flattening;
+  fsel.addEventListener('change', () => setFlattening(fsel.value as FlatteningModel));
+  document.getElementById('topbar-actions')!.append(fsel);
+  flatSel = fsel;
   paintLoadModel();
 
   const row = buttonRow([
@@ -2481,7 +2668,8 @@ gVal.add('rr', '圧下達成率 (指令比)', '').add('cres', '連成残差 |Δh
 const rVal = section('理論照合・ロール');
 rVal.body.append(gVal.root);
 rVal.body.append(el('div', 'ctrl-hint',
-  'スラブ法は Siebel/von Kármán の摩擦丘近似 p̄ = kf·(e^a−1)/a, a = μL/h̄。'
+  'スラブ法は上部で選んだ式（Kármán: Siebel 型 p̄ = kf*·(e^a−1)/a ／ Bland & Ford ／ Orowan）を'
+  + '張力込みで、FEM と同じ R′ で評価した値。'
   + '圧下達成率が大きく 1 を下回るのはロール扁平が圧下量を食っている状態'
   + '（Stone の最小圧延可能板厚）で、数値的な破綻ではない。'));
 
@@ -2555,8 +2743,43 @@ const hill = new FrictionHillChart(document.getElementById('nip') as HTMLCanvasE
 const agcScatter = new AgcScatterChart(
   document.getElementById('agcscatter') as HTMLCanvasElement);
 const agcChartCell = document.getElementById('chart-agc') as HTMLElement;
-/** how many screw revisions a trail remembers */
-const AGC_TRAIL = 50;
+const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
+
+/**
+ * Why a stand's slab load is what it is, when the theory did not solve.
+ * Empty when it did. The numbers named are the ones to go and change.
+ */
+function slabWhy(st: RollingSim): string {
+  const d = st.diag, p = st.params;
+  const theory = SLAB_THEORY_LABEL[p.slabTheory];
+  switch (d.slabStatus) {
+    case 'runaway':
+      return `${theory}: ロール扁平の不動点なし — ${FLATTENING_LABEL[p.flattening]} 式で R′ が発散`
+        + `（Stone の最小圧延可能板厚 h_min ${(d.stoneHMin * 1000).toFixed(3)} mm に対し h₁ ${(d.exitThickness * 1000).toFixed(4)} mm）。`
+        + `FEM の R′ ${(d.hitchcockR * 1000).toFixed(1)} mm で評価した値を表示している`;
+    case 'tension':
+      return `${theory}: 張力平均 ${(((p.backTension + p.frontTension) / 2) / 1e6).toFixed(0)} MPa が`
+        + ` 変形抵抗 kf 以上 — 摩擦丘が立たず式が解けない（荷重 0）。張力を下げる`;
+    case 'geometry':
+      return `${theory}: 出側板厚 ${(d.exitThickness * 1000).toFixed(4)} mm が入側 ${(p.h0 * 1000).toFixed(4)} mm 以上`
+        + ' — 圧下がなく式が立たない（荷重 0）';
+    case 'nobite':
+      return `${theory}: 噛み込みなし（接触列 0）— 式が立たない（荷重 0）`;
+    default:
+      return '';
+  }
+}
+/** the panel-boundary handles, once installed (below); the AGC chart's visibility moves one */
+let layoutRef: LayoutHandle | null = null;
+/**
+ * How many screw revisions a trail remembers.
+ *
+ * One sample per revision (every `agcEvery` frames), so 150 is about ten
+ * seconds at 60 fps - enough to hold a setpoint change from the first move
+ * to the last trim, which at 50 (three seconds) scrolled off before the loop
+ * had finished. The age fade keeps the old end from competing with the new.
+ */
+const AGC_TRAIL = 150;
 /**
  * One trail per stand, not one for the stand on screen.
  *
@@ -2571,7 +2794,12 @@ let agcSampleTick = 0;
 
 /** The scatter is meaningless with every screw parked, so it only shows under control. */
 function refreshAgcChart(): void {
-  agcChartCell.hidden = !activeSetups().some((c) => c.agcMode !== 'off');
+  const hidden = !activeSetups().some((c) => c.agcMode !== 'off');
+  if (agcChartCell.hidden === hidden) return;
+  agcChartCell.hidden = hidden;
+  // The boundary between the two charts goes with the trail; the handle
+  // has to be told, since a hidden cell moves nothing it can watch.
+  layoutRef?.refresh();
 }
 
 /**
@@ -2632,9 +2860,13 @@ function agcTargets(k: number): AgcTargets | null {
 
 /** Every running stand's trail, in line order, for the scatter to draw at once. */
 function agcTrailSet(): AgcTrail[] {
-  return activeStands().map((_, k) => ({
-    tag: standTag(k), samples: agcTrails[k], target: agcTargets(k),
-  }));
+  return activeStands().map((st, k) => {
+    const q = st.diag.agcPlasticSlope;   // N/m per m of gauge
+    return {
+      tag: standTag(k), samples: agcTrails[k], target: agcTargets(k),
+      slope: q !== 0 ? (q * view.stripWidth) / TONF / 1e6 : null,
+    };
+  });
 }
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -2867,6 +3099,11 @@ function relayout(): void {
   fieldDirty = true;
 }
 const layout = installLayout(document.getElementById('app')!, relayout);
+layoutRef = layout;
+// The remembered look was applied to the root before first paint; its
+// structure (tabs, handle positions) is applied here, once the panels exist.
+applyPanelStructure(currentTheme());
+layout.refresh();
 window.addEventListener('resize', () => { layout.refresh(); relayout(); });
 
 /* ── loop ────────────────────────────────────────────────────────────────── */
@@ -2925,11 +3162,13 @@ if (DEBUG_TITLE) {
         agcError: d.agcError,
         holdGap: st.holdGap,
         contactNodes: d.contactNodes,
-        contactToggling: d.contactToggling,
         stepMs: st.lastStepMs,
         loadTonf: (d.rollForce * view.stripWidth) / TONF,
         loadFemTonf: (d.loadFem * view.stripWidth) / TONF,
         loadModel: d.loadModel,
+        slabStatus: d.slabStatus,
+        slabTheory: p.slabTheory,
+        flattening: p.flattening,
         forwardSlip: d.forwardSlip,
         massBalance: d.massBalance,
         neutralX: d.neutralX * 1000,
@@ -2952,6 +3191,24 @@ if (DEBUG_TITLE) {
       const f = standCells[k]?.load.root as HTMLInputElement | undefined;
       if (!f) return false;
       f.value = String(tonf);
+      f.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    },
+    setTension: (k: number, sb: number, sf: number) => {
+      const b = standCells[k]?.backT.root as HTMLInputElement | undefined;
+      const f = standCells[k]?.ten.root as HTMLInputElement | undefined;
+      if (!b || !f) return false;
+      b.value = String(sb); b.dispatchEvent(new Event('change', { bubbles: true }));
+      f.value = String(sf); f.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    },
+    /** debug: poison a stand's velocity field, to watch it recover */
+    poison: (k: number) => { const st = mill.stands[k]; if (!st) return false; st.flow.v.fill(NaN); return true; },
+    restarts: () => mill.stands.map((st) => ({ restarts: st.restarts, giveUp: st.divergedGiveUp, ago: performance.now() - st.restartAt })),
+    setMu: (k: number, mu: number) => {
+      const f = standCells[k]?.mu.root as HTMLInputElement | undefined;
+      if (!f) return false;
+      f.value = String(mu);
       f.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     },
@@ -2984,6 +3241,36 @@ if (DEBUG_TITLE) {
     },
     setRunning,
     setLoadModel,
+    setSlabTheory,
+    setFlattening,
+    /** One theory at one radius [mm] for stand k, tensions [Pa] optional - for probing the fixed point. */
+    slabAt: (k: number, t: SlabTheory, RpMm: number, sb?: number, sf?: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const p = st.params, d = st.diag;
+      const pt = slabLoad({ ...p, slabTheory: t }, { h0: p.h0, h1: d.exitThickness, R: p.R,
+        backTension: sb ?? p.backTension, frontTension: sf ?? p.frontTension, entryStrain: st.entryStrain },
+      p.mu, RpMm > 0 ? RpMm / 1000 : undefined);
+      return { tonf: (pt.load * view.stripWidth) / TONF, Rp: pt.Rflat * 1000, nx: pt.neutralX * 1000,
+        torque: pt.torque, Qp: pt.Qp };
+    },
+    /** Every theory's load for stand k at its current gauge, in tonf, beside the FEM's. */
+    slabTable: (k: number, sb?: number, sf?: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const p = st.params, d = st.diag;
+      const c = { h0: p.h0, h1: d.exitThickness, R: p.R, backTension: sb ?? p.backTension,
+        frontTension: sf ?? p.frontTension, entryStrain: st.entryStrain };
+      const out: Record<string, number> = { fem: (d.loadFem * view.stripWidth) / TONF, h1: d.exitThickness * 1000,
+        Rfem: d.hitchcockR * 1000, neutralFem: d.neutralX * 1000, torqueFem: Math.abs(d.torque) };
+      for (const t of ['karman', 'orowan', 'blandford'] as SlabTheory[]) {
+        const pt = slabLoad({ ...p, slabTheory: t }, c, p.mu);
+        out[t] = (pt.load * view.stripWidth) / TONF;
+        out[`${t}_R`] = pt.Rflat * 1000;
+        out[`${t}_nx`] = pt.neutralX * 1000;
+        out[`${t}_T`] = pt.torque;
+        out[`${t}_atFemR`] = (slabLoad({ ...p, slabTheory: t }, c, p.mu, d.hitchcockR).load * view.stripWidth) / TONF;
+      }
+      return out;
+    },
     setAutoSpeed: (v: boolean) => { mill.autoSpeed = v; return mill.autoSpeed; },
     /** The slab estimate for stand k on its current gauge, in tonf - what 'slab' mode reports. */
     slabOf: (k: number) => {
@@ -2994,6 +3281,8 @@ if (DEBUG_TITLE) {
       return (pt.load * view.stripWidth) / TONF;
     },
     contact: (k: number) => mill.stands[k]?.contactSpan,
+    /** The stand itself, for one-off probes of its private state. */
+    raw: (k: number) => mill.stands[k],
     /*
      * Record one sample per animation frame.
      *
@@ -3077,6 +3366,7 @@ function frame(now: number): void {
   if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
     mill.sync(params, activeSetups());
     mill.advance(wall / 1000);
+    announceRestarts();
     pushAgcSample();
     solved = true;
   }
@@ -3177,11 +3467,14 @@ function updateStats(): void {
 
   gMill.set('mass', d.massBalance > 0 ? d.massBalance.toFixed(4) : '—', massTone(d.massBalance));
   gMill.set('P', (d.rollForce / 1e6).toFixed(3));
+  const why = d.loadModel === 'slab' ? slabWhy(sim) : '';
   loadModelHint.textContent = d.loadModel === 'slab'
-    ? `荷重はスラブ法（上部のボタン）。FEM の値は ${(d.loadFem / 1e6).toFixed(3)} kN/mm`
-      + `（スラブ法比 ${(d.rollForce > 0 ? d.loadFem / d.rollForce : 0).toFixed(3)}）。`
+    ? (why ? `⚠ スラブ法が計算不能 — ${why}。` : '')
+      + `荷重はスラブ法（${SLAB_THEORY_LABEL[params.slabTheory]}、上部のボタン）。FEM の値は ${Number.isFinite(d.loadFem) ? (d.loadFem / 1e6).toFixed(3) : '—'} kN/mm`
+      + `（スラブ法比 ${d.rollForce > 0 && Number.isFinite(d.loadFem) ? (d.loadFem / d.rollForce).toFixed(3) : '—'}）。`
       + '荷重一定制御・ミル剛性の伸び・ミルライン図・スタンド表もこの値を読む。'
     : '荷重は FEM の界面面圧の積分（上部のボタンでスラブ法に切替可）。';
+  loadModelHint.classList.toggle('hint-bad', why !== '');
   gMill.set('pm', (d.meanPressure / 1e6).toFixed(0));
   gMill.set('pk', (d.peakPressure / 1e6).toFixed(0));
   // The gauge and the two walls under it are a row in the mill line now. What
@@ -3254,10 +3547,9 @@ function updateStats(): void {
     // back, so the floor is the entry *minus the spring it is already paying*.
     // At 1.20 mm entry with a 0.07 mm spring that floor is 1.13, and a 1.15 mm
     // target is idle while the label insists it is below the entry gauge.
-    // The toggle outranks 'stalled': a stand caught in it *is* stalled, but
-    // saying so points at the feed loop, which is not where the problem is.
-    const toggling = !idle && !d.agcSettled && d.contactToggling;
-    // So does a bite too shallow for the mesh. Measured on the default mesh:
+    // A bite too shallow for the mesh outranks 'stalled': a stand caught in
+    // it *is* stalled, but saying so points at the feed loop, which is not
+    // where the problem is. Measured on the default mesh:
     // a 3 % pass (8 contact columns) settles, 1 % and under (5-6 columns)
     // sit in '内側ループ待ち' for as long as they are left - the feed loop
     // cannot settle on that few columns and the gauge loop never gets its
@@ -3265,16 +3557,23 @@ function updateStats(): void {
     const shallow = !idle && !d.agcSettled && d.agcStalled && !force
       && (standH0() - sim.agcSetpoint) / standH0() < SHALLOW_BITE_DRAFT;
     const uncomp = !force && !params.agcSpringComp;
-    gAgc.set('st', idle
+    // Under load control on a slab load the theory could not solve, the loop
+    // is holding a number that is not the theory's: say that before anything
+    // about convergence.
+    const slabBroken = force && d.loadModel === 'slab' && d.slabStatus !== 'ok';
+    gAgc.set('st', slabBroken
+      ? `スラブ法が計算不能 — ${slabWhy(sim)}`
+      : idle
       ? `保留（目標 ${(params.agcTargetGauge * 1000).toFixed(4)} ≥ 入側`
         + ` ${(sim.gaugeFloor * 1000).toFixed(4)} mm）`
-      : toggling ? '接触列が入口で出入り（離散化）'
-        : shallow ? `噛み込みが浅すぎて解けない（圧下 ${(100 * (1 - sim.agcSetpoint / standH0())).toFixed(1)}%・接触 ${d.contactNodes} 列）`
+      : shallow ? `噛み込みが浅すぎて解けない（圧下 ${(100 * (1 - sim.agcSetpoint / standH0())).toFixed(1)}%・接触 ${d.contactNodes} 列）`
         : d.agcSaturated ? 'ギャップ端に張り付き'
           : uncomp ? `S を目標に固定（スプリング補正なし: 出側 +${(d.agcError * standH0() * 1e6).toFixed(0)} µm）`
-            : d.agcSettled ? '収束' : d.agcStalled ? '内側ループ待ち' : '調整中',
-      idle ? 'warn'
-        : toggling || shallow || d.agcSaturated || d.agcStalled ? 'bad'
+            : d.agcSettled
+              ? (sim.agcBand > params.agcDeadband ? `収束（FEM 荷重のメッシュ分解能 ±${(100 * sim.agcBand).toFixed(2)}% 内）` : '収束')
+              : d.agcStalled ? '内側ループ待ち' : '調整中',
+      slabBroken ? 'bad' : idle ? 'warn'
+        : shallow || d.agcSaturated || d.agcStalled ? 'bad'
           : uncomp ? 'warn' : d.agcSettled ? 'ok' : 'warn');
     // Sourced from the solver, not retyped: these bounds have moved before,
     // and a hint quoting the old ones is worse than no hint.
@@ -3291,31 +3590,12 @@ function updateStats(): void {
     const ceiling = force
       ? `この範囲で出せるのは今の ${((d.rollForce * b) / TONF).toFixed(0)} tonf が上限`
       : `この条件で届く実圧下率は ${(100 * (1 - d.exitThickness / standH0())).toFixed(1)}% が上限`;
-    // How far the exit gauge has to move to carry the bite entry one strip
-    // column: x_entry ~ -sqrt(R' dh), so dx_entry/dh1 = sqrt(R'/dh)/2, and
-    // one column is (winOut - winIn)/nx of x. Half of that is the smallest
-    // nudge that takes the entry off a column boundary.
-    const dhCol = (() => {
-      const dh = Math.max(standH0() - d.exitThickness, 1e-9);
-      const Rp = Math.max(d.hitchcockR, params.R);
-      const dxCol = (sim.winOut - sim.winIn) / params.stripNx;
-      return dxCol / (0.5 * Math.sqrt(Rp / dh));
-    })();
     agcReadHint.textContent = shallow
       ? `目標 ${(sim.agcSetpoint * 1000).toFixed(4)} mm は入側より薄いが、圧下量が小さすぎて接触弧が`
         + `板メッシュ ${d.contactNodes} 列にしか乗らない（板 ${params.stripNx}×${params.stripNy}）。`
         + 'この軽さでは自走速度ループが収まらず、ギャップループは動けないまま止まる。'
         + '実測: 既定メッシュで 3% 圧下（8 列）は整定、1% 以下（5〜7 列）は整定しない。'
         + 'メッシュ品質を上げるか、圧下量を増やす。'
-      : toggling
-      ? `噛み込み入口が板メッシュの列境界に乗っていて、その列が接触に入る／抜けるを繰り返している`
-        + `（板 ${params.stripNx}×${params.stripNy}）。列が入ると荷重が上がり、扁平でロールが`
-        + ' h₀/2 より浮いて列が抜け、荷重が下がってまた入る — 制御ループの外側で起きている'
-        + '離散化の振動なので、ゲインや不感帯では止まらない。'
-        + `確実なのは目標をずらして入口を列境界から外すこと: 1 列ぶんは出側板厚で`
-        + ` ${(dhCol * 1e6).toFixed(0)} µm、半分の ${(dhCol * 5e5).toFixed(0)} µm 動かせば外れる。`
-        + 'メッシュを上げると段は低く・出にくくなるが消えはしない（実測: 100×8 で ±5%、'
-        + '200×14 でも別のギャップで ±3.5%）。'
       : idle
       ? `目標 ${(params.agcTargetGauge * 1000).toFixed(4)} mm が入側板厚`
         + ` ${(standH0() * 1000).toFixed(4)} mm（${view.stand > 0 ? '前スタンドの出側の現在値' : 'ライン入側'}）以上。`
@@ -3519,6 +3799,74 @@ function updateStats(): void {
     });
   }
   samples.sort((p, q) => p.x - q.x);
+  // Under the slab load the hill is the theory's: the pressure and friction
+  // its load is the integral of, on its own arc, with its own neutral point.
+  // The FEM's hill is still solved every frame - it is what the strip is
+  // rolled with - but it is not what the load on screen came from.
+  let hillNeutral: number | null = sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null;
+  {
+    const d = sim.diag, p = sim.params;
+    if (d.loadModel === 'slab') {
+      const prof = slabPressureProfile(p, { h0: p.h0, h1: d.exitThickness, R: p.R,
+        backTension: p.backTension, frontTension: p.frontTension, entryStrain: d.entryStrain },
+      p.mu, d.hitchcockR > 0 ? d.hitchcockR : p.R);
+      if (prof.samples.length > 1) {
+        samples.length = 0;
+        for (const q of prof.samples) samples.push({ x: q.x * 1000, p: q.p / 1e6, tau: q.tau / 1e6 });
+        hillNeutral = Number.isFinite(prof.neutralX) ? prof.neutralX * 1000 : null;
+      }
+    }
+    const label = `${standTag(view.stand)} ${d.loadModel === 'slab' ? `${SLAB_THEORY_LABEL[p.slabTheory]} 面圧 p` : 'FEM 面圧 p'}`;
+    if (hillPLabel.textContent !== label) hillPLabel.textContent = label;
+  }
+  // Every other stand's hill as well, from the same model each is on, so
+  // the chart reads across the line the way the control trail does.
+  const others: { tag: string; samples: HillSample[] }[] = [];
+  activeStands().forEach((st, k) => {
+    if (st === sim) return;
+    const d = st.diag, p = st.params;
+    const ss: HillSample[] = [];
+    if (d.loadModel === 'slab') {
+      const prof = slabPressureProfile(p, { h0: p.h0, h1: d.exitThickness, R: p.R,
+        backTension: p.backTension, frontTension: p.frontTension, entryStrain: d.entryStrain },
+      p.mu, d.hitchcockR > 0 ? d.hitchcockR : p.R);
+      for (const q of prof.samples) ss.push({ x: q.x * 1000, p: q.p / 1e6, tau: q.tau / 1e6 });
+    } else {
+      const mm = st.flow.mesh;
+      for (let i = 0; i <= mm.nx; i++) {
+        if (!st.flow.ifActive[i]) continue;
+        ss.push({ x: mm.X[2 * mm.topNodes[i]] * 1000, p: st.flow.ifPressure[i] / 1e6, tau: st.flow.ifShear[i] / 1e6 });
+      }
+      ss.sort((a, b) => a.x - b.x);
+    }
+    if (ss.length > 1) others.push({ tag: standTag(k), samples: ss });
+  });
+  // The deformation resistance along the arc, from whichever model is
+  // making the load. Under the FEM it is the flow stress the solve carries,
+  // averaged over each contact column's nodes the way the strain is; under
+  // the slab load it is what the selected theory reads at the local strain
+  // on its own flattened arc.
+  const kfCurve: { x: number; kf: number }[] = [];
+  let kfLabel = 'FEM';
+  {
+    const d = sim.diag, p = sim.params;
+    if (d.loadModel === 'slab') {
+      kfLabel = SLAB_THEORY_LABEL[p.slabTheory];
+      const prof = slabKfProfile(p, { h0: p.h0, h1: d.exitThickness, R: p.R,
+        backTension: p.backTension, frontTension: p.frontTension, entryStrain: d.entryStrain },
+      d.hitchcockR > 0 ? d.hitchcockR : p.R);
+      for (const k of prof) kfCurve.push({ x: k.x * 1000, kf: k.kf / 1e6 });
+    } else {
+      const rows = m.rows, ny = m.ny;
+      for (let i = 0; i <= m.nx; i++) {
+        if (!sim.flow.ifActive[i]) continue;
+        let acc = 0;
+        for (let j = 0; j < rows; j++) acc += (j === 0 || j === ny ? 0.5 : 1) * sim.sigmaF[i * rows + j];
+        kfCurve.push({ x: m.X[2 * m.topNodes[i]] * 1000, kf: ((2 / Math.sqrt(3)) * acc) / ny / 1e6 });
+      }
+      kfCurve.sort((a, b) => a.x - b.x);
+    }
+  }
   const md = mill.diag;
   millLine.draw(millViews());
   refreshStandGrid();
@@ -3541,7 +3889,17 @@ function updateStats(): void {
   const totals = view.lineMode === 'reverse'
     ? ` ／ 最大荷重 ${pPeak.toFixed(0)} tonf ／ 最大動力 ${(wSum / 1000).toFixed(0)} kW`
     : ` ／ 最大荷重 ${pPeak.toFixed(0)} tonf ／ 総動力 ${(wSum / 1000).toFixed(0)} kW`;
-  const modelTag = params.loadModel === 'slab' ? ' ／ 荷重: スラブ法' : '';
+  // A stand the theory could not solve is named here too: the heading says
+  // slab, and the reader has to know which numbers under it are not the
+  // theory's own.
+  const unsolved = params.loadModel === 'slab'
+    ? mill.stands.slice(0, standCount).map((st, k) => [k, st.diag.slabStatus] as const).filter(([, s]) => s !== 'ok')
+    : [];
+  const unsolvedTag = unsolved.length
+    ? ` ⚠ 計算不能 ${unsolved.map(([k, s]) => `${standTag(k)} ${s === 'runaway' ? '扁平発散' : s === 'tension' ? '張力' : s === 'geometry' ? '圧下なし' : '噛み込みなし'}`).join('・')}`
+    : '';
+  const modelTag = params.loadModel === 'slab'
+    ? ` ／ 荷重: スラブ法 (${SLAB_THEORY_LABEL[params.slabTheory]}${params.flattening === 'roberts' ? '・Roberts 偏平' : ''})${unsolvedTag}` : '';
   // Any stand whose volume is not conserved is named here, because the
   // header is the one line everyone reads and the number it invalidates
   // (the load) is the one they read it for.
@@ -3582,11 +3940,15 @@ function updateStats(): void {
   }
   agcScatter.draw(agcTrailSet());
   hill.draw(samples, {
-    neutralX: d.neutralFound ? d.neutralX * 1000 : null,
+    neutralX: hillNeutral,
+    neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
     flowStress: slab.kf / 1e6,
-    slabMean: slab.meanPressure / 1e6,
+    // the dashed mean is the mean of the hill drawn: the theory's own under
+    // the slab load, the FEM-radius reference otherwise
+    slabMean: (d.loadModel === 'slab' ? d.meanPressure : slab.meanPressure) / 1e6,
     arcIn: d.arcIn * 1000,
     arcOut: d.arcOut * 1000,
+    kfCurve, kfLabel, others,
   });
 }
 
