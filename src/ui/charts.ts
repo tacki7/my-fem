@@ -790,12 +790,36 @@ export class TrackChart {
   private target: Float32Array[] = [];
   /** wall-clock time of each sample [s], so the axis is time and not frames */
   private times: Float64Array;
+  /** pointer x over the canvas [css px], NaN when it is elsewhere */
+  private hoverX = NaN;
 
   constructor(canvas: HTMLCanvasElement, len = 600, opts: TrackChartOpts = { unit: 'MPa', digits: 1, fromZero: true }) {
     this.canvas = canvas;
     this.len = len;
     this.opts = opts;
     this.times = new Float64Array(len);
+    // Hover readout: the pointer picks a time, the next draw prints every
+    // series' value there. State only - the frame loop redraws anyway.
+    canvas.addEventListener('pointermove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      this.hoverX = e.clientX - r.left;
+    });
+    canvas.addEventListener('pointerleave', () => { this.hoverX = NaN; });
+  }
+
+  /** The raw span of everything held, before margins; null with nothing to show. */
+  dataRange(): { lo: number; hi: number } | null {
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k < this.actual.length; k++) {
+      for (let i = 0; i < this.len; i++) {
+        for (const v of [this.actual[k][i], this.target[k][i]]) {
+          if (!Number.isFinite(v)) continue;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+    }
+    return Number.isFinite(lo) ? { lo, hi } : null;
   }
 
   /** Forget the history: the line it was drawn for no longer exists. */
@@ -825,7 +849,11 @@ export class TrackChart {
     if (this.filled < this.len) this.filled++;
   }
 
-  draw(tags: string[], emptyText = 'データ待ち'): void {
+  /**
+   * @param range  raw data bounds to scale to instead of this chart's own -
+   *               two charts given the union of their ranges share an axis
+   */
+  draw(tags: string[], emptyText = 'データ待ち', range?: { lo: number; hi: number } | null): void {
     const ctx = fit(this.canvas);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
@@ -852,15 +880,9 @@ export class TrackChart {
     // floor on the span, so a flat trace does not blow a micron up into a
     // wall and read as a fault.
     let lo = Infinity, hi = -Infinity;
-    for (let k = 0; k < m; k++) {
-      for (let i = 0; i < this.len; i++) {
-        for (const v of [this.actual[k][i], this.target[k][i]]) {
-          if (!Number.isFinite(v)) continue;
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
-        }
-      }
-    }
+    const own = this.dataRange();
+    if (own) { lo = own.lo; hi = own.hi; }
+    if (range) { lo = Math.min(lo, range.lo); hi = Math.max(hi, range.hi); }
     if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
     if (this.opts.fromZero) {
       lo = 0;
@@ -974,5 +996,46 @@ export class TrackChart {
       ctx.fillText(l.text, w - padR - 2, l.y);
     }
     ctx.textAlign = 'left';
+
+    // Hover readout: a hairline at the pointer's time and every series'
+    // value there, target in brackets where one is drawn.
+    if (Number.isFinite(this.hoverX) && this.hoverX >= padL && this.hoverX <= w - padR) {
+      const tH = tWin0 + ((this.hoverX - padL) / plotW) * span;
+      // nearest sample at or before tH
+      let lo2 = 0, hi2 = count - 1;
+      while (hi2 - lo2 > 1) { const mid = (lo2 + hi2) >> 1; if (tAt(mid) <= tH) lo2 = mid; else hi2 = mid; }
+      const i = tAt(hi2) - tH < tH - tAt(lo2) ? hi2 : lo2;
+      if (tAt(i) >= tWin0) {
+        const x = Math.round(X(tAt(i))) + 0.5;
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+        const rows: { text: string; colour: string }[] = [
+          { text: `−${(tNow - tAt(i)).toFixed(1)}s`, colour: 'rgba(190,206,230,0.8)' },
+        ];
+        for (let k = 0; k < m; k++) {
+          const a = this.actual[k][(start + i) % this.len], t = this.target[k][(start + i) % this.len];
+          if (!Number.isFinite(a)) continue;
+          rows.push({
+            text: `${tags[k] ?? k + 1} ${a.toFixed(this.opts.digits)}`
+              + (Number.isFinite(t) ? ` (${t.toFixed(this.opts.digits)})` : ''),
+            colour: GAP_COLORS[k % GAP_COLORS.length],
+          });
+        }
+        const boxW = 8 + 7 * Math.max(...rows.map((r) => r.text.length));
+        const boxH = 4 + 12 * rows.length;
+        // to the right of the line, or to the left when that runs off the canvas
+        const bx = x + 8 + boxW > w ? x - 8 - boxW : x + 8;
+        const by = Math.max(2, Math.min(h - boxH - 2, padT));
+        ctx.fillStyle = 'rgba(10,16,28,0.88)';
+        ctx.fillRect(bx, by, boxW, boxH);
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+        ctx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
+        rows.forEach((r, n) => {
+          ctx.fillStyle = r.colour;
+          ctx.fillText(r.text, bx + 4, by + 12 + 12 * n);
+        });
+      }
+    }
   }
 }

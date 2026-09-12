@@ -4448,11 +4448,16 @@ function updateStats(): void {
     tensionChart.draw(Array.from({ length: Math.max(0, mill.count - 1) },
       (_, k) => `${standTag(k)}→${standTag(k + 1)}`));
   }
-  gaugeChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
-  speedChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
-  stripChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
-  screwChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
-  massChart.draw(Array.from({ length: mill.count }, (_, k) => standTag(k)));
+  const tags = Array.from({ length: mill.count }, (_, k) => standTag(k));
+  gaugeChart.draw(tags);
+  // Roll speed and strip speed on one axis: the gap between them is the
+  // slip, and it only reads as such when the scales agree.
+  const rs = speedChart.dataRange(), ss = stripChart.dataRange();
+  const shared = rs && ss ? { lo: Math.min(rs.lo, ss.lo), hi: Math.max(rs.hi, ss.hi) } : rs ?? ss;
+  speedChart.draw(tags, undefined, shared);
+  stripChart.draw(tags, undefined, shared);
+  screwChart.draw(tags);
+  massChart.draw(tags);
   if (hillShown) hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
