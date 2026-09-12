@@ -3616,6 +3616,27 @@ if (DEBUG_TITLE) {
     /** debug: poison a stand's velocity field, to watch it recover */
     poison: (k: number) => { const st = mill.stands[k]; if (!st) return false; st.flow.v.fill(NaN); return true; },
     restarts: () => mill.stands.map((st) => ({ restarts: st.restarts, giveUp: st.divergedGiveUp, ago: performance.now() - st.restartAt })),
+    /**
+     * Volume flux through every column of a stand's strip mesh [mm²/s],
+     * trapezoid over the actual node spacing, with the column's x [mm] and
+     * thickness [mm]. Where the flux drops along x is where the solve
+     * loses volume - the one way to tell a bite leak from an exit artefact.
+     */
+    fluxProfile: (k: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const m = st.flow.mesh, v = st.flow.v;
+      const out: { x: number; h: number; q: number }[] = [];
+      for (let i = 0; i <= m.nx; i++) {
+        let q = 0;
+        for (let j = 0; j < m.ny; j++) {
+          const a = i * m.rows + j, b = a + 1;
+          const dy = m.X[2 * b + 1] - m.X[2 * a + 1];
+          q += 0.5 * (v[2 * a] + v[2 * b]) * dy;
+        }
+        out.push({ x: m.X[2 * (i * m.rows)] * 1000, h: 2 * m.X[2 * (i * m.rows + m.ny) + 1] * 1000, q: 2 * q * 1e6 });
+      }
+      return { arc: st.diag.arcLength * 1000, neutralX: st.diag.neutralX * 1000, elasticEntry: st.diag.elasticEntryLen * 1000, elasticExit: st.diag.elasticExitLen * 1000, cols: out };
+    },
     /** the interstand gaps as the line carries them; MPa, %, ms, m */
     tension: () => {
       const md = mill.diag;
