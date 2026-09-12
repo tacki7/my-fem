@@ -148,7 +148,7 @@ body {
   grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   /* topbar / mill line / stage / charts. The line is always visible: it is the
      only view of the whole machine, and it doubles as the stand selector. */
-  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr) min(var(--row-charts), 36vh);
   /* Named, so a look can rearrange the same panels without touching them:
      the classic arrangement - controls down the left, the line over the
      stage, stats on the right. */
@@ -167,7 +167,7 @@ body {
    schedule strip. The side panels are tabbed (see `.tabstrip`), one section
    at a time instead of a scroll. */
 :root[data-theme="modern"] #app {
-  grid-template-rows: 52px minmax(0, 1fr) var(--row-charts) var(--row-line);
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-charts), 36vh) min(var(--row-line), 46vh);
   grid-template-areas:
     "topbar   topbar   topbar"
     "left     stage    right"
@@ -178,7 +178,7 @@ body {
    masthead, and the columns are mirrored - the readings on the left where
    the eye starts, the controls on the right. */
 :root[data-theme="chic"] #app {
-  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr) min(var(--row-charts), 36vh);
   grid-template-areas:
     "topbar   topbar   topbar"
     "millline millline millline"
@@ -651,11 +651,11 @@ body.resizing * { cursor: inherit !important; }
 .chart-cell[hidden] { display: none; }
 /* The hill's share of the band is a draggable boundary (see layout.ts); with
    the trail hidden there is nothing to share and the hill takes the band. */
-#chart-nip { flex: 0 0 var(--chart-nip, 50%); }
+#chart-nip { flex: 0 0 var(--chart-nip, 40%); }
 #bottom:has(> #chart-agc[hidden]):has(> #chart-track[hidden]) #chart-nip { flex: 1 1 0; }
 /* The trail's share of the band is the second draggable boundary; with the
    time-series column hidden there is nothing to share and it takes the rest. */
-#chart-agc { flex: 0 0 var(--chart-agc, 20%); border-left: 1px solid var(--line); padding-left: 12px; }
+#chart-agc { flex: 0 0 var(--chart-agc, 16%); border-left: 1px solid var(--line); padding-left: 12px; }
 #bottom:has(> #chart-track[hidden]) #chart-agc { flex: 1 1 0; }
 /* The tension and gauge traces stack in one column at the right of the band;
    each takes half of it while both are shown, the gauge all of it otherwise. */

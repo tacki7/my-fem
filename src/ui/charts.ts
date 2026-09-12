@@ -788,11 +788,14 @@ export class TrackChart {
   private filled = 0;
   private actual: Float32Array[] = [];
   private target: Float32Array[] = [];
+  /** wall-clock time of each sample [s], so the axis is time and not frames */
+  private times: Float64Array;
 
   constructor(canvas: HTMLCanvasElement, len = 600, opts: TrackChartOpts = { unit: 'MPa', digits: 1, fromZero: true }) {
     this.canvas = canvas;
     this.len = len;
     this.opts = opts;
+    this.times = new Float64Array(len);
   }
 
   /** Forget the history: the line it was drawn for no longer exists. */
@@ -817,6 +820,7 @@ export class TrackChart {
       this.actual[k][this.head] = actual[k];
       this.target[k][this.head] = target[k];
     }
+    this.times[this.head] = performance.now() / 1000;
     this.head = (this.head + 1) % this.len;
     if (this.filled < this.len) this.filled++;
   }
@@ -825,7 +829,15 @@ export class TrackChart {
     const ctx = fit(this.canvas);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
-    const padL = 12 + 7 * (this.opts.digits + 3), padR = 10, padT = 10, padB = 14;
+    // Room above the plot for the unit, so it does not sit on the top tick.
+    // On a narrow cell the ticks give up decimals rather than the plot: a
+    // 4-decimal tick column is 60 px, and three of these charts side by side
+    // in a 300 px column had 14 px of plot each, with the end labels drawn
+    // across the ticks and a stand's number lost under them.
+    const w0 = this.canvas.clientWidth;
+    const tickDigits = w0 < 130 ? Math.max(0, this.opts.digits - 3)
+      : w0 < 200 ? Math.max(1, this.opts.digits - 2) : this.opts.digits;
+    const padL = 12 + 7 * (tickDigits + 3), padR = 10, padT = 22, padB = 14;
     ctx.clearRect(0, 0, w, h);
     ctx.font = FONT;
     const m = this.actual.length;
@@ -858,8 +870,22 @@ export class TrackChart {
       lo -= span * 0.15;
       hi += span * 0.15;
     }
-    const X = (i: number) => padL + ((w - padL - padR) * i) / (this.len - 1);
     const Y = (v: number) => h - padB - ((h - padT - padB) * (v - lo)) / (hi - lo);
+
+    // The axis is time. The window is the span of the samples held when the
+    // ring is full, and while it is filling, the span `len` frames would
+    // cover at the pace seen so far - so the trace grows in from the left
+    // and then scrolls, and a second is the same width either way.
+    const start = this.filled < this.len ? 0 : this.head;
+    const count = this.filled;
+    const tAt = (i: number) => this.times[(start + i) % this.len];
+    const tNow = tAt(count - 1);
+    const held = tNow - tAt(0);
+    const span = this.filled < this.len && count > 1
+      ? Math.max(held, (held * (this.len - 1)) / (count - 1)) : Math.max(held, 1e-3);
+    const tWin0 = tNow - span;
+    const plotW = w - padL - padR;
+    const X = (t: number) => padL + (plotW * (t - tWin0)) / span;
 
     ctx.lineWidth = 1;
     for (let i = 0; i <= 3; i++) {
@@ -869,18 +895,37 @@ export class TrackChart {
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
       ctx.fillStyle = 'rgba(190,206,230,0.55)';
       ctx.textAlign = 'right';
-      ctx.fillText(v.toFixed(this.opts.fromZero && v >= 10 ? 0 : this.opts.digits), padL - 5, y + 3);
+      ctx.fillText(v.toFixed(this.opts.fromZero && v >= 10 ? 0 : tickDigits), padL - 5, y + 3);
     }
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(190,206,230,0.4)';
-    ctx.fillText(this.opts.unit, 2, padT + 2);
+    ctx.fillText(this.opts.unit, 2, 11);
 
-    // Oldest sample at the left. The ring is read from `head` when full and
-    // from zero while it is filling, so the trace grows in from the left and
-    // then scrolls.
-    const start = this.filled < this.len ? 0 : this.head;
-    const count = this.filled;
-    const offset = this.len - count;
+    // Time grid: faint verticals at a round step chosen so that four to eight
+    // fit the window, labelled in seconds before now. What makes a trace
+    // readable as a transient rather than a shape.
+    {
+      const steps = [0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300];
+      const narrow = plotW < 160;
+      // Fewer lines on a narrow plot, so the labels do not touch.
+      const step = steps.find((s) => span / s <= (narrow ? 3.5 : 8)) ?? steps[steps.length - 1];
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = 'rgba(190,206,230,0.35)';
+      ctx.textAlign = 'center';
+      for (let k = 1; ; k++) {
+        const t = tNow - k * step;
+        if (t < tWin0) break;
+        const x = Math.round(X(t)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+        {
+          const secs = k * step;
+          ctx.fillText(`−${secs >= 60 ? `${(secs / 60).toFixed(secs % 60 ? 1 : 0)}m` : `${secs}s`}`, x, h - 3);
+        }
+      }
+      ctx.textAlign = 'left';
+    }
+
+    const labels: { colour: string; text: string; y: number }[] = [];
     for (let k = 0; k < m; k++) {
       const colour = GAP_COLORS[k % GAP_COLORS.length];
       const passes: [Float32Array, number[]][] = [[this.target[k], [4, 3]], [this.actual[k], []]];
@@ -893,22 +938,41 @@ export class TrackChart {
         for (let i = 0; i < count; i++) {
           const v = arr[(start + i) % this.len];
           if (!Number.isFinite(v)) { pen = false; continue; }
-          const x = X(offset + i), y = Y(v);
+          const x = X(tAt(i)), y = Y(v);
           if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
           pen = true;
         }
         ctx.stroke();
       }
       ctx.setLineDash([]);
-      // Label at the right end of the live trace, where the eye lands.
       const last = this.actual[k][(start + count - 1) % this.len];
       if (Number.isFinite(last)) {
-        ctx.fillStyle = colour;
-        ctx.textAlign = 'right';
-        ctx.fillText(`${tags[k] ?? k + 1} ${last.toFixed(this.opts.digits)}`, w - padR - 2,
-          Math.min(h - padB - 2, Math.max(padT + 9, Y(last) - 3)));
-        ctx.textAlign = 'left';
+        labels.push({ colour, text: `${tags[k] ?? k + 1} ${last.toFixed(this.opts.digits)}`, y: Y(last) - 3 });
       }
     }
+    // Labels at the right end of the live traces, where the eye lands - and
+    // pushed apart so that on a short chart three of them do not land on
+    // one another and read as one stand missing. Sorted by height, each is
+    // kept a line below the one above it, and the stack is slid back up if
+    // it runs off the bottom.
+    const LINE = 12;
+    const top = padT + 9, bottom = h - padB - 2;
+    labels.sort((a, b) => a.y - b.y);
+    for (let i = 0; i < labels.length; i++) {
+      labels[i].y = Math.max(labels[i].y, i === 0 ? top : labels[i - 1].y + LINE);
+    }
+    const over = labels.length ? labels[labels.length - 1].y - bottom : 0;
+    if (over > 0) {
+      for (const l of labels) l.y -= over;
+      for (let i = 0; i < labels.length; i++) {
+        labels[i].y = Math.max(labels[i].y, i === 0 ? top : labels[i - 1].y + LINE);
+      }
+    }
+    ctx.textAlign = 'right';
+    for (const l of labels) {
+      ctx.fillStyle = l.colour;
+      ctx.fillText(l.text, w - padR - 2, l.y);
+    }
+    ctx.textAlign = 'left';
   }
 }
