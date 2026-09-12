@@ -30,7 +30,84 @@
   --radius:    10px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: "Inter", system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  /* headings; the sans unless a theme says otherwise */
+  --display: var(--sans);
+  /* the same colours as channels, for the rgba() the components mix themselves */
+  --accent-rgb: 88, 213, 255;
+  --line-rgb:   140, 170, 210;
+  --red-rgb:    255, 107, 129;
+  /* surfaces */
+  --bg-panel-2: #070b12;
+  --panel-grad: linear-gradient(180deg, var(--bg-panel), var(--bg-panel-2));
+  --top-grad:   linear-gradient(180deg, #0c1220, #080c14);
+  --head-grad:  linear-gradient(180deg, #0b1019 78%, rgba(11, 16, 25, .82));
+  --btn-hover:  #182233;
+  --shadow-panel: 0 12px 34px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03);
+  --shadow-top:   0 10px 28px rgba(0,0,0,.4);
   color-scheme: dark;
+}
+
+/* ── themes ──────────────────────────────────────────────────────────────────
+   Three looks on the same layout, switched from the top-left of the bar and
+   remembered by the browser. Each is a set of tokens; nothing below reads a
+   colour that is not one. The canvases (mill line, charts, stage) keep their
+   own palette, which is dark in every theme. */
+:root[data-theme="modern"] {
+  --bg:        #0b0d12;
+  --bg-panel:  #14171d;
+  --bg-panel-2:#14171d;
+  --bg-raise:  #1c2028;
+  --bg-sunken: #0e1116;
+  --line:      rgba(255, 255, 255, 0.09);
+  --line-soft: rgba(255, 255, 255, 0.05);
+  --line-rgb:  255, 255, 255;
+  --fg:        #eceff4;
+  --fg-dim:    #a3aab8;
+  --fg-faint:  #6b7385;
+  --accent:    #7aa2ff;
+  --accent-dk: #3b62d8;
+  --accent-rgb: 122, 162, 255;
+  --amber:     #f5b957;
+  --green:     #4ade80;
+  --red:       #fb7185;
+  --red-rgb:   251, 113, 133;
+  --violet:    #c4b5fd;
+  --radius:    14px;
+  --panel-grad: var(--bg-panel);
+  --top-grad:   #14171d;
+  --head-grad:  #14171d;
+  --btn-hover:  #262b35;
+  --shadow-panel: 0 1px 0 rgba(255,255,255,.04), 0 8px 24px rgba(0,0,0,.35);
+  --shadow-top:   0 1px 0 rgba(255,255,255,.04), 0 8px 24px rgba(0,0,0,.35);
+}
+:root[data-theme="chic"] {
+  --bg:        #171412;
+  --bg-panel:  #211d1a;
+  --bg-panel-2:#1a1614;
+  --bg-raise:  #2a2521;
+  --bg-sunken: #131110;
+  --line:      rgba(214, 190, 150, 0.14);
+  --line-soft: rgba(214, 190, 150, 0.07);
+  --line-rgb:  214, 190, 150;
+  --fg:        #ece4d8;
+  --fg-dim:    #b5a993;
+  --fg-faint:  #7d7365;
+  --accent:    #d9b56a;
+  --accent-dk: #9a7a3a;
+  --accent-rgb: 217, 181, 106;
+  --amber:     #e0a458;
+  --green:     #9fc49a;
+  --red:       #d98383;
+  --red-rgb:   217, 131, 131;
+  --violet:    #b7a6d8;
+  --radius:    6px;
+  --display:   "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", Georgia, serif;
+  --panel-grad: linear-gradient(180deg, #221e1b, #1a1614);
+  --top-grad:   linear-gradient(180deg, #282219, #1c1814);
+  --head-grad:  linear-gradient(180deg, #211d1a 78%, rgba(33, 29, 26, .85));
+  --btn-hover:  #342d27;
+  --shadow-panel: 0 10px 30px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,235,200,.04);
+  --shadow-top:   0 8px 24px rgba(0,0,0,.45);
 }
 
 * { box-sizing: border-box; }
@@ -45,13 +122,13 @@ body {
 }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(140,170,210,.16); border-radius: 6px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(140,170,210,.3); }
+::-webkit-scrollbar-thumb { background: rgba(var(--line-rgb),.16); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(var(--line-rgb),.3); }
 
 /* Keyboard focus is visible everywhere; a mouse click never draws a ring.
    Set once here rather than per widget, so a control added later inherits it. */
 :focus-visible {
-  outline: 2px solid rgba(88, 213, 255, .75);
+  outline: 2px solid rgba(var(--accent-rgb), .75);
   outline-offset: 1px;
   border-radius: 4px;
 }
@@ -66,14 +143,47 @@ body {
      app shipped with; `resetLayout` puts them back. */
   --col-left: 292px;
   --col-right: 332px;
-  --row-line: 424px;
+  --row-line: 510px;
   --row-charts: 196px;
   grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   /* topbar / mill line / stage / charts. The line is always visible: it is the
      only view of the whole machine, and it doubles as the stand selector. */
   grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  /* Named, so a look can rearrange the same panels without touching them:
+     the classic arrangement - controls down the left, the line over the
+     stage, stats on the right. */
+  grid-template-areas:
+    "topbar   topbar   topbar"
+    "left     millline millline"
+    "left     stage    right"
+    "left     bottom   right";
   gap: 10px;
   padding: 10px;
+}
+
+/* ── the looks' arrangements ─────────────────────────────────────────────── */
+/* Modern: the stage is the hero, the chart band under it, and the whole
+   mill line - diagram and stand table - runs along the bottom like a
+   schedule strip. The side panels are tabbed (see `.tabstrip`), one section
+   at a time instead of a scroll. */
+:root[data-theme="modern"] #app {
+  grid-template-rows: 52px minmax(0, 1fr) var(--row-charts) var(--row-line);
+  grid-template-areas:
+    "topbar   topbar   topbar"
+    "left     stage    right"
+    "left     bottom   right"
+    "millline millline millline";
+}
+/* Chic: a broadsheet. The mill line is a full-width band under the
+   masthead, and the columns are mirrored - the readings on the left where
+   the eye starts, the controls on the right. */
+:root[data-theme="chic"] #app {
+  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  grid-template-areas:
+    "topbar   topbar   topbar"
+    "millline millline millline"
+    "right    stage    left"
+    "right    bottom   left";
 }
 
 /* ── drag handles on the panel boundaries ────────────────────────────────── */
@@ -103,15 +213,52 @@ body.resizing { user-select: none; }
 body.resizing * { cursor: inherit !important; }
 /* the handles are positioned against this box */
 #app { position: relative; }
-#topbar   { grid-column: 1 / -1; }
-/* Line-common inputs sit top-left, above the per-stand dials and beside the
-   machine they apply to: one strip, one gauge, one material for the whole line. */
-#common   { grid-column: 1; grid-row: 2; overflow-y: auto; }
-#millline { grid-column: 2 / -1; grid-row: 2; display: flex; flex-direction: column; }
-#left     { grid-column: 1; grid-row: 3 / 5; overflow-y: auto; }
-#stage    { grid-column: 2; grid-row: 3; position: relative; }
-#bottom   { grid-column: 2; grid-row: 4; display: flex; flex-direction: row; gap: 12px; }
-#right    { grid-column: 3; grid-row: 3 / 5; overflow-y: auto; }
+#topbar   { grid-area: topbar; }
+#millline { grid-area: millline; display: flex; flex-direction: column; }
+/* One left column, top bar to bottom edge. It used to be two panels - the
+   line-common inputs above, the rest below - and two scrollable columns of
+   sections in the same 290 px turned every search for a dial into a guess
+   about which one it was in. One column, sections in the order the set-up is
+   thought through: the line, the strip, the material, then the stand. */
+#left     { grid-area: left; overflow-y: auto; }
+#stage    { grid-area: stage; position: relative; }
+#bottom   { grid-area: bottom; display: flex; flex-direction: row; gap: 12px; }
+#right    { grid-area: right; overflow-y: auto; }
+
+/* ── tabbed side panels (the modern look) ────────────────────────────────── */
+/* The sections are the same nodes; a strip of their titles selects one and
+   the rest are hidden. Folding is moot in a tab, so the section heads go and
+   a folded section shows its body regardless. */
+.panel.tabbed { display: flex; flex-direction: column; overflow: hidden; }
+.tabstrip {
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 8px 6px; flex: none;
+  border-bottom: 1px solid var(--line);
+}
+.tabstrip .btn { padding: 3px 8px; font-size: 10.5px; border-radius: 6px; }
+.panel.tabbed > .panel-section { display: none; overflow-y: auto; min-height: 0; }
+.panel.tabbed > .panel-section.tab-active { display: block; flex: 1 1 auto; }
+.panel.tabbed > .panel-section > .panel-head { display: none; }
+.panel.tabbed > .panel-section.collapsed .panel-body { display: flex; }
+.panel.tabbed > .panel-section .panel-body { padding-top: 12px; }
+
+/* ── the broadsheet (the chic look) ──────────────────────────────────────── */
+:root[data-theme="chic"] .panel { box-shadow: none; }
+:root[data-theme="chic"] #topbar { padding: 0 18px; }
+:root[data-theme="chic"] .brand-text strong { font-size: 14px; letter-spacing: .06em; }
+:root[data-theme="chic"] .brand-mark { box-shadow: 0 0 0 2px rgba(var(--accent-rgb),.25); }
+:root[data-theme="chic"] .panel-head { letter-spacing: .08em; }
+:root[data-theme="chic"] .panel-head-title { font-size: 12.5px; }
+:root[data-theme="chic"] .stat-row { border-bottom: 1px dotted var(--line); }
+:root[data-theme="chic"] .panel-section { border-bottom: 1px solid var(--line); }
+:root[data-theme="chic"] .chart-title { font-family: var(--display); letter-spacing: .06em; }
+:root[data-theme="chic"] .btn { border-radius: 3px; letter-spacing: .04em; }
+:root[data-theme="chic"] .ctrl-select, :root[data-theme="chic"] .num-field { border-radius: 3px; }
+/* Modern: no chrome on the panel heads, generous radii on everything. */
+:root[data-theme="modern"] .panel-head { border-bottom: none; }
+:root[data-theme="modern"] .btn { border-radius: 9px; }
+:root[data-theme="modern"] .ctrl-select { border-radius: 9px; }
+/* In the bottom band the diagram keeps its rows and the stand table is what scrolls. */
+:root[data-theme="modern"] #millcanvas { flex: 0 0 210px; }
 /* Explicit height, not a flex basis: a canvas carries an intrinsic size from
    its width/height attributes and will happily grow past a basis. */
 /* Sized for the schedule block under each stand - target against actual for
@@ -119,7 +266,7 @@ body.resizing * { cursor: inherit !important; }
    - with a strip band left over that is still worth looking at. Allowed to
    shrink, because the row it lives in is draggable now: the drawing drops the
    lower-priority rows as the space goes rather than overflowing. */
-#millcanvas { flex: 0 1 264px; min-height: 118px; width: 100%; display: block; }
+#millcanvas { flex: 0 1 304px; min-height: 118px; width: 100%; display: block; }
 #standgrid { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 @media (max-width: 1280px) {
@@ -127,27 +274,27 @@ body.resizing * { cursor: inherit !important; }
 }
 
 .panel {
-  background: linear-gradient(180deg, var(--bg-panel), #070b12);
+  background: var(--panel-grad);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 12px 34px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.03);
+  box-shadow: var(--shadow-panel);
 }
 
 /* ── topbar ──────────────────────────────────────────────────────────────── */
 #topbar {
   display: flex; align-items: center; gap: 12px;
   padding: 0 12px; overflow: hidden;
-  background: linear-gradient(180deg, #0c1220, #080c14);
+  background: var(--top-grad);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 10px 28px rgba(0,0,0,.4);
+  box-shadow: var(--shadow-top);
 }
 .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .brand-mark {
   width: 24px; height: 24px; border-radius: 50%; flex: none;
   background:
     radial-gradient(circle at 34% 30%, #9fe9ff 0%, #2aa5d8 40%, #124b68 78%, #0b2b3c 100%);
-  box-shadow: 0 0 0 2px rgba(88,213,255,.18), 0 0 18px rgba(88,213,255,.35);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb),.18), 0 0 18px rgba(var(--accent-rgb),.35);
   position: relative;
 }
 .brand-mark::after {
@@ -155,7 +302,7 @@ body.resizing * { cursor: inherit !important; }
   border-radius: 2px; background: linear-gradient(90deg, transparent, var(--amber), transparent);
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
-.brand-text strong { font-size: 13.5px; letter-spacing: .3px; white-space: nowrap; }
+.brand-text strong { font-size: 13.5px; letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--display); }
 /* The strapline is the one thing here that may be cut: everything else in the
    bar is a control, and a bar that wraps to a second row breaks the layout. */
 .brand-text span {
@@ -174,6 +321,8 @@ body.resizing * { cursor: inherit !important; }
 #topbar-presets .btn-row { flex-wrap: nowrap; }
 #topbar-actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
 #topbar-actions .btn-row { flex-wrap: nowrap; }
+#topbar-actions .topbar-select { width: auto; padding: 4px 6px; font-size: 11px; }
+#topbar-actions .topbar-select:disabled { opacity: .4; cursor: not-allowed; }
 #topbar-badges  { display: flex; gap: 8px; align-items: center; flex: none; }
 #topbar .btn { white-space: nowrap; }
 .badge { white-space: nowrap; }
@@ -200,14 +349,17 @@ body.resizing * { cursor: inherit !important; }
   font-family: var(--sans); font-size: 11.5px; font-weight: 500;
   transition: background .14s, color .14s, border-color .14s, transform .08s;
 }
-.btn:hover { background: #182233; color: var(--fg); border-color: rgba(140,170,210,.22); }
+.btn:hover { background: var(--btn-hover); color: var(--fg); border-color: rgba(var(--line-rgb),.22); }
 .btn:active { transform: translateY(1px); }
 .btn.active, .btn-primary {
-  background: linear-gradient(180deg, rgba(88,213,255,.20), rgba(88,213,255,.08));
-  border-color: rgba(88,213,255,.42);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb),.20), rgba(var(--accent-rgb),.08));
+  border-color: rgba(var(--accent-rgb),.42);
   color: #cbefff;
 }
 .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+/* the three looks, at the far left of the bar */
+#theme-switch { display: flex; gap: 3px; flex: none; }
+#theme-switch .btn { padding: 3px 7px; font-size: 10.5px; border-radius: 6px; }
 
 /* ── panels adapt to their own width ─────────────────────────────────────── */
 /* The side panels are draggable now, so their contents have to answer to the
@@ -249,9 +401,10 @@ body.resizing * { cursor: inherit !important; }
    given an explicit background for that reason, or the rows would show
    through it. */
 .panel-head {
+  font-family: var(--display);
   display: flex; align-items: center; gap: 7px; padding-right: 13px;
   position: sticky; top: 0; z-index: 4;
-  background: linear-gradient(180deg, #0b1019 78%, rgba(11, 16, 25, .82));
+  background: var(--head-grad);
   backdrop-filter: blur(6px);
 }
 .panel-head-btn {
@@ -309,6 +462,7 @@ body.resizing * { cursor: inherit !important; }
   background: rgba(120,190,255,.10); color: #eaf6ff;
 }
 .ctrl.disabled .ctrl-value { cursor: default; }
+.ctrl-hint.hint-bad { color: var(--red); }
 .ctrl-hint { font-size: 10px; color: var(--fg-faint); line-height: 1.4; }
 
 /* ── help markers ────────────────────────────────────────────────────────── */
@@ -316,13 +470,13 @@ body.resizing * { cursor: inherit !important; }
 .help-mark {
   appearance: none; cursor: help;
   width: 13px; height: 13px; padding: 0; border-radius: 50%;
-  background: rgba(140,170,210,.13); border: 1px solid var(--line);
+  background: rgba(var(--line-rgb),.13); border: 1px solid var(--line);
   color: var(--fg-faint); font-family: var(--sans); font-size: 9px; font-weight: 700;
   line-height: 1; display: inline-flex; align-items: center; justify-content: center;
   transition: background .14s, color .14s, border-color .14s;
 }
 .help-mark:hover, .help-mark:focus-visible {
-  background: rgba(88,213,255,.20); border-color: rgba(88,213,255,.5); color: #cbefff;
+  background: rgba(var(--accent-rgb),.20); border-color: rgba(var(--accent-rgb),.5); color: #cbefff;
   outline: none;
 }
 /* On the body, not in the panel: a panel is a scroll box and would clip it. */
@@ -330,7 +484,7 @@ body.resizing * { cursor: inherit !important; }
   position: fixed; z-index: 60; width: 260px;
   padding: 8px 10px; border-radius: 8px;
   background: rgba(10,15,25,.97); backdrop-filter: blur(10px);
-  border: 1px solid rgba(140,170,210,.22);
+  border: 1px solid rgba(var(--line-rgb),.22);
   box-shadow: 0 12px 30px rgba(0,0,0,.6);
   color: var(--fg-dim); font-family: var(--sans); font-size: 10.5px; line-height: 1.5;
   pointer-events: none;
@@ -344,17 +498,17 @@ body.resizing * { cursor: inherit !important; }
 .ctrl-range::-webkit-slider-runnable-track {
   height: 4px; border-radius: 3px;
   background:
-    linear-gradient(90deg, var(--accent-dk) 0 var(--fill), rgba(140,170,210,.14) var(--fill) 100%);
+    linear-gradient(90deg, var(--accent-dk) 0 var(--fill), rgba(var(--line-rgb),.14) var(--fill) 100%);
 }
 .ctrl-range::-webkit-slider-thumb {
   appearance: none; width: 13px; height: 13px; margin-top: -4.5px;
   border-radius: 50%; background: #dff4ff;
   border: 2px solid #0a0e17;
-  box-shadow: 0 0 0 1px rgba(88,213,255,.7), 0 2px 6px rgba(0,0,0,.6);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb),.7), 0 2px 6px rgba(0,0,0,.6);
   transition: transform .1s;
 }
 .ctrl-range:hover::-webkit-slider-thumb { transform: scale(1.18); }
-.ctrl-range::-moz-range-track { height: 4px; border-radius: 3px; background: rgba(140,170,210,.14); }
+.ctrl-range::-moz-range-track { height: 4px; border-radius: 3px; background: rgba(var(--line-rgb),.14); }
 .ctrl-range::-moz-range-progress { height: 4px; border-radius: 3px; background: var(--accent-dk); }
 .ctrl-range::-moz-range-thumb {
   width: 12px; height: 12px; border-radius: 50%; background: #dff4ff; border: 2px solid #0a0e17;
@@ -365,14 +519,14 @@ body.resizing * { cursor: inherit !important; }
   background: var(--bg-sunken); color: var(--fg);
   border: 1px solid var(--line); font-family: var(--sans); font-size: 11.5px;
 }
-.ctrl-select:focus { outline: none; border-color: rgba(88,213,255,.5); }
+.ctrl-select:focus { outline: none; border-color: rgba(var(--accent-rgb),.5); }
 
 /* ── toggles ─────────────────────────────────────────────────────────────── */
 .ctrl-toggle { display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
 .ctrl-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 .toggle-track {
   width: 30px; height: 17px; border-radius: 9px; flex: none;
-  background: rgba(140,170,210,.14); border: 1px solid var(--line);
+  background: rgba(var(--line-rgb),.14); border: 1px solid var(--line);
   transition: background .16s, border-color .16s; position: relative;
 }
 .toggle-knob {
@@ -380,7 +534,7 @@ body.resizing * { cursor: inherit !important; }
   background: var(--fg-faint); transition: transform .16s, background .16s;
 }
 .ctrl-toggle input:checked + .toggle-track {
-  background: rgba(88,213,255,.28); border-color: rgba(88,213,255,.5);
+  background: rgba(var(--accent-rgb),.28); border-color: rgba(var(--accent-rgb),.5);
 }
 .ctrl-toggle input:checked + .toggle-track .toggle-knob {
   transform: translateX(13px); background: #cfefff;
@@ -488,14 +642,18 @@ body.resizing * { cursor: inherit !important; }
 .sw-fem { background: #7fe4ff; }
 .sw-tau { background: #ffb26e; }
 .sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
+.sw-kf  { background: #96e6b4; }
 #nip, #agcscatter { flex: 1; width: 100%; min-height: 0; display: block; }
 
 /* Two charts share the bottom row; the scatter only appears under gap control,
    and the friction hill keeps the whole width whenever it is hidden. */
 .chart-cell { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .chart-cell[hidden] { display: none; }
-#chart-nip { flex: 1.45; }
-#chart-agc { flex: 1; border-left: 1px solid var(--line); padding-left: 12px; }
+/* The hill's share of the band is a draggable boundary (see layout.ts); with
+   the trail hidden there is nothing to share and the hill takes the band. */
+#chart-nip { flex: 0 0 var(--chart-nip, 59%); }
+#bottom:has(> #chart-agc[hidden]) #chart-nip { flex: 1 1 0; }
+#chart-agc { flex: 1 1 0; border-left: 1px solid var(--line); padding-left: 12px; }
 
 /* ── budget chart ────────────────────────────────────────────────────────── */
 .spark { width: 100%; height: 66px; display: block; border-radius: 7px; overflow: hidden; }
@@ -503,7 +661,7 @@ body.resizing * { cursor: inherit !important; }
 .spark-legend span { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--fg-faint); }
 .spark-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 
-.meter { height: 5px; border-radius: 3px; background: rgba(140,170,210,.12); overflow: hidden; }
+.meter { height: 5px; border-radius: 3px; background: rgba(var(--line-rgb),.12); overflow: hidden; }
 .meter > div { height: 100%; border-radius: 3px; transition: width .2s; }
 
 /* ── toast ───────────────────────────────────────────────────────────────── */
@@ -515,14 +673,14 @@ body.resizing * { cursor: inherit !important; }
   max-width: min(560px, 84vw);
   padding: 9px 16px; border-radius: 9px;
   background: rgba(12, 18, 30, .96); backdrop-filter: blur(10px);
-  border: 1px solid rgba(88, 213, 255, .38);
+  border: 1px solid rgba(var(--accent-rgb), .38);
   box-shadow: 0 14px 36px rgba(0, 0, 0, .6);
   color: var(--fg); font-family: var(--sans); font-size: 11.5px; line-height: 1.5;
   opacity: 0; transition: opacity .28s, transform .28s;
   pointer-events: none;
 }
 .toast.in { opacity: 1; transform: translate(-50%, 0); }
-.toast.bad { border-color: rgba(255, 107, 129, .55); color: #ffd6dd; }
+.toast.bad { border-color: rgba(var(--red-rgb), .55); color: #ffd6dd; }
 
 /* One row per stand, with the tag as a chip in its own column - so the eye
    lands on "which stand" before reading anything else, and several stands'
@@ -539,7 +697,7 @@ body.resizing * { cursor: inherit !important; }
 .toast-tag {
   flex: none; min-width: 30px; text-align: center;
   padding: 1px 6px; border-radius: 5px;
-  background: rgba(140, 170, 210, .16); border: 1px solid var(--line);
+  background: rgba(var(--line-rgb), .16); border: 1px solid var(--line);
   font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--fg);
 }
 .toast.bad .toast-tag {
@@ -586,15 +744,15 @@ body.resizing * { cursor: inherit !important; }
    Absolutely positioned rather than a grid item, so it cannot displace a cell. */
 .sg-colsel {
   position: absolute; top: 2px; pointer-events: none; border-radius: 7px;
-  background: rgba(88, 213, 255, .05);
-  box-shadow: inset 0 0 0 1px rgba(88, 213, 255, .17);
+  background: rgba(var(--accent-rgb), .05);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), .17);
   transition: left .16s ease, width .16s ease;
 }
 .stand-grid .sg-head {
   font-weight: 700; text-align: center; color: var(--fg-dim);
   padding: 2px 0 4px; letter-spacing: .04em;
 }
-.stand-grid .sg-head.sel { color: #cbefff; text-shadow: 0 0 10px rgba(88,213,255,.35); }
+.stand-grid .sg-head.sel { color: #cbefff; text-shadow: 0 0 10px rgba(var(--accent-rgb),.35); }
 .stand-grid .sg-label { color: var(--fg-faint); white-space: nowrap; }
 .stand-grid .sg-unit { color: var(--fg-faint); font-size: 10px; }
 .stand-grid .sg-now {
@@ -611,6 +769,32 @@ body.resizing * { cursor: inherit !important; }
   font: inherit; font-variant-numeric: tabular-nums; text-align: right;
 }
 .num-field:focus { outline: none; border-color: rgba(120,190,255,.7); background: rgba(120,190,255,.10); }
+/* A target the current control mode is not driving to. Dimmed rather than
+   hidden: the number is still live in the row below and still what the other
+   mode would pick up, so it has to stay readable - it just is not an input. */
+.num-field:disabled {
+  opacity: .38; cursor: default;
+  background: transparent; border-style: dashed;
+}
+.num-field:disabled::-webkit-inner-spin-button { display: none; }
+/* A back-calculated friction. Red because it is the one cell in the table that
+   is not an input any more - it was solved for, from the load two rows up, and
+   it needs to be obvious that typing over it is throwing an answer away. */
+.num-field.mu-inv {
+  border-color: rgba(var(--red-rgb), .85);
+  background: rgba(var(--red-rgb), .16);
+  color: #ffd6dd; font-weight: 700;
+}
+/* Still red - it is still a back-calculated number - but struck through and
+   dimmed: an input it was derived from has been edited since, so it no longer
+   explains the load in the table. Nothing recomputes on its own here; the
+   cell's job is to stop claiming to be current. */
+.num-field.mu-inv.mu-inv-stale {
+  color: rgba(255, 214, 221, .55);
+  background: rgba(var(--red-rgb), .07);
+  border-style: dashed;
+  text-decoration: line-through;
+}
 .num-field::-webkit-inner-spin-button { opacity: .35; }
 
 .stand-grid .sg-select {

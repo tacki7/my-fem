@@ -14,3 +14,6 @@ pic/
 
 # Build and tool noise
 *.log
+
+# Plots and CSV written by tools/tandem_tension.py
+tools/out/

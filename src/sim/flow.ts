@@ -114,6 +114,8 @@ export interface FlowInput {
    * flattening loop starts chasing it.
    */
   contactWeight: Float64Array;
+  /** constrain the entry node along the mean slope of its two facets rather than radially - see `applyInterface` */
+  entryBisector: boolean;
   /** Coulomb friction coefficient */
   mu: number;
   /** friction regularisation velocity [m/s] */
@@ -549,15 +551,40 @@ export class FlowSolver {
     for (let i = inp.contactFrom; i <= inp.contactTo; i++) {
       const nd = m.topNodes[i];
       const px = m.X[2 * nd], py = m.X[2 * nd + 1];
-      let nx = px - inp.rollCx, ny = py - inp.rollCy;
-      const L = Math.hypot(nx, ny) || 1;
-      nx /= L; ny /= L;
+      let nx: number, ny: number;
+      const w = inp.contactWeight[i];
+      if (inp.entryBisector && i === inp.contactFrom && w < 0.999 && i > 0 && i < m.nx) {
+        // The entry node sits on the bite entry itself (the mesh keeps a
+        // column there), with the surface flat on its upstream side and on
+        // the barrel downstream. Pinned to the barrel's radial direction it
+        // would be sent downward across a facet that is still horizontal -
+        // measured, that pushed 1.1 % of the throughput in through the top of
+        // the strip and put a pressure spike at the entry. A steady surface
+        // with a kink in it wants the streamline condition on the mean slope
+        // of the two facets, which is what the free surface further upstream
+        // gets as well; the difference here is only that this node also
+        // carries friction, over the half of its tributary that is on the
+        // roll. Written with the normal pointing into the roll and the
+        // tangent along +x, the same handedness as the radial pair below.
+        const dxs = m.X[2 * m.topNodes[i + 1]] - m.X[2 * m.topNodes[i - 1]];
+        const dys = m.X[2 * m.topNodes[i + 1] + 1] - m.X[2 * m.topNodes[i - 1] + 1];
+        const sp = Math.abs(dxs) > 1e-12 ? dys / dxs : 0;
+        const L = Math.hypot(sp, 1);
+        nx = sp / L; ny = -1 / L;
+      } else {
+        nx = px - inp.rollCx; ny = py - inp.rollCy;
+        const L = Math.hypot(nx, ny) || 1;
+        nx /= L; ny /= L;
+      }
       // for omega > 0 the barrel material runs along +t at the bite
       const tx = -ny, ty = nx;
       const iPrev = Math.max(inp.contactFrom, i - 1);
       const iNext = Math.min(inp.contactTo, i + 1);
       const seg = Math.max(
         (m.X[2 * m.topNodes[iNext]] - m.X[2 * m.topNodes[iPrev]]) / (iNext - iPrev), 1e-9);
+      // the length of this node's tributary that is actually on the roll -
+      // half a column at either end of the arc, the whole column between
+      const onRoll = Math.max(seg * Math.min(1, Math.max(w, 0)), 1e-12);
       this.ifActive[i] = 1;
 
       // No penetration through the barrel. The penalty is a multiple of the
@@ -569,9 +596,9 @@ export class FlowSolver {
       const vTan = this.v[2 * nd] * tx + this.v[2 * nd + 1] * ty;
       const slip = vTan - inp.vRoll;
       this.ifSlip[i] = slip;
-      const cap = inp.mu * Math.max(this.ifPressure[i], 0) * seg;
+      const cap = inp.mu * Math.max(this.ifPressure[i], 0) * onRoll;
       const fT = -cap * (2 / Math.PI) * Math.atan(slip / inp.vSlip0);
-      this.ifShear[i] = fT / seg;
+      this.ifShear[i] = fT / onRoll;
       const dfd = (cap * (2 / Math.PI)) / (inp.vSlip0 * (1 + (slip / inp.vSlip0) ** 2));
       addBlock(nd, tx, ty, dfd);
       const c = fT + dfd * vTan;

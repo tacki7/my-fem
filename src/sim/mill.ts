@@ -172,6 +172,15 @@ export class Mill {
   private histAt = 0;
   /** consecutive frames each stand has been held, so a hold cannot be forever */
   private heldFor: number[] = [];
+  /**
+   * The conditions each stand was last synced to - a copy, never the solver's
+   * own `params`. What "the conditions changed" means for a stand that has
+   * given up on divergence: the toast promises that editing 圧下量・摩擦係数・
+   * 張力 restarts it, and the only way to keep that promise for every path an
+   * edit can take (the table, the dials, the query, a preset) is to notice the
+   * change here, where every path ends up.
+   */
+  private cond: RollingParams[] = [];
 
   diag: MillDiagnostics = emptyMillDiag();
 
@@ -207,6 +216,7 @@ export class Mill {
     this.fittedH0 = [];
     this.h1Hist = [];
     this.heldFor = [];
+    this.cond = [];
     this.histAt = 0;
     let hIn = base.h0;
     for (let k = 0; k < setups.length; k++) {
@@ -229,6 +239,7 @@ export class Mill {
         feedSpeed: 0,
       };
       this.stands.push(new RollingSim(p));
+      this.cond.push({ ...p });
       this.fittedH0.push(hIn);
       this.h1Hist.push(new Array(STEADY_WINDOW).fill(0));
       this.heldFor.push(0);
@@ -268,6 +279,7 @@ export class Mill {
       feedSpeed: 0,
     };
     this.stands[k] = new RollingSim(p);
+    this.cond[k] = { ...p };
     this.fittedH0[k] = hIn;
     this.h1Hist[k] = new Array(STEADY_WINDOW).fill(0);
     this.heldFor[k] = 0;
@@ -325,17 +337,42 @@ export class Mill {
       // real entry every frame and never arrived, leaving every reduction
       // reading cumulative from the line entry instead of its own.
       const chained = k === 0 ? this.h0 : p.h0;
-      Object.assign(p, base);
-      p.h0 = chained;
-      p.R = s.R;
-      p.mu = s.mu;
-      p.reduction = s.reduction;
-      p.agcTargetForce = s.targetForce;
-      p.agcTargetGauge = s.targetGauge;
-      p.agcMode = s.agcMode;
-      p.backTension = this.backOf(setups, k);
-      p.frontTension = s.frontTension;
+      const next: RollingParams = {
+        ...base,
+        h0: chained,
+        R: s.R,
+        mu: s.mu,
+        reduction: s.reduction,
+        agcTargetForce: s.targetForce,
+        agcTargetGauge: s.targetGauge,
+        agcMode: s.agcMode,
+        backTension: this.backOf(setups, k),
+        frontTension: s.frontTension,
+      };
+      // A stand that has given up restarting was told it would try again once
+      // the conditions changed. Compared against the last sync, not against
+      // `p`: the table writes some of these straight into the solver (a
+      // reduction through `recommand`, a gauge target through `retarget`), and
+      // those would already agree by the time this ran. `h0` is left out of
+      // the comparison: for stands 1..n-1 it is the chained entry gauge that
+      // `advance` moves every frame, and forgiving on that would let a stand
+      // downstream of a still-settling one restart forever. An edit to the
+      // line's own h0 rebuilds the line, which forgives on its own.
+      if (this.condChanged(k, next)) this.stands[k].forgiveDivergence();
+      this.cond[k] = next;
+      Object.assign(p, next);
     }
+  }
+
+  /** Whether anything a stand solves against differs from the last sync. */
+  private condChanged(k: number, next: RollingParams): boolean {
+    const prev = this.cond[k];
+    if (!prev) return false;
+    for (const key of Object.keys(next) as (keyof RollingParams)[]) {
+      if (key === 'h0') continue;
+      if (prev[key] !== next[key]) return true;
+    }
+    return false;
   }
 
   /** Put every stand's screws back on its commanded reduction. */
@@ -360,6 +397,10 @@ export class Mill {
   resetStand(k: number): void {
     const st = this.stands[k];
     if (!st) return;
+    // A manual restart is the operator saying "try again": a stand that had
+    // stopped restarting itself gets its five attempts back, or the fresh
+    // state would converge and the badge go on saying 発散.
+    st.forgiveDivergence();
     st.resetState();
     this.h1Hist[k] = new Array(STEADY_WINDOW).fill(0);
     this.heldFor[k] = 0;
@@ -423,8 +464,17 @@ export class Mill {
       if (q > 0 && Number.isFinite(q)) {
         for (let k = 1; k < n; k++) {
           const st = this.stands[k];
-          const hOut = st.diag.exitThickness > 0
-            ? st.diag.exitThickness : st.params.h0 * (1 - st.params.reduction);
+          // On the gauge the stand is *aiming at*, not the one it is making
+          // this frame. Pitched from the live exit gauge, the cone closed a
+          // loop through the stand itself: h1 up -> ω down -> feed re-balances
+          // -> load and gauge move -> ..., and the last stand of a line hunted
+          // at +-0.25 um for as long as it ran, never inside its band. Under
+          // load control there is no gauge target, so the live gauge is all
+          // there is; there the loop is on the load and the coupling is weak.
+          const mode = st.params.agcMode;
+          const hOut = (mode === 'gauge' || mode === 'ratio') ? st.agcSetpoint
+            : st.diag.exitThickness > 0 ? st.diag.exitThickness
+              : st.params.h0 * (1 - st.params.reduction);
           if (hOut > 0) st.params.omega = q / hOut / Math.max(st.params.R, 1e-9);
         }
       }
@@ -439,7 +489,7 @@ export class Mill {
     let upstreamSteady = true;
     for (let k = 0; k < n; k++) {
       const st = this.stands[k];
-      const want = !upstreamSteady;
+      const want = !upstreamSteady && st.params.lineHold;
       if (want && this.heldFor[k] < HOLD_MAX) {
         st.holdGap = true;
         this.heldFor[k]++;
@@ -463,6 +513,10 @@ export class Mill {
       // what a stand set to its own entry actually does.
       if (st.gaugeIdle) { st.passThrough(); continue; }
       st.advance(dt);
+      // A stand that has gone to NaN restarts itself here, before the line
+      // reads it: downstream stands take their entry gauge from this one,
+      // and a NaN handed on is a line gone, not a stand.
+      st.recoverIfDiverged(performance.now());
     }
     this.collect();
   }
