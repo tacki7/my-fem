@@ -1680,6 +1680,20 @@ export class RollingSim {
       eps0: p.eps0Frac * nominalRate,
       muRef,
       muCap: p.elasticZones ? Gs * tRef : muRef * 150,
+      // The elastic overlay puts the bulk modulus times the transit time
+      // here. Known cost (2026-09-12): a bulk *viscosity* is not a bulk
+      // *modulus* - p = -K_v div v integrates along a streamline to a volume
+      // change -(1/K_v)∫p dt that is not a state and does not return to zero
+      // when the pressure does. The flux falls 0.28 % through the bite (p/K,
+      // as an elastic compression would) and comes back to 0.9974, not 1:
+      // each stand delivers 0.26-0.43 % less volume than it takes in. A
+      // stiffer penalty conserves it (0.9998 at 1e4 mu_ref) but the
+      // load -> flattening -> gap loop of the downstream stands has its gain
+      // in this stiffness: at 1000 mu_ref load control on #2/#3 no longer
+      // settles, at 2000 gauge control with the tension model on runs away,
+      // at 1e4 every mode does. K t (175-540 mu_ref here) is where the loops
+      // are damped enough, so it stays; the honest cure is a volumetric
+      // *state* that recovers, or more damping in the flattening coupling.
       kBulk: p.elasticZones ? Ks * tRef : p.incompPenalty * muRef,
       backTension: p.backTension,
       frontTension: p.frontTension,

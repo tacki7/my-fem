@@ -3637,6 +3637,35 @@ if (DEBUG_TITLE) {
       }
       return { arc: st.diag.arcLength * 1000, neutralX: st.diag.neutralX * 1000, elasticEntry: st.diag.elasticEntryLen * 1000, elasticExit: st.diag.elasticExitLen * 1000, cols: out };
     },
+    /**
+     * Streamline test on the strip's top surface, per column: the surface
+     * velocity against the slope of the mesh surface it sits on and against
+     * the slope of the undeformed roll circle the contact constraint uses.
+     * `rMesh` = v_y − v_x·s'_mesh is the rate at which volume crosses the
+     * mesh surface; its running integral is what the flux profile shows.
+     */
+    streamline: (k: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const m = st.flow.mesh, v = st.flow.v;
+      const s = st as unknown as { cy: number; roll: { cx: number } };
+      const out: { x: number; on: number; vx: number; vy: number; sMesh: number; sCirc: number; rMesh: number; rCirc: number; hyd: number }[] = [];
+      for (let i = 0; i <= m.nx; i++) {
+        const nd = m.topNodes[i];
+        const ip = Math.min(m.nx, i + 1), im = Math.max(0, i - 1);
+        const dx = m.X[2 * m.topNodes[ip]] - m.X[2 * m.topNodes[im]];
+        const dy = m.X[2 * m.topNodes[ip] + 1] - m.X[2 * m.topNodes[im] + 1];
+        const sMesh = Math.abs(dx) > 1e-12 ? dy / dx : 0;
+        const px = m.X[2 * nd], py = m.X[2 * nd + 1];
+        const nx = px - s.roll.cx, ny = py - s.cy;
+        const sCirc = Math.abs(ny) > 1e-12 ? -nx / ny : 0;
+        const vx = v[2 * nd], vy = v[2 * nd + 1];
+        // hydrostatic stress of the top element to the left of the column [MPa]
+        const ei = Math.min(m.nx - 1, Math.max(0, i - 1)) * m.ny + (m.ny - 1);
+        const hyd = st.flow.elemStress[4 * ei + 3] / 1e6;
+        out.push({ x: px * 1000, on: st.flow.ifActive[i], vx, vy, sMesh, sCirc, rMesh: vy - vx * sMesh, rCirc: vy - vx * sCirc, hyd });
+      }
+      return out;
+    },
     /** the interstand gaps as the line carries them; MPa, %, ms, m */
     tension: () => {
       const md = mill.diag;
