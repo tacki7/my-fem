@@ -231,7 +231,7 @@ const params: RollingParams = {
   // on by default. With a rigid stand the only spring is the roll flattening,
   // which is what every number in docs/validation.md was measured against -
   // switch this off to reproduce them.
-  millSpringOn: true, millModulus: (5 * MN_PER_MM) / 1.0,
+  millSpringOn: true, millModulus: (5.8 * MN_PER_MM) / 1.0,
   // 2 %, not the 30 % this used to be. The 30 % was a validity guard - the
   // mass balance was said to break past 70 % reduction - and it stopped
   // every deep pass at a rail with a red 'saturated' and no way through.
@@ -302,7 +302,7 @@ const view = {
    * way a stand is specified. `syncMillModulus` divides it by the strip width
    * for the plane-strain solver.
    */
-  millModulusMNmm: 5,
+  millModulusMNmm: 5.8,
 };
 
 /* ── query string overrides ──────────────────────────────────────────────── */
