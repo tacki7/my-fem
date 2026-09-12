@@ -212,6 +212,10 @@ const params: RollingParams = {
   // ignore. Tightening it costs settle time and buys precision one for one -
   // see docs/validation.md for the measured trade at 1e-6 and 1e-7.
   agcGain: 0.6, agcEvery: 4, agcDeadband: 1e-6, agcMaxStep: 0.02,
+  // Screwdown actuator: on, 0.3 mm/s, 0.1 s. Every settle time in
+  // docs/validation.md before 2026-09-12 was measured with the screws
+  // teleporting; switch this off to reproduce those.
+  screwDyn: true, screwRate: 0.3e-3, screwTau: 0.2,
   agcSpringComp: true,
   // Off: measured on a three-stand line under 圧下率一定, holding each stand
   // until the one ahead was still cost #2 its first 17 s (against 3 s) and
@@ -1788,6 +1792,32 @@ const sAgcStep = slider({
       + 'ここはトリムの幅を決める）。区間法では「区間を挟むまでの初手の幅」として使い、挟んだあとは効かない。',
   onInput: (v) => { params.agcMaxStep = v; },
 });
+/* ── screwdown actuator ─────────────────────────────────────────────────── */
+const screwDials: { setEnabled(on: boolean): void }[] = [];
+const tScrewDyn = toggle('圧下装置の動特性（速度制限 ＋ 一次遅れ）', params.screwDyn, (v) => {
+  params.screwDyn = v;
+  for (const d of screwDials) d.setEnabled(v);
+},
+  'ON: 制御ループの 1 手は「指令」になり、実際のスクリューは速度上限と一次遅れで指令を追う（実機の圧下装置。tension-lab の図 5.15 の簡略版）。'
+    + 'ハウジング伸び P/M はこれまでどおり読みから瞬時に引く（ゲージメータ補正。伸びをスクリューに払わせる版は発散した — solver.ts 参照）ので、'
+    + '荷重が急変した瞬間の読みの跳びは残る。ループは到達（0.2 µm 以内）を待ってから次の手を打つので同定は乱れないが、手ごとの待ちが増えて収束は遅くなる。'
+    + 'リセット直後 2 s（通板）は従来どおり瞬時に置く。OFF: 1 手が同じフレームで反映され、伸びは読みから瞬時に引く（階段状。docs/validation.md の収束時間はこちらで測った値）。');
+const sScrewRate = slider({
+  label: '圧下速度上限', unit: 'mm/s', min: 0.02, max: 5, log: true, value: params.screwRate * 1000,
+  format: (v) => (v < 1 ? v.toFixed(2) : v.toFixed(1)),
+  hint: 'スクリューの最大移動速度。電動圧下は 0.1〜0.5 mm/s、油圧圧下は数 mm/s。既定 0.3 mm/s（1 手の上限 40 µm なら 0.13 s、目標変更の一発移動 数百 µm で 1〜2 s）。'
+    + '読み S = 間隔 − P/M は間隔の移動に荷重変化分（1 + Q/M ≈ 3 倍）が乗るので、グラフ上は設定速度の数倍で動いて見える。',
+  onInput: (v) => { params.screwRate = v / 1000; },
+});
+const sScrewTau = slider({
+  label: '圧下の時定数', unit: 's', min: 0.02, max: 1, log: true, value: params.screwTau,
+  format: (v) => v.toFixed(2),
+  hint: '指令に対するスクリュー位置の一次遅れ。小さい移動は速度上限に当たらず、この時定数で滑らかに寄る。既定 0.2 s。',
+  onInput: (v) => { params.screwTau = v; },
+});
+screwDials.push(sScrewRate, sScrewTau);
+for (const d of screwDials) d.setEnabled(params.screwDyn);
+
 const agcResetHint = el('div', 'ctrl-hint');
 agcResetHint.textContent =
   'スクリューを h₀(1−r) に戻し、同定したゲインを忘れる。OFF ではそこで止まり、'
@@ -1800,6 +1830,7 @@ sAgc.body.append(agcHint, agcTargetHint,
   }]),
   agcResetHint, tSpringComp.root, springCompHint, sAgcMethod.root, methodHint,
   sAgcGain.root, sAgcDb.root, sAgcEvery.root, sAgcStep.root,
+  tScrewDyn.root, sScrewRate.root, sScrewTau.root,
   sFloor.root, floorHint);
 syncMethodHint();
 
@@ -3020,7 +3051,7 @@ function pushTensionSample(): void {
   // against - the loops aim at a gauge or a load, and the screw is the means.
   screwChart.push(
     stands.map((st) => (Number.isFinite(st.screwPosition) ? st.screwPosition * 1000 : NaN)),
-    stands.map(() => NaN));
+    stands.map((st) => (params.screwDyn && Number.isFinite(st.diag.screwCommand) ? st.diag.screwCommand * 1000 : NaN)));
 }
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
@@ -3432,6 +3463,8 @@ if (DEBUG_TITLE) {
         agcSetpoint: st.agcSetpoint * 1000,
         h1Command: st.h1Command * 1000,
         gap: st.h1 * 1000,
+        screwCommand: d.screwCommand * 1000,
+        screwTravel: st.screwTravel * 1e6,
         millSpring: d.millSpring * 1000,
         gaugeFloor: st.gaugeFloor * 1000,
         gaugeIdleLive: st.gaugeIdle,

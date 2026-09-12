@@ -137,6 +137,10 @@ const ENTRY_HOLDOFF = 60;
 const MESH_QUANTUM = 2.5e-3;
 /** the gap loop holds while the mesh entry is further than this from the crossing, in columns */
 const MESH_SETTLED = 0.1;
+/** screws within this of their command count as arrived [m] */
+const SCREW_ARRIVED = 0.2e-6;
+/** frames after a reset during which the screws still teleport: threading, not rolling */
+const SCREW_WARM = 120;
 
 /**
  * How far the error may wander before a settled loop is unsettled again,
@@ -385,6 +389,18 @@ export interface RollingParams {
   agcDeadband: number;
   /** largest single screw move, as a fraction of h0 */
   agcMaxStep: number;
+  /**
+   * Screwdown actuator dynamics. Off, the screws are wherever the loop last
+   * put them, the same frame. On, the loop's move is a *command* and the
+   * screws follow it with a speed limit and a first-order lag - the way a
+   * screwdown actually moves - and the loop waits for them to arrive before
+   * it reads the plant again.
+   */
+  screwDyn: boolean;
+  /** screw speed limit [m/s] */
+  screwRate: number;
+  /** first-order lag of the screw position behind its command [s] */
+  screwTau: number;
   /**
    * Whether a stand waits for the stands ahead of it to settle before its gap
    * loop moves. Off by default; see `Mill.advance` for what it was for and
@@ -694,6 +710,8 @@ export interface RollingDiagnostics {
   reductionRatio: number;
   /** unloaded roll gap the screws are holding [m]; the AGC's actuator */
   gapCommand: number;
+  /** where the gap loop has asked the screws to go [m]; equals `gapCommand` once they arrive */
+  screwCommand: number;
   /** mill spring: how much thicker the strip leaves than the screws are set [m] */
   millSpring: number;
   /** the housing/screw part of that spring, P/M [m]; 0 with a rigid stand */
@@ -957,6 +975,10 @@ export class RollingSim {
   holdGap = false;
   /** commanded, unloaded roll gap [m]: where the screws are */
   private gap = 0;
+  /** the loaded separation the loop has asked for; `gap` follows it through the actuator */
+  private gapCmd = 0;
+  /** frames since the last reset; the actuator only engages once the pass is threaded */
+  private screwWarm = 0;
   /** low-passed housing stretch under load [m]; 0 with a rigid stand */
   private stretch = 0;
 
@@ -1282,7 +1304,9 @@ export class RollingSim {
     this.time = 0;
     this.phase = 0;
     this.stretch = 0;
+    this.screwWarm = 0;
     this.releaseGap();
+    this.snapScrew();
     this.rollU.fill(0);
     this.rollUrel.fill(0);
     this.rollDeformed = false;
@@ -1706,8 +1730,10 @@ export class RollingSim {
     this.applyLoadModel();
     // The stand gives first, then the screws move to answer it, and only then
     // is the strip re-laid into the gap the pair leaves behind.
+    this.screwWarm++;
     this.updateMillStretch();
     this.updateAgc();
+    this.moveScrew(frameDt);
     this.updateGap();
     this.lastRollMs = performance.now() - tr;
 
@@ -2148,7 +2174,43 @@ export class RollingSim {
     // A non-finite gap would translate the roll mesh into nothing and there is
     // no way back from that, so refuse it here rather than anywhere upstream.
     if (!Number.isFinite(h)) return;
-    this.gap = Math.max(this.gapLo(), Math.min(this.gapHi(), h));
+    this.gapCmd = Math.max(this.gapLo(), Math.min(this.gapHi(), h));
+    // Without actuator dynamics the screws are there this frame, as they
+    // always were; with them, `moveScrew` walks the screw over the frames.
+    if (!this.screwDynActive()) this.snapScrew();
+  }
+
+  /** Put the screws on their command at once - a reset, not a move. */
+  private snapScrew(): void {
+    if (this.gap === this.gapCmd) return;
+    this.gap = this.gapCmd;
+    this.placeRoll();
+  }
+
+  /** How far the screws still have to travel to their command [m]. */
+  get screwTravel(): number { return this.gapCmd - this.gap; }
+
+  /**
+   * One frame of the screwdown actuator: the gap approaches its command with
+   * a first-order lag, never faster than the speed limit, and snaps the last
+   * fraction of a micron so the loop's arrival test has an end.
+   *
+   * Before this the loop wrote the screw position outright every `agcEvery`
+   * frames, and the trace of it was a staircase - moves of tens of microns
+   * landing in one frame, which no screwdown does.
+   */
+  private moveScrew(dt: number): void {
+    const p = this.params;
+    if (!this.screwDynActive()) { this.snapScrew(); return; }
+    if (!(dt > 0)) return;
+    const d = this.gapCmd - this.gap;
+    if (d === 0) return;
+    if (Math.abs(d) <= SCREW_ARRIVED) { this.snapScrew(); return; }
+    const rate = Math.max(p.screwRate, 1e-9);
+    const v = Math.max(-rate, Math.min(rate, d / Math.max(p.screwTau, 1e-3)));
+    let step = v * dt;
+    if (Math.abs(step) > Math.abs(d)) step = d;
+    this.gap += step;
     this.placeRoll();
   }
 
@@ -2230,6 +2292,23 @@ export class RollingSim {
     this.stretch = Math.max(P, 0) / p.millModulus;
     d.millStretch = this.stretch;
     d.millResidual = 0;
+  }
+
+  /**
+   * The actuator is on and the pass is threaded.
+   *
+   * The actuator moves the *commanded separation*, not the physical screw.
+   * Making the screw the state and letting the housing stretch open the
+   * barrel until the screw paid for it was tried (2026-09-12) on top of the
+   * two attempts described in `updateMillStretch`, with the stretch relaxed
+   * onto P/M and the gap loop gated on arrival: the barrel-load iteration
+   * still went unstable within thirty seconds and the solve reached NaN. So
+   * the gaugemeter compensation stays instantaneous - the screw reading
+   * still follows the load at once - and what the actuator smooths is every
+   * move the loop asks for.
+   */
+  private screwDynActive(): boolean {
+    return this.params.screwDyn && this.screwWarm >= SCREW_WARM;
   }
 
   /**
@@ -2351,6 +2430,16 @@ export class RollingSim {
     if (held) d.agcSaturated = false;
 
     if (this.holdGap) {
+      d.agcSettled = false;
+      d.agcStalled = true;
+      return;
+    }
+    // The screws are still on their way to the last command: nothing the
+    // plant says yet belongs to that command, and a revision identified off
+    // it would pair a move the screws have not made with a response they
+    // have not given. Wait for them - the same rule as the mesh and feed
+    // gates below.
+    if (this.screwDynActive() && Math.abs(this.gapCmd - this.gap) > SCREW_ARRIVED) {
       d.agcSettled = false;
       d.agcStalled = true;
       return;
@@ -3005,6 +3094,7 @@ export class RollingSim {
     // Physical readouts: the screw a stand would show, and the spring
     // measured against it - flattening, springback and housing stretch.
     d.gapCommand = this.screwPosition;
+    d.screwCommand = this.gapCmd - this.stretch;
     d.millSpring = d.exitThickness - this.screwPosition;
     d.gapLimitLo = this.gapLo() - this.stretch;
     d.gapLimitHi = this.gapHi() - this.stretch;
@@ -3292,7 +3382,7 @@ function emptyDiag(): RollingDiagnostics {
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,
     elasticEntryTheory: 0, elasticEntryHertz: 0,
     springback: 0, exitThicknessGap: 0, elasticEntryCompression: 0,
-    gapCommand: 0, millSpring: 0, millStretch: 0, millResidual: 0,
+    gapCommand: 0, screwCommand: 0, millSpring: 0, millStretch: 0, millResidual: 0,
     gapLimitLo: 0, gapLimitHi: 0,
     agcMeasured: 0, agcError: 0, agcSettled: false,
     agcSaturated: false, agcStalled: false, agcIdle: false, agcSensitivity: 0,
