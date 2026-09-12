@@ -753,3 +753,289 @@ export class AgcScatterChart {
     }
   }
 }
+
+/* ── a quantity against its target over time ─────────────────────────────── */
+
+const GAP_COLORS = [
+  'rgba(127,228,255,0.95)', 'rgba(255,178,110,0.95)', 'rgba(170,255,150,0.95)',
+  'rgba(255,140,200,0.95)', 'rgba(220,200,120,0.95)', 'rgba(160,170,255,0.95)',
+  'rgba(255,120,120,0.95)',
+];
+
+export interface TrackChartOpts {
+  /** axis unit, drawn in the corner */
+  unit: string;
+  /** decimals on the ticks and the end labels */
+  digits: number;
+  /** scale from zero to the peak (a tension) or fit the data (a gauge) */
+  fromZero: boolean;
+}
+
+/**
+ * Rolling time chart of several quantities, each against its target: the
+ * live value as a line and the target as a dashed one in the same colour.
+ * One sample per solved frame; the window is the last `len` samples, so at
+ * 60 Hz the default shows the last ten seconds of real time. A series sitting
+ * on its target reads as two lines on top of each other and one hunting reads
+ * as a wave around a rule. Used for the interstand tensions (from zero, MPa)
+ * and the exit gauges (fitted, mm).
+ */
+export class TrackChart {
+  private canvas: HTMLCanvasElement;
+  private len: number;
+  private opts: TrackChartOpts;
+  private head = 0;
+  private filled = 0;
+  private actual: Float32Array[] = [];
+  private target: Float32Array[] = [];
+  /** wall-clock time of each sample [s], so the axis is time and not frames */
+  private times: Float64Array;
+  /** pointer x over the canvas [css px], NaN when it is elsewhere */
+  private hoverX = NaN;
+
+  constructor(canvas: HTMLCanvasElement, len = 600, opts: TrackChartOpts = { unit: 'MPa', digits: 1, fromZero: true }) {
+    this.canvas = canvas;
+    this.len = len;
+    this.opts = opts;
+    this.times = new Float64Array(len);
+    // Hover readout: the pointer picks a time, the next draw prints every
+    // series' value there. State only - the frame loop redraws anyway.
+    canvas.addEventListener('pointermove', (e) => {
+      const r = canvas.getBoundingClientRect();
+      this.hoverX = e.clientX - r.left;
+    });
+    canvas.addEventListener('pointerleave', () => { this.hoverX = NaN; });
+  }
+
+  /** The raw span of everything held, before margins; null with nothing to show. */
+  dataRange(): { lo: number; hi: number } | null {
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k < this.actual.length; k++) {
+      for (let i = 0; i < this.len; i++) {
+        for (const v of [this.actual[k][i], this.target[k][i]]) {
+          if (!Number.isFinite(v)) continue;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+    }
+    return Number.isFinite(lo) ? { lo, hi } : null;
+  }
+
+  /** Forget the history: the line it was drawn for no longer exists. */
+  reset(): void {
+    this.head = 0;
+    this.filled = 0;
+    this.actual = [];
+    this.target = [];
+  }
+
+  /** one sample per series; a NaN target draws no rule for that series */
+  push(actual: number[], target: number[]): void {
+    const m = actual.length;
+    if (this.actual.length !== m) {
+      this.reset();
+      for (let k = 0; k < m; k++) {
+        this.actual.push(new Float32Array(this.len).fill(NaN));
+        this.target.push(new Float32Array(this.len).fill(NaN));
+      }
+    }
+    for (let k = 0; k < m; k++) {
+      this.actual[k][this.head] = actual[k];
+      this.target[k][this.head] = target[k];
+    }
+    this.times[this.head] = performance.now() / 1000;
+    this.head = (this.head + 1) % this.len;
+    if (this.filled < this.len) this.filled++;
+  }
+
+  /**
+   * @param range  raw data bounds to scale to instead of this chart's own -
+   *               two charts given the union of their ranges share an axis
+   */
+  draw(tags: string[], emptyText = 'データ待ち', range?: { lo: number; hi: number } | null): void {
+    const ctx = fit(this.canvas);
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    // Room above the plot for the unit, so it does not sit on the top tick.
+    // On a narrow cell the ticks give up decimals rather than the plot: a
+    // 4-decimal tick column is 60 px, and three of these charts side by side
+    // in a 300 px column had 14 px of plot each, with the end labels drawn
+    // across the ticks and a stand's number lost under them.
+    const w0 = this.canvas.clientWidth;
+    const tickDigits = w0 < 130 ? Math.max(0, this.opts.digits - 3)
+      : w0 < 200 ? Math.max(1, this.opts.digits - 2) : this.opts.digits;
+    const padL = 12 + 7 * (tickDigits + 3), padR = 10, padT = 22, padB = 14;
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = FONT;
+    const m = this.actual.length;
+    if (m === 0 || this.filled < 2) {
+      ctx.fillStyle = 'rgba(190,206,230,0.4)';
+      ctx.textAlign = 'center';
+      ctx.fillText(emptyText, w / 2, h / 2);
+      ctx.textAlign = 'left';
+      return;
+    }
+    // From zero with headroom, or fitted to the data with a margin - and a
+    // floor on the span, so a flat trace does not blow a micron up into a
+    // wall and read as a fault.
+    let lo = Infinity, hi = -Infinity;
+    const own = this.dataRange();
+    if (own) { lo = own.lo; hi = own.hi; }
+    if (range) { lo = Math.min(lo, range.lo); hi = Math.max(hi, range.hi); }
+    if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
+    if (this.opts.fromZero) {
+      lo = 0;
+      hi = Math.max(hi, 1) * 1.15;
+    } else {
+      const span = Math.max(hi - lo, Math.abs(hi) * 5e-3, 1e-9);
+      lo -= span * 0.15;
+      hi += span * 0.15;
+    }
+    const Y = (v: number) => h - padB - ((h - padT - padB) * (v - lo)) / (hi - lo);
+
+    // The axis is time. The window is the span of the samples held when the
+    // ring is full, and while it is filling, the span `len` frames would
+    // cover at the pace seen so far - so the trace grows in from the left
+    // and then scrolls, and a second is the same width either way.
+    const start = this.filled < this.len ? 0 : this.head;
+    const count = this.filled;
+    const tAt = (i: number) => this.times[(start + i) % this.len];
+    const tNow = tAt(count - 1);
+    const held = tNow - tAt(0);
+    const span = this.filled < this.len && count > 1
+      ? Math.max(held, (held * (this.len - 1)) / (count - 1)) : Math.max(held, 1e-3);
+    const tWin0 = tNow - span;
+    const plotW = w - padL - padR;
+    const X = (t: number) => padL + (plotW * (t - tWin0)) / span;
+
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const v = lo + ((hi - lo) * i) / 3;
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+      ctx.fillStyle = 'rgba(190,206,230,0.55)';
+      ctx.textAlign = 'right';
+      ctx.fillText(v.toFixed(this.opts.fromZero && v >= 10 ? 0 : tickDigits), padL - 5, y + 3);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(190,206,230,0.4)';
+    ctx.fillText(this.opts.unit, 2, 11);
+
+    // Time grid: faint verticals at a round step chosen so that four to eight
+    // fit the window, labelled in seconds before now. What makes a trace
+    // readable as a transient rather than a shape.
+    {
+      const steps = [0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300];
+      const narrow = plotW < 160;
+      // Fewer lines on a narrow plot, so the labels do not touch.
+      const step = steps.find((s) => span / s <= (narrow ? 3.5 : 8)) ?? steps[steps.length - 1];
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = 'rgba(190,206,230,0.35)';
+      ctx.textAlign = 'center';
+      for (let k = 1; ; k++) {
+        const t = tNow - k * step;
+        if (t < tWin0) break;
+        const x = Math.round(X(t)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+        {
+          const secs = k * step;
+          ctx.fillText(`−${secs >= 60 ? `${(secs / 60).toFixed(secs % 60 ? 1 : 0)}m` : `${secs}s`}`, x, h - 3);
+        }
+      }
+      ctx.textAlign = 'left';
+    }
+
+    const labels: { colour: string; text: string; y: number }[] = [];
+    for (let k = 0; k < m; k++) {
+      const colour = GAP_COLORS[k % GAP_COLORS.length];
+      const passes: [Float32Array, number[]][] = [[this.target[k], [4, 3]], [this.actual[k], []]];
+      for (const [arr, dash] of passes) {
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = dash.length ? 1 : 1.5;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < count; i++) {
+          const v = arr[(start + i) % this.len];
+          if (!Number.isFinite(v)) { pen = false; continue; }
+          const x = X(tAt(i)), y = Y(v);
+          if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          pen = true;
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      const last = this.actual[k][(start + count - 1) % this.len];
+      if (Number.isFinite(last)) {
+        labels.push({ colour, text: `${tags[k] ?? k + 1} ${last.toFixed(this.opts.digits)}`, y: Y(last) - 3 });
+      }
+    }
+    // Labels at the right end of the live traces, where the eye lands - and
+    // pushed apart so that on a short chart three of them do not land on
+    // one another and read as one stand missing. Sorted by height, each is
+    // kept a line below the one above it, and the stack is slid back up if
+    // it runs off the bottom.
+    const LINE = 12;
+    const top = padT + 9, bottom = h - padB - 2;
+    labels.sort((a, b) => a.y - b.y);
+    for (let i = 0; i < labels.length; i++) {
+      labels[i].y = Math.max(labels[i].y, i === 0 ? top : labels[i - 1].y + LINE);
+    }
+    const over = labels.length ? labels[labels.length - 1].y - bottom : 0;
+    if (over > 0) {
+      for (const l of labels) l.y -= over;
+      for (let i = 0; i < labels.length; i++) {
+        labels[i].y = Math.max(labels[i].y, i === 0 ? top : labels[i - 1].y + LINE);
+      }
+    }
+    ctx.textAlign = 'right';
+    for (const l of labels) {
+      ctx.fillStyle = l.colour;
+      ctx.fillText(l.text, w - padR - 2, l.y);
+    }
+    ctx.textAlign = 'left';
+
+    // Hover readout: a hairline at the pointer's time and every series'
+    // value there, target in brackets where one is drawn.
+    if (Number.isFinite(this.hoverX) && this.hoverX >= padL && this.hoverX <= w - padR) {
+      const tH = tWin0 + ((this.hoverX - padL) / plotW) * span;
+      // nearest sample at or before tH
+      let lo2 = 0, hi2 = count - 1;
+      while (hi2 - lo2 > 1) { const mid = (lo2 + hi2) >> 1; if (tAt(mid) <= tH) lo2 = mid; else hi2 = mid; }
+      const i = tAt(hi2) - tH < tH - tAt(lo2) ? hi2 : lo2;
+      if (tAt(i) >= tWin0) {
+        const x = Math.round(X(tAt(i))) + 0.5;
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+        const rows: { text: string; colour: string }[] = [
+          { text: `−${(tNow - tAt(i)).toFixed(1)}s`, colour: 'rgba(190,206,230,0.8)' },
+        ];
+        for (let k = 0; k < m; k++) {
+          const a = this.actual[k][(start + i) % this.len], t = this.target[k][(start + i) % this.len];
+          if (!Number.isFinite(a)) continue;
+          rows.push({
+            text: `${tags[k] ?? k + 1} ${a.toFixed(this.opts.digits)}`
+              + (Number.isFinite(t) ? ` (${t.toFixed(this.opts.digits)})` : ''),
+            colour: GAP_COLORS[k % GAP_COLORS.length],
+          });
+        }
+        const boxW = 8 + 7 * Math.max(...rows.map((r) => r.text.length));
+        const boxH = 4 + 12 * rows.length;
+        // to the right of the line, or to the left when that runs off the canvas
+        const bx = x + 8 + boxW > w ? x - 8 - boxW : x + 8;
+        const by = Math.max(2, Math.min(h - boxH - 2, padT));
+        ctx.fillStyle = 'rgba(10,16,28,0.88)';
+        ctx.fillRect(bx, by, boxW, boxH);
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+        ctx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
+        rows.forEach((r, n) => {
+          ctx.fillStyle = r.colour;
+          ctx.fillText(r.text, bx + 4, by + 12 + 12 * n);
+        });
+      }
+    }
+  }
+}

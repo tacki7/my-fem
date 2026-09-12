@@ -261,6 +261,17 @@ export class FlowSolver {
   }
 
   /**
+   * Height of the prescribed feed face [m]: half the entry thickness in this
+   * symmetric model. A pull of σ on that face is a force σ times this, per unit
+   * width - the same conversion `applyTensions` makes - so a reaction divided
+   * by it is the pull the face is standing in for.
+   */
+  feedFaceHeight(): number {
+    const m = this.mesh;
+    return m.X[2 * m.ny + 1] - m.X[1];
+  }
+
+  /**
    * Everything this solver is holding.
    *
    * Counted array by array rather than by multiplying one length by a
@@ -518,6 +529,19 @@ export class FlowSolver {
    * Barrel interface: normal velocity penalised to zero, friction applied as a
    * regularised Coulomb traction using the pressure from the previous iterate.
    *
+   * The normal is the *mesh surface's*, not the radial direction from the
+   * roll centre. The strip's top nodes are laid on the deformed, low-passed,
+   * monotone-clamped barrel profile (see `updateGap`), and with the roll
+   * flattened to R' = 1.4 R that surface is nowhere tangent to the undeformed
+   * circle: its slope is 4 % shallower mid-arc and still −0.4 % at the exit
+   * plane where the circle is flat. Pinning the velocity tangent to the circle
+   * made the surface leak - v_y − v_x·s' reached 0.5 % of v_x, volume crossed
+   * the top of the mesh into the bite over the entry half (+0.8 % of the
+   * throughput mid-arc on the default pass, +1.6 % on the third stand) and
+   * back out at the exit, and each stand delivered 0.4-0.8 % less volume than
+   * it took in, more on finer meshes rather than less. Tangent to the surface
+   * it sits on, the top is a streamline and the flux is conserved.
+   *
    * The same pass also closes the *free* part of the top surface. Off the arc
    * the surface y = s(x) is steady, so it is a streamline:
    *
@@ -550,32 +574,16 @@ export class FlowSolver {
 
     for (let i = inp.contactFrom; i <= inp.contactTo; i++) {
       const nd = m.topNodes[i];
-      const px = m.X[2 * nd], py = m.X[2 * nd + 1];
-      let nx: number, ny: number;
       const w = inp.contactWeight[i];
-      if (inp.entryBisector && i === inp.contactFrom && w < 0.999 && i > 0 && i < m.nx) {
-        // The entry node sits on the bite entry itself (the mesh keeps a
-        // column there), with the surface flat on its upstream side and on
-        // the barrel downstream. Pinned to the barrel's radial direction it
-        // would be sent downward across a facet that is still horizontal -
-        // measured, that pushed 1.1 % of the throughput in through the top of
-        // the strip and put a pressure spike at the entry. A steady surface
-        // with a kink in it wants the streamline condition on the mean slope
-        // of the two facets, which is what the free surface further upstream
-        // gets as well; the difference here is only that this node also
-        // carries friction, over the half of its tributary that is on the
-        // roll. Written with the normal pointing into the roll and the
-        // tangent along +x, the same handedness as the radial pair below.
-        const dxs = m.X[2 * m.topNodes[i + 1]] - m.X[2 * m.topNodes[i - 1]];
-        const dys = m.X[2 * m.topNodes[i + 1] + 1] - m.X[2 * m.topNodes[i - 1] + 1];
-        const sp = Math.abs(dxs) > 1e-12 ? dys / dxs : 0;
-        const L = Math.hypot(sp, 1);
-        nx = sp / L; ny = -1 / L;
-      } else {
-        nx = px - inp.rollCx; ny = py - inp.rollCy;
-        const L = Math.hypot(nx, ny) || 1;
-        nx /= L; ny /= L;
-      }
+      // The surface normal from the mean slope of the node's two facets -
+      // the same streamline condition the free surface gets, with the normal
+      // pointing down into the strip and the tangent along +x. At the bite
+      // entry this is also the bisector the entry node always needed (pinned
+      // radially there it was sent downward across a facet still horizontal,
+      // 1.1 % of the throughput in through the top and a pressure spike).
+      const { sp } = this.surfaceSlope(i);
+      const L = Math.hypot(sp, 1);
+      const nx = sp / L, ny = -1 / L;
       // for omega > 0 the barrel material runs along +t at the bite
       const tx = -ny, ty = nx;
       const iPrev = Math.max(inp.contactFrom, i - 1);
@@ -617,14 +625,20 @@ export class FlowSolver {
       // slip to nonsense (-53% at every reduction).
       if (i >= inp.contactFrom && i <= inp.contactTo) continue;
       const nd = m.topNodes[i];
-      const ip = Math.min(m.nx, i + 1);
-      const im = Math.max(0, i - 1);
-      const dx = m.X[2 * m.topNodes[ip]] - m.X[2 * m.topNodes[im]];
-      const ds = m.X[2 * m.topNodes[ip] + 1] - m.X[2 * m.topNodes[im] + 1];
-      const sp = Math.abs(dx) > 1e-12 ? ds / dx : 0;
+      const { sp } = this.surfaceSlope(i);
       const L = Math.hypot(sp, 1);
       addBlock(nd, -sp / L, 1 / L, kN);
     }
+  }
+
+  /** Slope of the top surface at column i, from its two neighbours. */
+  private surfaceSlope(i: number): { sp: number } {
+    const m = this.mesh;
+    const ip = Math.min(m.nx, i + 1);
+    const im = Math.max(0, i - 1);
+    const dx = m.X[2 * m.topNodes[ip]] - m.X[2 * m.topNodes[im]];
+    const ds = m.X[2 * m.topNodes[ip] + 1] - m.X[2 * m.topNodes[im] + 1];
+    return { sp: Math.abs(dx) > 1e-12 ? ds / dx : 0 };
   }
 
   private applyTensions(inp: FlowInput): void {
@@ -684,10 +698,11 @@ export class FlowSolver {
     // from their neighbour instead of being trusted directly.
     for (let i = inp.contactFrom; i <= inp.contactTo; i++) {
       if (inp.contactWeight[i] <= 1e-6) { this.ifPressure[i] = 0; continue; }
-      const nd = m.topNodes[i];
-      let nx = m.X[2 * nd] - inp.rollCx, ny = m.X[2 * nd + 1] - inp.rollCy;
-      const L = Math.hypot(nx, ny) || 1;
-      nx /= L; ny /= L;
+      // The same surface normal the constraint uses, so the pressure is the
+      // traction normal to the surface the strip actually sits on.
+      const { sp } = this.surfaceSlope(i);
+      const L = Math.hypot(sp, 1);
+      const nx = sp / L, ny = -1 / L;
       const ei = Math.min(m.nx - 1, Math.max(0, i - 1)) * m.ny + (m.ny - 1);
       const o = 4 * ei;
       const sxx = this.elemStress[o], syy = this.elemStress[o + 1], sxy = this.elemStress[o + 2];

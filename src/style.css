@@ -143,12 +143,12 @@ body {
      app shipped with; `resetLayout` puts them back. */
   --col-left: 292px;
   --col-right: 332px;
-  --row-line: 510px;
-  --row-charts: 196px;
+  --row-line: 460px;
+  --row-charts: 330px;
   grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   /* topbar / mill line / stage / charts. The line is always visible: it is the
      only view of the whole machine, and it doubles as the stand selector. */
-  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr) min(var(--row-charts), 36vh);
   /* Named, so a look can rearrange the same panels without touching them:
      the classic arrangement - controls down the left, the line over the
      stage, stats on the right. */
@@ -167,7 +167,7 @@ body {
    schedule strip. The side panels are tabbed (see `.tabstrip`), one section
    at a time instead of a scroll. */
 :root[data-theme="modern"] #app {
-  grid-template-rows: 52px minmax(0, 1fr) var(--row-charts) var(--row-line);
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-charts), 36vh) min(var(--row-line), 46vh);
   grid-template-areas:
     "topbar   topbar   topbar"
     "left     stage    right"
@@ -178,7 +178,7 @@ body {
    masthead, and the columns are mirrored - the readings on the left where
    the eye starts, the controls on the right. */
 :root[data-theme="chic"] #app {
-  grid-template-rows: 52px var(--row-line) minmax(0, 1fr) var(--row-charts);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr) min(var(--row-charts), 36vh);
   grid-template-areas:
     "topbar   topbar   topbar"
     "millline millline millline"
@@ -643,7 +643,7 @@ body.resizing * { cursor: inherit !important; }
 .sw-tau { background: #ffb26e; }
 .sw-hz  { background: repeating-linear-gradient(90deg, #96e6b4 0 4px, transparent 4px 7px); height: 2px; }
 .sw-kf  { background: #96e6b4; }
-#nip, #agcscatter { flex: 1; width: 100%; min-height: 0; display: block; }
+#nip, #agcscatter, #tensionchart, #gaugechart, #speedchart, #stripchart, #screwchart, #masschart { flex: 1; width: 100%; min-height: 0; display: block; }
 
 /* Two charts share the bottom row; the scatter only appears under gap control,
    and the friction hill keeps the whole width whenever it is hidden. */
@@ -651,9 +651,21 @@ body.resizing * { cursor: inherit !important; }
 .chart-cell[hidden] { display: none; }
 /* The hill's share of the band is a draggable boundary (see layout.ts); with
    the trail hidden there is nothing to share and the hill takes the band. */
-#chart-nip { flex: 0 0 var(--chart-nip, 59%); }
-#bottom:has(> #chart-agc[hidden]) #chart-nip { flex: 1 1 0; }
-#chart-agc { flex: 1 1 0; border-left: 1px solid var(--line); padding-left: 12px; }
+#chart-nip { flex: 0 0 var(--chart-nip, 40%); }
+#bottom:has(> #chart-agc[hidden]):has(> #chart-track[hidden]) #chart-nip { flex: 1 1 0; }
+/* The trail's share of the band is the second draggable boundary; with the
+   time-series column hidden there is nothing to share and it takes the rest. */
+#chart-agc { flex: 0 0 var(--chart-agc, 16%); border-left: 1px solid var(--line); padding-left: 12px; }
+#bottom:has(> #chart-track[hidden]) #chart-agc { flex: 1 1 0; }
+/* The tension and gauge traces stack in one column at the right of the band;
+   each takes half of it while both are shown, the gauge all of it otherwise. */
+.chart-col { flex: 1.5 1 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0;
+  border-left: 1px solid var(--line); padding-left: 12px; }
+.chart-col[hidden] { display: none; }
+.chart-col > .chart-cell { flex: 1 1 0; min-height: 0; }
+/* The gauge and speed traces share the lower half of the column side by side. */
+.chart-row { flex: 1 1 0; display: flex; flex-direction: row; gap: 12px; min-width: 0; min-height: 0; }
+.chart-row > .chart-cell { flex: 1 1 0; min-width: 0; min-height: 0; }
 
 /* ── budget chart ────────────────────────────────────────────────────────── */
 .spark { width: 100%; height: 66px; display: block; border-radius: 7px; overflow: hidden; }
@@ -819,4 +831,53 @@ body.resizing * { cursor: inherit !important; }
 .stand-grid .sg-btn.busy {
   border-color: rgba(255,196,107,.8); background: rgba(255,196,107,.16);
   color: var(--fg); pointer-events: none;
+}
+
+/* a live tension cell more than 2 % from its target */
+.sg-now.off-target { color: var(--warn, #ffb26e); }
+
+/* ── optional panels ─────────────────────────────────────────────────────── */
+/* The contour stage and the stats panel can each be hidden from the top bar;
+   the grid closes over them so the mill line, the charts and the remaining
+   panel take the room. One template per look and combination, because the
+   looks place the same panels differently. */
+#app.hide-right #right, #app.hide-stage #stage { display: none; }
+#app.hide-right {
+  grid-template-columns: var(--col-left) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "left millline" "left stage" "left bottom";
+}
+#app.hide-stage {
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar topbar" "left millline millline" "left bottom right";
+}
+#app.hide-right.hide-stage {
+  grid-template-columns: var(--col-left) minmax(0, 1fr);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "left millline" "left bottom";
+}
+:root[data-theme="modern"] #app.hide-right {
+  grid-template-areas: "topbar topbar" "left stage" "left bottom" "millline millline";
+}
+:root[data-theme="modern"] #app.hide-stage {
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-line), 46vh);
+  grid-template-areas: "topbar topbar topbar" "left bottom right" "millline millline millline";
+}
+:root[data-theme="modern"] #app.hide-right.hide-stage {
+  grid-template-rows: 52px minmax(0, 1fr) min(var(--row-line), 46vh);
+  grid-template-areas: "topbar topbar" "left bottom" "millline millline";
+}
+/* chic mirrors the columns: the stats panel is the first, sized by --col-left,
+   and the controls the last, sized by --col-right. */
+:root[data-theme="chic"] #app.hide-right {
+  grid-template-columns: minmax(0, 1fr) var(--col-right);
+  grid-template-areas: "topbar topbar" "millline millline" "stage left" "bottom left";
+}
+:root[data-theme="chic"] #app.hide-stage {
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar topbar" "millline millline millline" "right bottom left";
+}
+:root[data-theme="chic"] #app.hide-right.hide-stage {
+  grid-template-columns: minmax(0, 1fr) var(--col-right);
+  grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
+  grid-template-areas: "topbar topbar" "millline millline" "bottom left";
 }

@@ -69,6 +69,52 @@
       </div>
       <canvas id="agcscatter" title="軌跡の先頭の ΔP/Δh₁ は塑性曲線の勾配: スクリュー改訂ごとの荷重と出側板厚の対から同定（板幅ぶん tonf / µm、薄くすると荷重が増えるので負）。ゲージメータ式 dh₁/dS = M/(M+Q) の Q。"></canvas>
     </div>
+    <div id="chart-track" class="chart-col">
+      <div id="chart-screw" class="chart-cell">
+        <div class="chart-head">
+          <span class="chart-title">圧下スクリュー位置</span>
+          <span class="chart-sub">実線 = 現在のスクリュー位置 S ／ 破線 = ループの指令（圧下装置の動特性 ON のとき）／ 直近 600 フレーム</span>
+        </div>
+        <canvas id="screwchart" title="各スタンドの圧下スクリュー位置 S [mm] の時系列。制御ループが動かす量そのもの。板厚一定・圧下率一定・荷重一定のどれでも、ループが締め込む／開く動きがここに出る。"></canvas>
+      </div>
+      <div id="chart-tension" class="chart-cell" hidden>
+        <div class="chart-head">
+          <span class="chart-title">スタンド間張力</span>
+          <span class="chart-sub" id="tension-sub">実線 = 実績 σf ／ 破線 = 目標（表の前方張力）／ 直近 600 フレーム</span>
+        </div>
+        <canvas id="tensionchart" title="各スタンド間の張力の時系列。実線が動特性モデルの実績、破線が表に入力した目標。制御 ON なら上流スタンドのロール周速を PI で操作して実線を破線に合わせる。"></canvas>
+      </div>
+      <div class="chart-row">
+        <div id="chart-gauge" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">出側板厚</span>
+            <span class="chart-sub">実線 = 実績 h₁ ／ 破線 = 目標（板厚一定は目標値、圧下率一定・制御なしは h₀(1−r)、荷重一定は目標なし）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="gaugechart" title="各スタンドの出側板厚の時系列。実線が FEM の実測、破線がそのスタンドの狙い。縦軸はデータに合わせて伸縮する（ただし全幅 0.5% 未満には縮めない）。"></canvas>
+        </div>
+        <div id="chart-speed" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">ロール周速</span>
+            <span class="chart-sub">実線 = 実際の周速 ωR ／ 破線 = 基準（速度コーンまたはダイヤル、張力制御のトリム前）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="speedchart" title="各スタンドのロール周速 ωR [m/min] の時系列。実線が張力制御のトリムを含めた実際の周速、破線が速度コーン（#1 はダイヤル）の基準値。制御 OFF では両者が重なる。"></canvas>
+        </div>
+        <div id="chart-strip" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">板速度</span>
+            <span class="chart-sub">実線 = 出側 v₁ ／ 破線 = 入側 v₀（FEM 実測）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="stripchart" title="各スタンドの板速度 [m/min] の時系列。実線が出側 v₁、破線が入側 v₀（どちらも FEM の実測）。前段の v₁ と次段の v₀ の差がスタンド間の速度不整合で、張力モデル ON ではその差を張力が埋める。"></canvas>
+        </div>
+        <div id="chart-mass" class="chart-cell">
+          <div class="chart-head">
+            <span class="chart-title">マスフロー</span>
+            <span class="chart-sub">実線 = 出側 v₁h₁ ／ 破線 = 入側 v₀h₀（単位幅あたり、FEM 実測）／ 直近 600 フレーム</span>
+          </div>
+          <canvas id="masschart" title="各スタンドの質量流量 v·h [mm²/s]（単位幅あたり）の時系列。実線が出側、破線が入側。同じスタンドの実線と破線の差が体積収支の誤差、スタンド間で実線がそろっていればライン全体でマスフローが一定。"></canvas>
+        </div>
+      </div>
+    </div>
   </footer>
 
   <aside id="right" class="panel"></aside>

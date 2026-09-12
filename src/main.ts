@@ -1,4 +1,5 @@
 import './style.css';
+import { TENSION_MODEL_LABEL, type TensionModel } from './sim/tension';
 import {
   RollingSim, fieldUnit, planeStrain, AGC_METHODS, setSlabHook,
   type RollingParams, type FieldKind, type AgcMode, type AgcMethod, type LoadModel, type SlabTheory,
@@ -17,7 +18,7 @@ import { MillLineView, type StandView } from './ui/millview';
 import { Renderer, type Camera, type RenderOptions } from './gfx/renderer';
 import { COLORMAP_NAMES, rampGradient } from './gfx/colormap';
 import {
-  BudgetChart, FrictionHillChart, AgcScatterChart,
+  BudgetChart, FrictionHillChart, TrackChart, AgcScatterChart,
   type HillSample, type AgcSample, type AgcTargets, type AgcTrail,
 } from './ui/charts';
 import {
@@ -80,13 +81,17 @@ const MPM = 60;
 function omegaFromMpm(): number {
   return view.rollSpeedMpm / MPM / Math.max(params.R, 1e-6);
 }
+/** The dial as the strip speed leaving the line [m/s]. */
+function lineSpeedFromMpm(): number {
+  return view.rollSpeedMpm / MPM;
+}
 
 const PRESETS: Preset[] = [
   {
     name: '冷間圧延 (薄板)',
     note: 'h0 2 mm → 25%, 低摩擦, ロール扁平が効く',
     patch: {
-      R: 0.19, h0: 0.002, reduction: 0.25, omega: 6, mu: 0.06,
+      R: 0.19, h0: 0.002, reduction: 0.25, omega: 100 / 60 / 0.19, mu: 0.06,
       lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, rollCoupling: true,
     },
   },
@@ -159,7 +164,7 @@ const params: RollingParams = {
   R: 0.19, hubRatio: 0.45, rollNt: 200, rollNr: 5,
   rollRadialGrade: 1.4, biteGrade: 0.90,
   rollSkinRings: 4, rollSkinThickness: 0.002, rollSkinAuto: true, rollSkinFactor: 8,
-  Eroll: 2.1e11, nuRoll: 0.30, omega: 6.0,
+  Eroll: 2.1e11, nuRoll: 0.30, omega: 100 / 60 / 0.19,
   h0: 0.002, reduction: 0.25, stripNx: 100, stripNy: 8,
   windowIn: -0.040, windowOut: 0.025, autoFit: true,
   lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255,
@@ -177,6 +182,20 @@ const params: RollingParams = {
   // loop's answer depend on how it got there; at 3e-4 two different routes
   // to the same target agree to 0.02 um.
   feedEvery: 6, feedGain: 0.15, feedDeadband: 3e-4,
+  // Interstand tension dynamics (src/sim/tension.ts). Off keeps the tension
+  // the table's input; a model makes the table's σf a target and the line's
+  // own speed balance the actual. Time scale 1 is real time, where the
+  // strip's elastic transient is under a frame and every model reads rigid.
+  // 100 m/min, as an exit strip speed [m/s]: the dial is one number, read as
+  // the line's exit speed in tandem with the cone on and as the roll speed
+  // otherwise (8.77 rad/s on the default 190 mm roll).
+  lineSpeed: 100 / 60,
+  tensionModel: 'off',
+  standDistance: 4.5,
+  tensionTimeScale: 1,
+  tensionFollow: 0.5,
+  tensionControl: false,
+  tensionKp: 0, tensionKi: 0.5, tensionVLimit: 0.1,
   agcMode: 'off', agcTargetForce: (800 * TONF) / 1.0,
   // Absolute-gauge setpoint. Seeded to the default pass's own exit so it is
   // never zero; the real value is adopted when a stand enters the mode.
@@ -193,6 +212,10 @@ const params: RollingParams = {
   // ignore. Tightening it costs settle time and buys precision one for one -
   // see docs/validation.md for the measured trade at 1e-6 and 1e-7.
   agcGain: 0.6, agcEvery: 4, agcDeadband: 1e-6, agcMaxStep: 0.02,
+  // Screwdown actuator: on, 0.3 mm/s, 0.1 s. Every settle time in
+  // docs/validation.md before 2026-09-12 was measured with the screws
+  // teleporting; switch this off to reproduce those.
+  screwDyn: true, screwRate: 0.3e-3, screwTau: 0.2,
   agcSpringComp: true,
   // Off: measured on a three-stand line under 圧下率一定, holding each stand
   // until the one ahead was still cost #2 its first 17 s (against 3 s) and
@@ -208,7 +231,7 @@ const params: RollingParams = {
   // on by default. With a rigid stand the only spring is the roll flattening,
   // which is what every number in docs/validation.md was measured against -
   // switch this off to reproduce them.
-  millSpringOn: true, millModulus: (5 * MN_PER_MM) / 1.0,
+  millSpringOn: true, millModulus: (5.8 * MN_PER_MM) / 1.0,
   // 2 %, not the 30 % this used to be. The 30 % was a validity guard - the
   // mass balance was said to break past 70 % reduction - and it stopped
   // every deep pass at a rail with a red 'saturated' and no way through.
@@ -265,7 +288,7 @@ const view = {
    * `syncRollSpeed` divides this by the roll radius - and redoes it whenever R
    * moves, because it is the line speed that is held, not omega.
    */
-  rollSpeedMpm: 68.4,
+  rollSpeedMpm: 100,
   /** which stand the detailed view and the per-stand dials are showing */
   stand: 0,
   /**
@@ -279,7 +302,7 @@ const view = {
    * way a stand is specified. `syncMillModulus` divides it by the strip width
    * for the plane-strain solver.
    */
-  millModulusMNmm: 5,
+  millModulusMNmm: 5.8,
 };
 
 /* ── query string overrides ──────────────────────────────────────────────── */
@@ -312,6 +335,14 @@ if (QS.has('nogrid')) view.showGrid = false;
   // Gap control, so a measurement run can start with the loop already closed.
   const qa = QS.get('agc');
   if (qa === 'off' || qa === 'ratio' || qa === 'gauge' || qa === 'force') params.agcMode = qa;
+  // Interstand tension model and its controller, so a measurement run can
+  // start with the line already carrying its own tension.
+  const qt = QS.get('tension');
+  if (qt === 'off' || qt === 'rigid' || qt === 'simple' || qt === 'dist') params.tensionModel = qt;
+  const qtc = QS.get('tctl');
+  if (qtc === '1' || qtc === '0') params.tensionControl = qtc === '1';
+  const qts = Number(QS.get('tscale'));
+  if (Number.isFinite(qts) && qts > 0 && qts <= 1) params.tensionTimeScale = qts;
   // Absolute exit gauge in mm, so a measurement run can start on a setpoint.
   const qg = Number(QS.get('h1'));
   if (Number.isFinite(qg) && qg > 0) params.agcTargetGauge = qg / 1000;
@@ -382,6 +413,7 @@ if (restored.applied) {
   params.agcTargetForce = agcTargetPerWidth();
   params.millModulus = millModulusPerWidth();
   params.omega = omegaFromMpm();
+  params.lineSpeed = lineSpeedFromMpm();
 }
 
 /** What one element of the chain is called, in words and as a caption. */
@@ -643,6 +675,13 @@ function scheduleRebuild(): void {
     buildStandGrid();
     selectStand(view.stand);
     clearAgcTrail();
+    // The traces were of a line that no longer exists.
+    gaugeChart.reset();
+    speedChart.reset();
+    stripChart.reset();
+    screwChart.reset();
+    massChart.reset();
+    tensionChart.reset();
     tracers.reset();
     fieldDirty = true;
     // The camera stays where the user put it. Rebuilding is not a reason to
@@ -696,6 +735,8 @@ function announceRestarts(): void {
 function millViews(): StandView[] {
   const out: StandView[] = [];
   const b = view.stripWidth;
+  const md = mill.diag;
+  const tensionOn = md.tensionModel !== 'off';
   for (let k = 0; k < mill.count; k++) {
     const st = mill.stands[k], d = st.diag;
     const p = st.params;
@@ -728,6 +769,15 @@ function millViews(): StandView[] {
       // front's exit pull, not a value this row owns.
       backTension: getBackTension(k) / 1e6,
       frontTension: c.frontTension / 1e6,
+      // As carried, from the gap model: the front is gap k, the back is gap
+      // k-1. The line's two ends are coilers and keep their inputs.
+      backTensionActual: tensionOn
+        ? (k === 0 ? c.backTension : (md.tensionActual[k - 1] * md.h1[k - 1]) / hIn) / 1e6 : NaN,
+      frontTensionActual: tensionOn
+        ? (k === mill.count - 1 ? c.frontTension : md.tensionActual[k]) / 1e6 : NaN,
+      tensionHot: tensionOn && [k - 1, k].some((j) => j >= 0 && j < md.tensionActual.length
+        && (Math.abs(md.tensionActual[j] - md.tensionRigid[j]) > 1e-3 * Math.max(md.tensionActual[j], 5e6)
+          || Math.abs(md.tensionError[j]) > 1e-3)),
       // Plane-strain kf, which is what a rolling load formula uses. The solve
       // carries the uniaxial flow stress, so those convert by 2/sqrt(3).
       //
@@ -797,6 +847,10 @@ interface StandRowCells {
   redNow: HTMLElement;
   gaugeNow: HTMLElement;
   loadNow: HTMLElement;
+  tenNow: HTMLElement;
+  vrNow: HTMLElement;
+  vinNow: HTMLElement;
+  voutNow: HTMLElement;
   mode: HTMLSelectElement;
   red: NumFieldHandle;
   gauge: NumFieldHandle;
@@ -976,6 +1030,10 @@ function buildStandGrid(): void {
   const redNow = mk(() => el('div', 'sg-now', '—'));
   const gaugeNow = mk(() => el('div', 'sg-now', '—'));
   const loadNow = mk(() => el('div', 'sg-now', '—'));
+  const tenNow = mk(() => el('div', 'sg-now', '—'));
+  const vrNow = mk(() => el('div', 'sg-now', '—'));
+  const vinNow = mk(() => el('div', 'sg-now', '—'));
+  const voutNow = mk(() => el('div', 'sg-now', '—'));
   const resets = mk((k) => {
     const b = el('button', 'sg-btn', RECALC_LABEL);
     b.type = 'button';
@@ -1004,8 +1062,15 @@ function buildStandGrid(): void {
   row('　　　現在', loadNow, 'tonf');
   row('後方張力 σb', backs.map((x) => x.root), 'MPa');
   row('前方張力 σf', tens.map((x) => x.root), 'MPa');
+  row('　　　実績', tenNow, 'MPa');
   row('摩擦係数 μ', mus.map((x) => x.root), '');
   row('ロール半径 R', rads.map((x) => x.root), 'mm');
+  // Outcomes, not inputs: the one speed the line is given is in the left
+  // panel, and these are what the cone, the slip and the tension trims made
+  // of it at each stand.
+  row('ロール周速 ωR', vrNow, 'm/min');
+  row('板速度 入側 v₀', vinNow, 'm/min');
+  row('　　　出側 v₁', voutNow, 'm/min');
   row('', resets, '');
 
   for (let k = 0; k < n; k++) {
@@ -1013,6 +1078,7 @@ function buildStandGrid(): void {
       head: heads[k], redNow: redNow[k], gaugeNow: gaugeNow[k], loadNow: loadNow[k],
       mode: modes[k],
       red: reds[k], gauge: gauges[k], load: loads[k], backT: backs[k], ten: tens[k],
+      tenNow: tenNow[k], vrNow: vrNow[k], vinNow: vinNow[k], voutNow: voutNow[k],
       mu: mus[k], rad: rads[k],
     });
   }
@@ -1093,6 +1159,24 @@ function refreshStandGrid(): void {
         : Math.abs(r - want) < 0.05 ? 'ok'
           : Math.abs(r - want) < 0.5 ? 'warn' : 'bad');
     c.loadNow.textContent = Number.isFinite(load) ? load.toFixed(1) : '—';
+    // The front tension the gap after this stand is actually carrying. The
+    // last stand's front is the coiler, which the model does not move, and
+    // with the model off the input is the whole story - both read '—'.
+    const md = mill.diag;
+    const vr = (md.omega[k] ?? st.params.omega) * st.params.R * MPM;
+    c.vrNow.textContent = Number.isFinite(vr) ? vr.toFixed(1) : '—';
+    c.vinNow.textContent = d.entrySpeed > 0 ? (d.entrySpeed * MPM).toFixed(1) : '—';
+    c.voutNow.textContent = d.exitSpeed > 0 ? (d.exitSpeed * MPM).toFixed(1) : '—';
+    const ta = md.tensionModel !== 'off' ? md.tensionActual[k] : NaN;
+    const tt = md.tensionTarget[k];
+    c.tenNow.textContent = Number.isFinite(ta) ? (ta / 1e6).toFixed(1) : '—';
+    const tErr = Number.isFinite(ta) && tt > 0 ? (ta - tt) / tt : 0;
+    c.tenNow.classList.toggle('off-target', Number.isFinite(ta) && Math.abs(tErr) > 0.02);
+    c.tenNow.title = Number.isFinite(ta)
+      ? `目標 ${(tt / 1e6).toFixed(1)} MPa に対し ${(100 * tErr).toFixed(2)}%`
+        + (md.tensionClamped[k] === -1 ? '。張力抜け（0 で頭打ち）'
+          : md.tensionClamped[k] === 1 ? '。降伏の 90% で頭打ち' : '')
+      : '';
     const tgt = (standSetups[k].targetForce * b) / TONF;
     // A slab load the theory could not solve is flagged whatever the mode,
     // and the cell says why.
@@ -1198,7 +1282,7 @@ function paintTargetLock(c: StandRowCells, mode: AgcMode): void {
   if (load.title !== loadWhy) load.title = loadWhy;
 }
 
-const sLine = section('ライン構成', {
+const sLine = section('ライン構成', { open: false,
   hint: 'ラインの形と段数。タンデムは複数スタンドが同じ板を同時に噛むので、板厚・質量流量・張力がスタンド間で結合する。リバースは 1 スタンドを板が往復するので、'
       + 'パス間で引き継ぐのは板厚だけ。各スタンド（パス）の圧下率・目標・張力・μ・ロール半径は画面上部の表で入力する。',
 });
@@ -1227,9 +1311,12 @@ const modeHint = el('div', 'ctrl-hint');
 // cell in the table at the top. One number, one place to set it.
 const tAutoSpeed = toggle('速度コーン自動 (質量流量一定)', mill.autoSpeed, (v) => {
   mill.autoSpeed = v;
+  syncRollSpeed();
 },
-  'タンデムのみ。ON で下流スタンドのロール周速を、質量流量 Q = v·h が全段で一定になるよう自動で決める（実機の速度コーン）'
-      + '。各スタンドの送り速度は自走で決まるので、残った不整合は「流量ずれ」に出る（実機ではスタンド間張力が吸収する分）。OFF なら全段が「圧延条件」のロール周速で回る。');
+  'タンデムのみ。ON では「圧延条件」の速度がライン出側の板速度になり、全スタンドのロール周速を'
+      + ' 質量流量 q = v_out·h₁(最終) と Bland–Ford 先進率から自動で決める（実機の速度コーン）。'
+      + '各スタンドの送り速度は自走で決まるので、残った不整合は「流量ずれ」に出る（実機ではスタンド間張力が吸収する分。張力モデル ON ならそれが実績張力になる）。'
+      + 'OFF なら全段が「圧延条件」のロール周速で回る。');
 const speedHint = el('div', 'ctrl-hint');
 
 /**
@@ -1265,9 +1352,10 @@ function applyModeWording(): void {
   speedHint.textContent = rev
     ? 'リバースでは無効。パスは同時に走らないので保つべき速度コーンがなく、'
       + '各パスは「圧延条件」のロール周速でそのまま回る。'
-    : 'ON のとき、下流スタンドのロール速度を質量流量 Q = v·h が一定になるように自動設定する。'
-      + '各スタンドは自分の送り速度を自走で決めるので、残った不整合は「流量ずれ」として表示する'
+    : 'ON のとき「圧延条件」の速度はライン出側の板速度で、全スタンドのロール周速を質量流量 q = v_out·h₁(最終) が'
+      + '一定になるように自動設定する（先進率込み）。各スタンドは自分の送り速度を自走で決めるので、残った不整合は「流量ずれ」として表示する'
       + '（実機ではスタンド間張力が吸収する分）。';
+  syncRollSpeed();
   procHint.textContent =
     `摩擦係数 μ・後方張力 σb・前方張力 σf は${w}ごとの量なので、上部の${w}表で編集する。`
     + '噛み込み条件 μ ≥ tan α を下回ると圧延できない。'
@@ -1293,6 +1381,7 @@ function applyModeWording(): void {
 function setLineMode(v: LineMode): void {
   view.lineMode = v;
   mill.mode = v;
+  syncTensionUi();
   if (v === 'reverse') {
     for (let k = 1; k < standSetups.length; k++) {
       standSetups[k].backTension = standSetups[k - 1].frontTension;
@@ -1336,7 +1425,7 @@ const sWidth = slider({
 // The strip itself: one gauge, one width, one material for the whole line, no
 // matter how many stands it runs through. They live in the top-left panel,
 // away from the per-stand dials, because there is nothing to select for them.
-const sStrip = section('ライン共通 — 板寸法', {
+const sStrip = section('ライン共通 — 板寸法', { open: false,
   hint: '板そのものを決める量。ラインに 1 枚しか通っていないので、スタンドを選ぶ余地がない。'
     + 'この下の「被圧延材」「加工発熱」も同じくライン共通。',
 });
@@ -1345,7 +1434,7 @@ sStrip.body.append(sH0.root, sWidth.root);
 sLine.body.append(sMode.root, modeHint, sCount.root, lineHint,
   tAutoSpeed.root, speedHint);
 
-const sMat = section('被圧延材 (LMN 式)', {
+const sMat = section('被圧延材 (LMN 式)', { open: false,
   hint: '変形抵抗 kf = L·(ε̄ + M)^N。L は係数 [MPa]、M は予ひずみ（ε̄ = 0 で kf を有限にする）、'
     + 'N は硬化指数。冷延材の実測 kf 曲線がこの 3 つで与えられることが多い。'
     + 'LMN が返すのは平面ひずみ変形抵抗で、解析が持つ単軸相当応力は σf = (√3/2)·kf。',
@@ -1404,7 +1493,7 @@ const HEAT_ABOUT =
   + 'だから板は自分で出した熱をそのまま持ったまま出ていく（断熱）とみなし、'
   + '塑性仕事 β·σf·ε̄̇ を熱源として、ひずみと同じ流線に沿って温度を運ぶ。'
   + 'ロールへの抜熱は入れていないので、これは温度上昇の上限側の見積り。';
-const sHeat = section('加工発熱 (断熱)', { hint: HEAT_ABOUT,
+const sHeat = section('加工発熱 (断熱)', { open: false, hint: HEAT_ABOUT,
 });
 const heatDials: { setEnabled(on: boolean): void }[] = [];
 const tHeat = toggle('加工発熱で変形抵抗を変える', params.heatOn, (v) => {
@@ -1471,32 +1560,45 @@ const heatOutHint = el('div', 'ctrl-hint');
 sHeat.body.append(heatOutHint);
 for (const dial of heatDials) dial.setEnabled(params.heatOn);
 
-const sProc = section('圧延条件', {
+const sProc = section('圧延条件', { open: false,
   hint: '選択中スタンドの運転条件。ロール周速と送り速度、およびそこから決まる幾何（h₁・接触弧長・噛み込み角）。摩擦係数 μ・張力・圧下率・ロール半径はスタンドごとの量なので上部の表で入力する。',
 });
 const sOmega = slider({
   label: 'ロール周速 v_R', unit: 'mpm', min: 1, max: 1500, log: true,
   value: view.rollSpeedMpm,
   format: (v) => (v < 10 ? v.toFixed(2) : v.toFixed(1)),
-  hint: 'ワークロール胴面の周速 [m/min]。ソルバが使う角速度 ω = v_R/R に換算する（R を変えても周速を保つ）。'
-      + '定常解では速度自体は荷重にほぼ効かず、効くのはひずみ速度（正則化の基準）と発熱の時間スケール、および動力 [kW] = トルク × ω。'
-      + 'タンデムで速度コーン自動 ON なら下流の周速は自動で上書きされる。',
+  hint: 'ライン全体で指定する唯一の速度 [m/min]。タンデムで速度コーン自動 ON のときは**ライン出側の板速度**で、'
+      + '各スタンドのロール周速は質量流量 q = v·h₁(最終) と Bland–Ford 先進率から計算される（表の「ロール周速」行、'
+      + '「板速度」行が結果）。それ以外（リバース、コーン OFF）ではワークロール胴面の周速で、ω = v_R/R に換算する。'
+      + '定常解では速度自体は荷重にほぼ効かず、効くのはひずみ速度（正則化の基準）と発熱の時間スケール、および動力 [kW] = トルク × ω。',
   onInput: (v) => { view.rollSpeedMpm = v; syncRollSpeed(); },
 });
 const omegaHint = el('div', 'ctrl-hint');
 
+/** True while the dial is the line's exit strip speed rather than a roll speed. */
+const speedDialIsExit = () => view.lineMode === 'tandem' && mill.autoSpeed;
+
 /**
  * The dial is a line speed in m/min, the way a mill is actually run; the solver
- * turns the barrel at an angular speed. Roll radius is the only thing between
- * them, so changing R holds the line speed and moves omega, not the reverse.
+ * turns the barrel at an angular speed. In tandem with the cone on it is the
+ * strip speed leaving the line and every barrel speed is derived from it in
+ * `Mill.advance`; otherwise roll radius is the only thing between the two, so
+ * changing R holds the line speed and moves omega, not the reverse.
  */
 function syncRollSpeed(): void {
   params.omega = omegaFromMpm();
-  omegaHint.textContent =
-    `ロール半径 R = ${(params.R * 1000).toFixed(params.R < 0.05 ? 1 : 0)} mm で`
-    + ` 角速度 ω = ${params.omega.toFixed(3)} rad/s`
-    + `（周速 ${(params.omega * params.R).toFixed(4)} m/s）。`
-    + 'R を変えても周速が保たれるように ω が追随する。';
+  params.lineSpeed = lineSpeedFromMpm();
+  const exit = speedDialIsExit();
+  const lab = sOmega.root.querySelector('.ctrl-label');
+  if (lab && lab.firstChild) lab.firstChild.nodeValue = exit ? 'ライン出側 板速度 v_out' : 'ロール周速 v_R';
+  omegaHint.textContent = exit
+    ? `最終${unitWord()}を出る板の速度 ${(params.lineSpeed).toFixed(4)} m/s。各${unitWord()}のロール周速は`
+      + ' 質量流量 q = v_out·h₁(最終) を各段の目標板厚で割り、Bland–Ford 先進率 (1+f) で割った値'
+      + '（上部の表「ロール周速」行）。板速度の入側・出側は FEM の実測（同「板速度」行）。'
+    : `ロール半径 R = ${(params.R * 1000).toFixed(params.R < 0.05 ? 1 : 0)} mm で`
+      + ` 角速度 ω = ${params.omega.toFixed(3)} rad/s`
+      + `（周速 ${(params.omega * params.R).toFixed(4)} m/s）。`
+      + 'R を変えても周速が保たれるように ω が追随する。';
 }
 syncRollSpeed();
 // Friction and the two tensions are per stand and sit in the table at the top,
@@ -1547,7 +1649,7 @@ const AGC_HINT: Record<AgcMode, string> = {
     + '捨てずに済むよう、次のメッシュ再構築まで反映を持ち越す。',
 };
 
-const sAgc = section('自動制御 (AGC / 定圧延荷重)', {
+const sAgc = section('自動制御 (AGC / 定圧延荷重)', { open: false,
   hint: 'スクリュー（ロールギャップ）を測定値で閉ループ制御するときの設定。制御モードと目標はスタンドごとに上部の表で選ぶ。ここは全スタンド共通のループ設定 — 探索方式・ゲイン・不感帯・更新間隔・可動範囲。'
       + '「ミルスプリングを補正する」は制御が目標をどう解釈するか（実測板厚を合わせるか、指令として 1 回置くか）。',
 });
@@ -1691,6 +1793,32 @@ const sAgcStep = slider({
       + 'ここはトリムの幅を決める）。区間法では「区間を挟むまでの初手の幅」として使い、挟んだあとは効かない。',
   onInput: (v) => { params.agcMaxStep = v; },
 });
+/* ── screwdown actuator ─────────────────────────────────────────────────── */
+const screwDials: { setEnabled(on: boolean): void }[] = [];
+const tScrewDyn = toggle('圧下装置の動特性（速度制限 ＋ 一次遅れ）', params.screwDyn, (v) => {
+  params.screwDyn = v;
+  for (const d of screwDials) d.setEnabled(v);
+},
+  'ON: 制御ループの 1 手は「指令」になり、実際のスクリューは速度上限と一次遅れで指令を追う（実機の圧下装置。tension-lab の図 5.15 の簡略版）。'
+    + 'ハウジング伸び P/M はこれまでどおり読みから瞬時に引く（ゲージメータ補正。伸びをスクリューに払わせる版は発散した — solver.ts 参照）ので、'
+    + '荷重が急変した瞬間の読みの跳びは残る。ループは到達（0.2 µm 以内）を待ってから次の手を打つので同定は乱れないが、手ごとの待ちが増えて収束は遅くなる。'
+    + 'リセット直後 2 s（通板）は従来どおり瞬時に置く。OFF: 1 手が同じフレームで反映され、伸びは読みから瞬時に引く（階段状。docs/validation.md の収束時間はこちらで測った値）。');
+const sScrewRate = slider({
+  label: '圧下速度上限', unit: 'mm/s', min: 0.02, max: 5, log: true, value: params.screwRate * 1000,
+  format: (v) => (v < 1 ? v.toFixed(2) : v.toFixed(1)),
+  hint: 'スクリューの最大移動速度。電動圧下は 0.1〜0.5 mm/s、油圧圧下は数 mm/s。既定 0.3 mm/s（1 手の上限 40 µm なら 0.13 s、目標変更の一発移動 数百 µm で 1〜2 s）。'
+    + '読み S = 間隔 − P/M は間隔の移動に荷重変化分（1 + Q/M ≈ 3 倍）が乗るので、グラフ上は設定速度の数倍で動いて見える。',
+  onInput: (v) => { params.screwRate = v / 1000; },
+});
+const sScrewTau = slider({
+  label: '圧下の時定数', unit: 's', min: 0.02, max: 1, log: true, value: params.screwTau,
+  format: (v) => v.toFixed(2),
+  hint: '指令に対するスクリュー位置の一次遅れ。小さい移動は速度上限に当たらず、この時定数で滑らかに寄る。既定 0.2 s。',
+  onInput: (v) => { params.screwTau = v; },
+});
+screwDials.push(sScrewRate, sScrewTau);
+for (const d of screwDials) d.setEnabled(params.screwDyn);
+
 const agcResetHint = el('div', 'ctrl-hint');
 agcResetHint.textContent =
   'スクリューを h₀(1−r) に戻し、同定したゲインを忘れる。OFF ではそこで止まり、'
@@ -1703,10 +1831,11 @@ sAgc.body.append(agcHint, agcTargetHint,
   }]),
   agcResetHint, tSpringComp.root, springCompHint, sAgcMethod.root, methodHint,
   sAgcGain.root, sAgcDb.root, sAgcEvery.root, sAgcStep.root,
+  tScrewDyn.root, sScrewRate.root, sScrewTau.root,
   sFloor.root, floorHint);
 syncMethodHint();
 
-const sRoll = section('ミル弾性 (ロール扁平・ミルスプリング)', {
+const sRoll = section('ミル弾性 (ロール扁平・ミルスプリング)', { open: false,
   hint: '負荷でミルが変形する 3 つの効果: ロール表面の扁平（接触弧が伸び、荷重が上がる）、板の弾性回復（「被圧延材」の弾性変形）'
       + '、ハウジングと圧下ねじの伸び（ミル剛性）。この 3 つの合計が「出側板厚 − スクリュー位置」＝ミルスプリングで、板厚制御が払っている量。',
 });
@@ -1955,7 +2084,7 @@ sNum.body.append(
   }).root,
 );
 
-const sDisp = section('表示');
+const sDisp = section('表示', { open: false });
 const fieldSel = select<FieldKind>('スカラー場', FIELDS, view.field, (v) => {
   view.field = v;
   view.rangeMin = 0;
@@ -2020,10 +2149,188 @@ sDisp.body.append(
 
 // One column, in the order a set-up is thought through: the line, the strip
 // it carries, the material, then the selected stand and how it is run.
+/* ── interstand tension ──────────────────────────────────────────────────── */
+
+const TENSION_ABOUT =
+  'スタンド間の張力を、表の入力値（目標）とラインが実際に持つ値（実績）に分ける。'
+  + '参考書 5.4 節の 3 つのモデル（tension-lab と同じ）で実績を動かす: 剛体はスタンド間の板を伸びないものとして'
+  + '速度が釣り合う張力を毎フレーム求める。単純弾性は長さ L の一様な弾性棒 dT/dt = (E h/L)(v_in − v_out)、'
+  + '分布弾性は板厚分布を運ぶ直列ばね。FEM では下流スタンドの入側面を上流の出側速度で拘束し、'
+  + 'その面が負担する反力を面高さで割った量が「不足している張力」— それを剛体はそのまま、弾性はその時定数 τ で追う。'
+  + '実機の τ は 10 ms 程度でフレームより短いので、実時間ではどのモデルも剛体に見える。時間倍率で遅回しにすると差が見える。'
+  + '張力制御 ON で、各スタンド間の実績を目標に合わせるよう上流スタンドのロール周速を PI で操作する。'
+  + '出側板厚の受け渡しもスタンド間の搬送遅れ L/v を持つ。リバースでは無効。';
+const sTension = section('スタンド間張力 (動特性・張力制御)', { hint: TENSION_ABOUT, open: false });
+const tensionHint = el('div', 'ctrl-hint');
+const tensionReadout = el('div', 'ctrl-hint');
+const tensionDials: { setEnabled(on: boolean): void }[] = [];
+const selTension = select<TensionModel>('張力モデル',
+  (['off', 'rigid', 'simple', 'dist'] as TensionModel[]).map((v) => ({ value: v, text: TENSION_MODEL_LABEL[v] })),
+  params.tensionModel, (v) => { params.tensionModel = v; tensionChart.reset(); syncTensionUi(); },
+  'なし: 張力は入力値のまま（従来どおり、各スタンドの送り速度が自走し不整合は「流量ずれ」に出る）。'
+    + '剛体 / 単純弾性 / 分布弾性: 表の前方張力が目標になり、実績はラインの速度バランスが決める。'
+    + '3 つの定常値は同じで、違うのは過渡の速さ（分布弾性はさらにスタンド間の板厚分布で剛性が変わる）。');
+const sTScale = slider({
+  label: '時間倍率', min: 0.001, max: 1, log: true, value: params.tensionTimeScale,
+  format: (v) => (v >= 0.1 ? v.toFixed(2) : v.toPrecision(2)),
+  hint: '張力の動特性と張力制御が進む速さ。1 で実時間（弾性の時定数 ~10 ms はフレーム以下なので剛体と区別がつかない）。'
+    + '0.01 なら 100 倍の遅回しで、弾性の一次遅れと搬送遅れ L/v が目で追える。FEM 本体（AGC・送り）は倍率の影響を受けない。',
+  onInput: (v) => { params.tensionTimeScale = v; },
+});
+const sTLen = slider({
+  label: 'スタンド間距離 L', unit: 'm', min: 0.5, max: 20, log: true, value: params.standDistance,
+  format: (v) => v.toFixed(2),
+  hint: '弾性棒の長さ、および搬送遅れ L/v の L。既定 4.5 m は参考書 図 5.17 の到達時刻から逆算した値（tension-lab と同じ）。'
+    + '短いほど剛性 E h/L が高く張力が速く動く。',
+  onInput: (v) => { params.standDistance = v; },
+});
+const sTFollow = slider({
+  label: '剛体の追従係数', min: 0.05, max: 1, step: 0.05, value: params.tensionFollow,
+  format: (v) => v.toFixed(2),
+  hint: '剛体モデルで、反力が示す不足分のうち 1 フレームに埋める割合。1 で一発、0.5 既定。'
+    + '反力は収束途中の Picard 反復から読むので、1 に近いと過渡で行き過ぎることがある。弾性モデルは τ が決めるので効かない'
+    + '（Bland–Ford に中立点がなく τ を作れない段だけ、この係数で代用する）。',
+  onInput: (v) => { params.tensionFollow = v; },
+});
+const tTCtl = toggle('張力制御（上流スタンドの周速を PI で操作）', params.tensionControl, (v) => {
+  params.tensionControl = v;
+  syncTensionUi();
+},
+  '各スタンド間で 実績 − 目標 の相対誤差を PI にかけ、上流スタンドのロール周速に相対トリムとして重ねる。'
+    + '張力が高ければ上流を増速して緩める。トリムはそのスタンド間より上流の全スタンドに同じ比で掛ける（逐次制御）ので、'
+    + '他のスタンド間の速度比とライン出側速度は乱れない。tension-lab と同じ構成（Kp=0, Ki のみが既定）。');
+const sTKp = slider({
+  label: '比例ゲイン Kp', min: 0, max: 1, step: 0.05, value: params.tensionKp,
+  format: (v) => v.toFixed(2),
+  hint: '張力の不足分を「それを打ち消す周速トリム」に換算した量（プラントゲイン v/(h₁·|dΔv/dT|) で割る）のうち、'
+    + 'ただちに掛ける割合。0 既定（積分のみ、tension-lab と同じ構成）。',
+  onInput: (v) => { params.tensionKp = v; },
+});
+const sTKi = slider({
+  label: '積分ゲイン Ki', unit: '1/s', min: 0.02, max: 5, log: true, value: params.tensionKi,
+  format: (v) => v.toPrecision(2),
+  hint: '閉ループの速さ。誤差をプラントゲインで割って積分するので、Ki はスケジュールによらず「モデル時間 1 s あたりに不足分の何割を埋めるか」。'
+    + '0.5 既定（時定数 2 s）。FEM の反力は 0.1〜0.2 s 遅れて追いつくので、2 を超えると剛体モデルで振動しやすい。'
+    + '相対誤差で積分する版は 50 MPa/% のプラントゲインの前で発散した。',
+  onInput: (v) => { params.tensionKi = v; },
+});
+const sTLim = slider({
+  label: '周速トリム上限', unit: '%', min: 1, max: 30, step: 1, value: params.tensionVLimit * 100,
+  format: (v) => v.toFixed(0),
+  hint: 'トリムの絶対値の上限（基準周速に対する割合）。上限に当たった分は積分しない（アンチワインドアップ）。',
+  onInput: (v) => { params.tensionVLimit = v / 100; },
+});
+tensionDials.push(sTScale, sTLen, sTFollow, tTCtl, sTKp, sTKi, sTLim);
+sTension.body.append(selTension.root, tensionHint, sTScale.root, sTLen.root, sTFollow.root,
+  tTCtl.root, sTKp.root, sTKi.root, sTLim.root, tensionReadout);
+
+/** Enable what the model uses, and say why the rest is grey. */
+function syncTensionUi(): void {
+  const reverse = view.lineMode === 'reverse';
+  const on = !reverse && params.tensionModel !== 'off';
+  (selTension.root.querySelector('select') as HTMLSelectElement).disabled = reverse;
+  for (const d of tensionDials) d.setEnabled(on);
+  if (on) {
+    sTFollow.setEnabled(params.tensionModel === 'rigid');
+    for (const d of [sTKp, sTKi, sTLim]) d.setEnabled(params.tensionControl);
+  }
+  tensionHint.textContent = reverse
+    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効。'
+    : params.tensionModel === 'off'
+      ? '張力は表の入力値がそのまま境界条件。下流スタンドの送り速度は自走で決まり、'
+        + '残る不整合は上部の「流量ずれ」に出る（実機ならスタンド間張力が吸収する分）。'
+      : `${TENSION_MODEL_LABEL[params.tensionModel]}: 下流スタンドの入側速度を上流の出側速度に拘束し、`
+        + '張力は反力から求める。表の前方張力は目標、実績は表の「実績」行・ミルライン図・下のグラフに出る。'
+        + (params.tensionControl ? '制御 ON。' : '制御 OFF: 実績は目標から離れたところに落ち着く。目標に合わせるには制御を ON にする。');
+  if (mill.count < 2 && !reverse) tensionHint.textContent += ' スタンドが 1 つのあいだはスタンド間がない。';
+  refreshTensionChart();
+}
+
+/** The per-gap numbers, refreshed every frame while a model is on. */
+function paintTensionReadout(): void {
+  const md = mill.diag;
+  if (md.tensionModel === 'off' || md.tensionActual.length === 0) {
+    if (tensionReadout.textContent) tensionReadout.textContent = '';
+    return;
+  }
+  const lines: string[] = [];
+  for (let k = 0; k < md.tensionActual.length; k++) {
+    const a = md.tensionActual[k] / 1e6, t = md.tensionTarget[k] / 1e6, r = md.tensionRigid[k] / 1e6;
+    const tau = md.tensionTau[k];
+    const clamp = md.tensionClamped[k] === -1 ? ' 張力抜け' : md.tensionClamped[k] === 1 ? ' 降伏上限' : '';
+    lines.push(`${standTag(k)}→${standTag(k + 1)}: 目標 ${t.toFixed(1)} / 実績 ${a.toFixed(1)} MPa`
+      + `（反力の示す剛体値 ${r.toFixed(1)}${Number.isFinite(tau) ? `, τ ${(tau * 1000).toFixed(1)} ms` : ''}`
+      + `${params.tensionControl ? `, トリム ${(100 * md.tensionTrim[k]).toFixed(2)}%` : ''}`
+      + `, 搬送中 ${md.tensionQueueLen[k].toFixed(2)} m）${clamp}`);
+  }
+  lines.push(md.tensionSettled ? '全スタンド間 静定' : '推移中');
+  const text = lines.join('\n');
+  if (tensionReadout.textContent !== text) tensionReadout.textContent = text;
+}
+tensionReadout.style.whiteSpace = 'pre-line';
+
 left.append(sLine.root, sStrip.root, sMat.root, sHeat.root,
-  sProc.root, sAgc.root, sRoll.root, sNum.root, sDisp.root);
+  sProc.root, sAgc.root, sTension.root, sRoll.root, sNum.root, sDisp.root);
 
 /* ── mu back-calculation ─────────────────────────────────────────────────── */
+
+/* ── optional panels ─────────────────────────────────────────────────────── */
+type PanelMode = 'both' | 'stage' | 'stats' | 'none';
+const PANEL_MODE_LABEL: Record<PanelMode, string> = {
+  both: '表示: コンター図 ＋ 圧延諸元',
+  stage: '表示: コンター図のみ',
+  stats: '表示: 圧延諸元のみ',
+  none: '表示: グラフ優先（両方隠す）',
+};
+const PANELS_KEY = 'rollfem.panels.v1';
+let panelMode: PanelMode = (() => {
+  try {
+    const v = localStorage.getItem(PANELS_KEY);
+    return v && v in PANEL_MODE_LABEL ? (v as PanelMode) : 'both';
+  } catch { return 'both'; }
+})();
+const stageEl = document.getElementById('stage') as HTMLElement;
+const rightEl = document.getElementById('right') as HTMLElement;
+/** the contour stage is off screen: nothing to draw into */
+const stageHidden = () => stageEl.hidden;
+
+/** Put the grid in the mode: classes and hidden flags only, safe at boot. */
+function paintPanelMode(m: PanelMode): void {
+  panelMode = m;
+  const app = document.getElementById('app')!;
+  const noStage = m === 'stats' || m === 'none';
+  const noRight = m === 'stage' || m === 'none';
+  app.classList.toggle('hide-stage', noStage);
+  app.classList.toggle('hide-right', noRight);
+  stageEl.hidden = noStage;
+  rightEl.hidden = noRight;
+}
+/** The switch at run time: repaint, then re-place the handles and re-fit the views. */
+function applyPanelMode(m: PanelMode): void {
+  paintPanelMode(m);
+  try { localStorage.setItem(PANELS_KEY, m); } catch { /* private mode */ }
+  layoutRef?.refresh();
+  relayout();
+}
+// The remembered mode goes on before anything measures the grid.
+paintPanelMode(panelMode);
+
+const HILL_KEY = 'rollfem.hill.v1';
+let hillShown = (() => {
+  try { return localStorage.getItem(HILL_KEY) !== 'off'; } catch { return true; }
+})();
+const hillCell = document.getElementById('chart-nip') as HTMLElement;
+function paintHillShown(on: boolean): void {
+  hillShown = on;
+  hillCell.hidden = !on;
+}
+function applyHillShown(on: boolean): void {
+  paintHillShown(on);
+  try { localStorage.setItem(HILL_KEY, on ? 'on' : 'off'); } catch { /* private mode */ }
+  layoutRef?.refresh();
+  relayout();
+}
+paintHillShown(hillShown);
 
 const MU_INV_LABEL = 'μ逆算';
 const MU_INV_LABEL_ON = 'μ逆算 解除';
@@ -2479,6 +2786,30 @@ function applyPanelStructure(theme: Theme): void {
   document.getElementById('topbar-actions')!.append(row);
   playBtn = row.querySelector('button')!;
 
+  // Which of the two optional panels are on screen. The mill line, the
+  // charts and the controls are always there; the contour stage and the
+  // stats panel each go away on request and the grid closes over them.
+  const psel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  psel.title = '中央のコンター図と右の圧延諸元パネルの表示。隠した分はミルライン・グラフ・残りのパネルが使う。'
+    + '隠している間はコンター図の描画も止まるので、その分フレームが軽い。';
+  for (const [v, text] of Object.entries(PANEL_MODE_LABEL)) {
+    const o = el('option'); o.value = v; o.textContent = text; psel.append(o);
+  }
+  psel.value = panelMode;
+  psel.addEventListener('change', () => applyPanelMode(psel.value as PanelMode));
+  document.getElementById('topbar-actions')!.append(psel);
+
+  // The friction hill on its own switch: it is the one chart about a single
+  // stand's bite, and with it away the time-series column gets its width.
+  const hsel = el('select', 'ctrl-select topbar-select') as HTMLSelectElement;
+  hsel.title = '下段左の摩擦丘（界面面圧・せん断分布）の表示。隠すと制御軌跡と時系列グラフが帯の幅を使う。';
+  for (const [v, text] of [['on', '摩擦丘: 表示'], ['off', '摩擦丘: 非表示']] as const) {
+    const o = el('option'); o.value = v; o.textContent = text; hsel.append(o);
+  }
+  hsel.value = hillShown ? 'on' : 'off';
+  hsel.addEventListener('change', () => applyHillShown(hsel.value === 'on'));
+  document.getElementById('topbar-actions')!.append(hsel);
+
   // Not next to 一時停止 and リセット, which are view controls: this one changes
   // the setup. It is one press and it answers immediately - there is nothing
   // to wait for, because it never asks the FEM anything.
@@ -2743,6 +3074,78 @@ const hill = new FrictionHillChart(document.getElementById('nip') as HTMLCanvasE
 const agcScatter = new AgcScatterChart(
   document.getElementById('agcscatter') as HTMLCanvasElement);
 const agcChartCell = document.getElementById('chart-agc') as HTMLElement;
+const tensionChart = new TrackChart(document.getElementById('tensionchart') as HTMLCanvasElement);
+const tensionChartCell = document.getElementById('chart-tension') as HTMLElement;
+const gaugeChart = new TrackChart(document.getElementById('gaugechart') as HTMLCanvasElement, 600,
+  { unit: 'mm', digits: 4, fromZero: false });
+const speedChart = new TrackChart(document.getElementById('speedchart') as HTMLCanvasElement, 600,
+  { unit: 'm/min', digits: 1, fromZero: false });
+const stripChart = new TrackChart(document.getElementById('stripchart') as HTMLCanvasElement, 600,
+  { unit: 'm/min', digits: 1, fromZero: false });
+const screwChart = new TrackChart(document.getElementById('screwchart') as HTMLCanvasElement, 600,
+  { unit: 'mm', digits: 4, fromZero: false });
+const massChart = new TrackChart(document.getElementById('masschart') as HTMLCanvasElement, 600,
+  { unit: 'mm²/s', digits: 0, fromZero: false });
+
+/** The chart is only there while a model is on; with it off there is no history to draw. */
+function refreshTensionChart(): void {
+  const hidden = params.tensionModel === 'off' || view.lineMode === 'reverse' || mill.count < 2;
+  if (tensionChartCell.hidden === hidden) return;
+  tensionChartCell.hidden = hidden;
+  layoutRef?.refresh();
+}
+
+/** One sample per solved frame, straight off the line's diagnostics. */
+function pushTensionSample(): void {
+  const md = mill.diag;
+  if (md.tensionModel !== 'off') {
+    tensionChart.push(md.tensionActual.map((v) => v / 1e6), md.tensionTarget.map((v) => v / 1e6));
+  }
+  // Every stand's exit gauge against what it is aiming at - the same rule the
+  // mill diagram uses for its target, so the two never disagree.
+  const stands = activeStands();
+  gaugeChart.push(
+    stands.map((st) => (st.diag.exitThickness > 0 ? st.diag.exitThickness : NaN) * 1000),
+    stands.map((st, k) => {
+      const c = standSetups[k];
+      return c.agcMode === 'gauge' ? c.targetGauge * 1000
+        : c.agcMode === 'force' ? NaN
+          : st.params.h0 * (1 - c.reduction) * 1000;
+    }));
+  // Roll surface speed as the stand ran this frame, against the base speed
+  // the cone (or the dial, for #1) asked for before the tension controller's
+  // trim. With no trim the two lie on top of each other.
+  const trimOn = md.tensionModel !== 'off' && params.tensionControl;
+  // Trims are successive: stand k carries the product of the trims of every
+  // gap at or after it (see Mill.applyTension), so that is what to divide out.
+  const factor = stands.map((_, k) => {
+    let f = 1;
+    if (trimOn) for (let j = k; j < md.tensionTrim.length; j++) f *= 1 + (md.tensionTrim[j] || 0);
+    return f;
+  });
+  speedChart.push(
+    stands.map((st, k) => (md.omega[k] ?? st.params.omega) * st.params.R * 60),
+    stands.map((st, k) => ((md.omega[k] ?? st.params.omega) * st.params.R * 60) / factor[k]));
+  // Strip speed leaving (solid) and entering (dashed) each stand, both as the
+  // FEM measures them: the gap between one stand's exit and the next stand's
+  // entry is the mismatch a tension model carries.
+  stripChart.push(
+    stands.map((st) => (st.diag.exitSpeed > 0 ? st.diag.exitSpeed * MPM : NaN)),
+    stands.map((st) => (st.diag.entrySpeed > 0 ? st.diag.entrySpeed * MPM : NaN)));
+  // The screw position: what every gap loop actually moves. No rule to draw
+  // against - the loops aim at a gauge or a load, and the screw is the means.
+  screwChart.push(
+    stands.map((st) => (Number.isFinite(st.screwPosition) ? st.screwPosition * 1000 : NaN)),
+    stands.map((st) => (params.screwDyn && Number.isFinite(st.diag.screwCommand) ? st.diag.screwCommand * 1000 : NaN)));
+  // Mass flow per unit width, v·h in mm²/s: exit solid, entry dashed. The
+  // gap between the two on one stand is the volume-balance error of the
+  // solve; the solid lines lying on one another across the line is what a
+  // consistent speed cone looks like.
+  const mm2s = (v: number, h: number) => (v > 0 && h > 0 ? v * 1000 * h * 1000 : NaN);
+  massChart.push(
+    stands.map((st) => mm2s(st.diag.exitSpeed, st.diag.exitThickness)),
+    stands.map((st) => mm2s(st.diag.entrySpeed, st.params.h0)));
+}
 const hillPLabel = document.getElementById('hill-p-label') as HTMLElement;
 
 /**
@@ -3098,6 +3501,7 @@ function relayout(): void {
   millLine.draw(millViews());
   fieldDirty = true;
 }
+
 const layout = installLayout(document.getElementById('app')!, relayout);
 layoutRef = layout;
 // The remembered look was applied to the root before first paint; its
@@ -3123,6 +3527,7 @@ updateExtentChip();
 updateLegendStatic();
 buildStandGrid();
 refreshAgcChart();
+syncTensionUi();
 // view.running, not a literal: ?nosolve has already set it false.
 setRunning(view.running);
 fitView();
@@ -3152,6 +3557,8 @@ if (DEBUG_TITLE) {
         agcSetpoint: st.agcSetpoint * 1000,
         h1Command: st.h1Command * 1000,
         gap: st.h1 * 1000,
+        screwCommand: d.screwCommand * 1000,
+        screwTravel: st.screwTravel * 1e6,
         millSpring: d.millSpring * 1000,
         gaugeFloor: st.gaugeFloor * 1000,
         gaugeIdleLive: st.gaugeIdle,
@@ -3173,6 +3580,10 @@ if (DEBUG_TITLE) {
         massBalance: d.massBalance,
         neutralX: d.neutralX * 1000,
         arc: d.arcLength * 1000,
+        omega: p.omega,
+        rollMpm: p.omega * p.R * MPM,
+        entryMpm: d.entrySpeed * MPM,
+        exitMpm: d.exitSpeed * MPM,
         peakP: d.peakPressure / 1e6,
         targetTonf: (standSetups[k].targetForce * view.stripWidth) / TONF,
         reduction: standSetups[k].reduction,
@@ -3205,6 +3616,94 @@ if (DEBUG_TITLE) {
     /** debug: poison a stand's velocity field, to watch it recover */
     poison: (k: number) => { const st = mill.stands[k]; if (!st) return false; st.flow.v.fill(NaN); return true; },
     restarts: () => mill.stands.map((st) => ({ restarts: st.restarts, giveUp: st.divergedGiveUp, ago: performance.now() - st.restartAt })),
+    /**
+     * Volume flux through every column of a stand's strip mesh [mm²/s],
+     * trapezoid over the actual node spacing, with the column's x [mm] and
+     * thickness [mm]. Where the flux drops along x is where the solve
+     * loses volume - the one way to tell a bite leak from an exit artefact.
+     */
+    fluxProfile: (k: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const m = st.flow.mesh, v = st.flow.v;
+      const out: { x: number; h: number; q: number }[] = [];
+      for (let i = 0; i <= m.nx; i++) {
+        let q = 0;
+        for (let j = 0; j < m.ny; j++) {
+          const a = i * m.rows + j, b = a + 1;
+          const dy = m.X[2 * b + 1] - m.X[2 * a + 1];
+          q += 0.5 * (v[2 * a] + v[2 * b]) * dy;
+        }
+        out.push({ x: m.X[2 * (i * m.rows)] * 1000, h: 2 * m.X[2 * (i * m.rows + m.ny) + 1] * 1000, q: 2 * q * 1e6 });
+      }
+      return { arc: st.diag.arcLength * 1000, neutralX: st.diag.neutralX * 1000, elasticEntry: st.diag.elasticEntryLen * 1000, elasticExit: st.diag.elasticExitLen * 1000, cols: out };
+    },
+    /**
+     * Streamline test on the strip's top surface, per column: the surface
+     * velocity against the slope of the mesh surface it sits on and against
+     * the slope of the undeformed roll circle the contact constraint uses.
+     * `rMesh` = v_y − v_x·s'_mesh is the rate at which volume crosses the
+     * mesh surface; its running integral is what the flux profile shows.
+     */
+    streamline: (k: number) => {
+      const st = mill.stands[k]; if (!st) return null;
+      const m = st.flow.mesh, v = st.flow.v;
+      const s = st as unknown as { cy: number; roll: { cx: number } };
+      const out: { x: number; on: number; vx: number; vy: number; sMesh: number; sCirc: number; rMesh: number; rCirc: number; hyd: number }[] = [];
+      for (let i = 0; i <= m.nx; i++) {
+        const nd = m.topNodes[i];
+        const ip = Math.min(m.nx, i + 1), im = Math.max(0, i - 1);
+        const dx = m.X[2 * m.topNodes[ip]] - m.X[2 * m.topNodes[im]];
+        const dy = m.X[2 * m.topNodes[ip] + 1] - m.X[2 * m.topNodes[im] + 1];
+        const sMesh = Math.abs(dx) > 1e-12 ? dy / dx : 0;
+        const px = m.X[2 * nd], py = m.X[2 * nd + 1];
+        const nx = px - s.roll.cx, ny = py - s.cy;
+        const sCirc = Math.abs(ny) > 1e-12 ? -nx / ny : 0;
+        const vx = v[2 * nd], vy = v[2 * nd + 1];
+        // hydrostatic stress of the top element to the left of the column [MPa]
+        const ei = Math.min(m.nx - 1, Math.max(0, i - 1)) * m.ny + (m.ny - 1);
+        const hyd = st.flow.elemStress[4 * ei + 3] / 1e6;
+        out.push({ x: px * 1000, on: st.flow.ifActive[i], vx, vy, sMesh, sCirc, rMesh: vy - vx * sMesh, rCirc: vy - vx * sCirc, hyd });
+      }
+      return out;
+    },
+    /** the interstand gaps as the line carries them; MPa, %, ms, m */
+    tension: () => {
+      const md = mill.diag;
+      return {
+        model: md.tensionModel,
+        control: params.tensionControl,
+        timeScale: params.tensionTimeScale,
+        settled: md.tensionSettled,
+        flowError: md.flowError,
+        tensionMs: mill.lastTensionMs,
+        frameMs: frameEma,
+        exitCorr: mill.exitCorrection,
+        omega: [...md.omega],
+        gaps: mill.gapStates.map((g, k) => ({
+          k,
+          actual: md.tensionActual[k] / 1e6,
+          target: md.tensionTarget[k] / 1e6,
+          rigid: md.tensionRigid[k] / 1e6,
+          err: md.tensionError[k],
+          trimPct: 100 * md.tensionTrim[k],
+          tauMs: 1000 * md.tensionTau[k],
+          sens: g.sens,
+          queueLen: g.queue.length,
+          slices: g.queue.count,
+          clamped: g.clamped,
+          feedSpeed: mill.stands[k + 1]?.params.feedSpeed,
+          exitSpeed: mill.stands[k]?.diag.exitSpeed,
+          reaction: mill.stands[k + 1]?.diag.feedReaction,
+          appliedBack: (mill.stands[k + 1]?.params.backTension ?? NaN) / 1e6,
+          appliedFront: (mill.stands[k]?.params.frontTension ?? NaN) / 1e6,
+        })),
+      };
+    },
+    setTensionModel: (m: TensionModel) => {
+      params.tensionModel = m; selTension.set(m); tensionChart.reset(); syncTensionUi(); return true;
+    },
+    setTensionControl: (on: boolean) => { params.tensionControl = on; tTCtl.set(on); syncTensionUi(); return true; },
+    setTensionScale: (s: number) => { params.tensionTimeScale = s; sTScale.set(s); return true; },
     setMu: (k: number, mu: number) => {
       const f = standCells[k]?.mu.root as HTMLInputElement | undefined;
       if (!f) return false;
@@ -3360,7 +3859,7 @@ function frame(now: number): void {
   last = now;
   frameEma += (wall - frameEma) * 0.1;
   fpsEma += (1000 / Math.max(wall, 1e-3) - fpsEma) * 0.08;
-  renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
+  if (!stageHidden()) renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
 
   let solved = false;
   if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
@@ -3368,6 +3867,7 @@ function frame(now: number): void {
     mill.advance(wall / 1000);
     announceRestarts();
     pushAgcSample();
+    pushTensionSample();
     solved = true;
   }
   if (view.running && view.showTracers) tracers.update(wall / 1000);
@@ -3410,7 +3910,7 @@ function frame(now: number): void {
     rollUseField: !STRIP_ONLY.has(view.field),
     stripUseField: !ROLL_ONLY.has(view.field),
   };
-  renderer.draw(sim, cam, ropts);
+  if (!stageHidden()) renderer.draw(sim, cam, ropts);
 
   if (view.showTracers && tracers.lines.length) {
     for (const f of view.extent === 'full' ? [1, -1] : [1]) {
@@ -3898,6 +4398,11 @@ function updateStats(): void {
   const unsolvedTag = unsolved.length
     ? ` ⚠ 計算不能 ${unsolved.map(([k, s]) => `${standTag(k)} ${s === 'runaway' ? '扁平発散' : s === 'tension' ? '張力' : s === 'geometry' ? '圧下なし' : '噛み込みなし'}`).join('・')}`
     : '';
+  paintTensionReadout();
+  const tensionTag = md.tensionModel !== 'off'
+    ? ` ／ 張力: ${md.tensionModel === 'rigid' ? '剛体' : md.tensionModel === 'simple' ? '単純弾性' : '分布弾性'}`
+      + `${params.tensionControl ? '・制御中' : ''} ${md.tensionSettled ? '静定' : '推移中'}`
+    : '';
   const modelTag = params.loadModel === 'slab'
     ? ` ／ 荷重: スラブ法 (${SLAB_THEORY_LABEL[params.slabTheory]}${params.flattening === 'roberts' ? '・Roberts 偏平' : ''})${unsolvedTag}` : '';
   // Any stand whose volume is not conserved is named here, because the
@@ -3916,7 +4421,7 @@ function updateStats(): void {
       // Consecutive passes do not share a flow, so there is nothing to be off by.
       + (Number.isFinite(md.flowError)
         ? ` ／ 流量ずれ ${(md.flowError * 100).toFixed(2)}%` : '')
-      + ` ／ ${md.settled ? `全${w}収束` : '調整中'}`
+      + ` ／ ${md.settled ? `全${w}収束` : '調整中'}${tensionTag}`
     : `単スタンド${modelTag}${massTag}${totals}`
       + ` ／ 「ライン構成」で${view.lineMode === 'reverse' ? 'パス' : 'スタンド'}数を増やせる`;
 
@@ -3939,7 +4444,21 @@ function updateStats(): void {
     agcScatter.setGaugeRange(targetOf(standCount - 1) * 1000, targetOf(0) * 1000);
   }
   agcScatter.draw(agcTrailSet());
-  hill.draw(samples, {
+  if (!tensionChartCell.hidden) {
+    tensionChart.draw(Array.from({ length: Math.max(0, mill.count - 1) },
+      (_, k) => `${standTag(k)}→${standTag(k + 1)}`));
+  }
+  const tags = Array.from({ length: mill.count }, (_, k) => standTag(k));
+  gaugeChart.draw(tags);
+  // Roll speed and strip speed on one axis: the gap between them is the
+  // slip, and it only reads as such when the scales agree.
+  const rs = speedChart.dataRange(), ss = stripChart.dataRange();
+  const shared = rs && ss ? { lo: Math.min(rs.lo, ss.lo), hi: Math.max(rs.hi, ss.hi) } : rs ?? ss;
+  speedChart.draw(tags, undefined, shared);
+  stripChart.draw(tags, undefined, shared);
+  screwChart.draw(tags);
+  massChart.draw(tags);
+  if (hillShown) hill.draw(samples, {
     neutralX: hillNeutral,
     neutralFemX: sim.diag.loadModel === 'slab' && sim.diag.neutralFound ? sim.diag.neutralX * 1000 : null,
     flowStress: slab.kf / 1e6,

@@ -97,7 +97,7 @@ npm run dev -- --port 5177 --strictPort &
 
 ## クエリパラメータ（測定用）
 
-`?stands=3&agc=ratio|gauge|force&load=700&h1=1.2&field=temperature&mesh=insane`
+`?stands=3&agc=ratio|gauge|force&load=700&h1=1.2&field=temperature&mesh=insane&tension=rigid|simple|dist&tctl=1&tscale=0.05`
 — 起動時点で条件を作れるので、UI を操作して状態を作るより再現性が高い。
 
 ## Git 運用
