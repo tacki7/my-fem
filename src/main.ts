@@ -3898,20 +3898,46 @@ if (DEBUG_TITLE) {
   };
 }
 
+/** messages already reported by `frame`, so a throw that repeats every frame is shown once */
+const frameErrors = new Set<string>();
+
+/**
+ * The loop itself. Whatever one frame throws, the next one is still asked for:
+ * an exception used to skip the `requestAnimationFrame` at the end, and the
+ * picture froze with nothing on screen to say why.
+ */
 function frame(now: number): void {
+  try {
+    frameBody(now);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!frameErrors.has(msg)) {
+      frameErrors.add(msg);
+      console.error('frame:', err);
+      toast(`描画ループで例外: ${msg}（詳細はコンソール）`, true);
+    }
+  } finally {
+    requestAnimationFrame(frame);
+  }
+}
+
+function frameBody(now: number): void {
   const wall = Math.min(now - last, 100);
   last = now;
   // The 3D tab has the screen: the 2D line holds still (its state is kept,
   // not advanced) and nothing here is drawn, so the two solves never share a
   // frame.
-  if (view3d?.active) { requestAnimationFrame(frame); return; }
+  if (view3d?.active) return;
   frameEma += (wall - frameEma) * 0.1;
   fpsEma += (1000 / Math.max(wall, 1e-3) - fpsEma) * 0.08;
   if (!stageHidden()) renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
 
   let solved = false;
   if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
-    mill.sync(params, activeSetups());
+    // The setups of the line that exists, not of the one the stand-count
+    // select asks for: that rebuild is still waiting on `scheduleRebuild`, and
+    // until it runs a shorter slice leaves the last stands without a setup.
+    mill.sync(params, standSetups.slice(0, mill.count));
     mill.advance(wall / 1000);
     announceRestarts();
     pushAgcSample();
@@ -3989,7 +4015,6 @@ function frame(now: number): void {
       + `d${renderer.lastDrawMs.toFixed(1)} u${statMs.toFixed(1)} c${renderer.drawCalls}`
       + ` t${tracers.lines.length}`;
   }
-  requestAnimationFrame(frame);
 }
 
 function tone(v: number, warn: number, bad: number): 'ok' | 'warn' | 'bad' {
