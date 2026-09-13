@@ -18,7 +18,7 @@
  * symmetric positive definite.
  */
 
-import { BandMatrix, denseSolve } from './band';
+import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, type StripFemResult } from './stripfem';
@@ -58,12 +58,23 @@ const NO_LOAD = { q: 0, arc: 0, runaway: false } as const;
 const FEM_FIXED_TOL = 2e-3;
 /** relaxation of that correction between outer solves */
 const FEM_RELAX = 0.3;
-/** correction rounds without a screw step after which the screw steps anyway */
-const FEM_MAX_ROUNDS = 25;
 /** rounds the correction has to stay within ten times the tolerance to count as settled */
 const FEM_LOOSE_RUNS = 6;
 /** outer iterations at one screw position after which a nearly settled Newton lets the screw move */
 const STEP_ESCAPE_ITERS = 60;
+/**
+ * Anderson acceleration of the FEM correction (see `andersonStep`): the
+ * history depth, the residual growth that restarts it, the largest mixing
+ * coefficient it may use, and the weight of the elongation offsets against
+ * the load ratios in its residual.
+ */
+const AA_DEPTH = 4;
+const AA_RESTART_GROWTH = 2;
+const AA_MAX_GAMMA = 20;
+const AA_EPS_SCALE = 50;
+/** merit weights of the control target against the force residual, so their tolerances line up */
+const MERIT_GAUGE = 1e-2;
+const MERIT_FORCE = 1e-3;
 /**
  * How the outer Newton carries the strip's tension coupling (see `stripSolve`):
  * 'full' is the exact Woodbury update (m banded solves an iteration, which on
@@ -252,6 +263,15 @@ export class StackSolver {
   private T!: Float64Array;
   /** any slice carrying tension feedback at all */
   private tensionLive = false;
+  /** the stack's response to a unit screw move, −∂(residual)/∂S, built with the tangent */
+  private bScrew!: Float64Array;
+  private x2!: Float64Array;
+  private duPlain!: Float64Array;
+  /** the Anderson history of the FEM correction: scaled iterates and their residuals */
+  private aaX: Float64Array[] = [];
+  private aaF: Float64Array[] = [];
+  /** the control target's residual, scaled - reported alongside the force residual */
+  targetResidual = 0;
   /** profiling counters, when set */
   counters: { coreIts: number; coreCalls: number; coreCap: number; rounds: number; inner: number; stripCalls: number } | null = null;
   /** last iteration's line-search record */
@@ -295,12 +315,18 @@ export class StackSolver {
   setParams(p: Params3D): void {
     this.p = p;
     const key = geometryKey(p);
-    if (key !== this.geomKey) this.rebuild();
+    const newMesh = key !== this.geomKey;
+    if (newMesh) this.rebuild();
     else this.refreshProfiles();
     this.converged = false;
     this.yAge = -1;
     this.iterations = 0;
-    this.femRatio = null; this.femEps = null;
+    // The strip FEM's correction is kept across a change that keeps the
+    // mesh: it depends smoothly on the inputs, and restarting it from one
+    // threw away most of the last solve's work (re-convergence after a
+    // dial change took up to twice as long). A new mesh starts it over.
+    if (newMesh) { this.femRatio = null; this.femEps = null; }
+    this.aaX = []; this.aaF = [];
     this.sinceStep = 0; this.femRounds = 0; this.femLooseRuns = 0;
   }
 
@@ -326,6 +352,9 @@ export class StackSolver {
     this.du = new Float64Array(n);
     this.scratch = new Float64Array(n);
     this.uTrial = new Float64Array(n);
+    this.bScrew = new Float64Array(n);
+    this.x2 = new Float64Array(n);
+    this.duPlain = new Float64Array(n);
     // The screw carries over as a warm start for a changed dimension, but
     // not to another mill type: a 4Hi's 2.5 mm closure driven into a 20Hi
     // stack starts the search deep in a closed gap.
@@ -531,6 +560,7 @@ export class StackSolver {
 
     // ── supports ──
     const lev = p.leveling;
+    if (withK) this.bScrew.fill(0);
     for (let r = 0; r < nr; r++) {
       const R = rolls[r];
       const d = R.def;
@@ -555,6 +585,8 @@ export class StackSolver {
           case 'free': return;
         }
         addK(iv, iv, ky); addK(iw, iw, kz);
+        // ty = −S − …, so ∂(rhs)/∂S = −ky here: the column of the screw
+        if (withK && moves) this.bScrew[iv] += ky;
         const ry = ky * (ty - u[iv]) + fy;
         rhs[iv] += ry;
         rhs[iw] += kz * (tz - u[iw]);
@@ -629,87 +661,214 @@ export class StackSolver {
     return Math.sqrt(res) / fScale;
   }
 
-  /** one Newton iteration on the stack, with a backtracking line search */
+  /** the control target's residual: gauge [m] or force [N]; zero in screw mode */
+  private targetValue(): number {
+    const p = this.p;
+    if (p.mode === 'gauge') return this.h1Mean - p.h0 * (1 - p.reduction);
+    if (p.mode === 'force') return this.forceTotal - p.targetForce;
+    return 0;
+  }
+
+  /** the target's residual as it enters the line search's merit, commensurate with the force residual */
+  private targetMerit(c: number): number {
+    const p = this.p;
+    if (p.mode === 'gauge') return (MERIT_GAUGE * Math.abs(c)) / p.h0;
+    if (p.mode === 'force') return (MERIT_FORCE * Math.abs(c)) / Math.max(p.targetForce, 1);
+    return 0;
+  }
+
+  /**
+   * One Newton iteration on the stack and the screw together, with a
+   * backtracking line search.
+   *
+   * In gauge or force control the screw position S is an unknown beside the
+   * roll displacements, and the control target is its equation - the
+   * bordered system
+   *
+   *     [ K   b ] [Δu]   [ r ]        b = −∂r/∂S  (the screw-moving supports)
+   *     [ aᵀ  0 ] [ΔS] = [−c ]        a = ∂c/∂u   (mean exit gauge, or total load)
+   *
+   * solved with the one factorisation: x₁ = K⁻¹r, x₂ = K⁻¹b (both through the
+   * tension coupling's Woodbury update), ΔS = (c + aᵀx₁)/(aᵀx₂), Δu = x₁ − ΔS x₂.
+   * The screw used to be stepped by a secant between fully settled Newtons,
+   * five to nine rounds of settling before the target was even reached; here
+   * it moves with every iteration. With no contact yet to steer by (aᵀx₂
+   * of the wrong sign or nothing) the screw takes the old secant guess and
+   * the rolls follow it through x₂.
+   */
   iterate(): void {
     const t0 = performance.now();
+    const p = this.p;
     const { K, rhs, u, du } = this;
+    const bordered = p.mode !== 'screw';
+    // the screw dial takes effect at once in screw mode (it used to wait for a rebuild)
+    if (!bordered) this.screw = p.screw;
     this.stripSolve(TENSION_COUPLING !== 'none');
     const res0 = this.assemble(true);
+    const c0 = this.targetValue();
+    const merit0 = res0 + this.targetMerit(c0);
     if (!K.cholesky()) { this.residual = Infinity; this.converged = false; return; }
     K.solve(rhs, du);
-    // Woodbury for the strip's tension coupling, K_full = K + U M Uᵀ with
-    // U the work-roll v-DOFs of the slices and M = -diag(w dq/dσ) T:
-    //   x_full = x - Y M (I + G M)⁻¹ Uᵀ x,   Y = K⁻¹U,  G = UᵀY.
-    // M is not inverted (a clipped slice has a zero row), so this is the
-    // form that only needs I + G M, which is m×m dense with m the slices.
-    const m = this.slices.length;
-    if (USE_WOODBURY && this.tensionLive && m > 0) {
-      const n = du.length;
-      const Y = this.woodburyY(n, m);
-      const e = this.scratch;
-      const cols = this.slices.map((sl) => this.idx(sl.s, this.stack.wr, 0));
-      if (this.yAge >= Y_REUSE || this.yAge < 0) {
-        for (let j = 0; j < m; j++) {
-          e.fill(0); e[cols[j]] = 1;
-          K.solveUnit(cols[j], e);
-          Y.set(e, j * n);
-        }
-        this.yAge = 0;
+    const wb = USE_WOODBURY && this.tensionLive && this.slices.length > 0 ? this.prepareWoodbury() : null;
+    if (wb) this.applyWoodbury(wb, du);
+
+    let dS = 0;
+    // the plain step (screw held) is kept: it is the fallback when the
+    // bordered one cannot bring the merit down
+    const plain = this.duPlain;
+    plain.set(du);
+    if (bordered) {
+      const x2 = this.x2;
+      K.solve(this.bScrew, x2);
+      if (wb) this.applyWoodbury(wb, x2);
+      const m = this.slices.length;
+      const a = this.targetGradient();
+      let ax1 = 0, ax2 = 0;
+      for (let j = 0; j < m; j++) {
+        const iv = this.idx(this.slices[j].s, this.stack.wr, 0);
+        ax1 += a[j] * du[iv]; ax2 += a[j] * x2[iv];
       }
-      this.yAge++;
-      // M = -diag(w dqds) T ; A = I + G M
-      const M = new Float64Array(m * m), A = new Float64Array(m * m);
-      for (let i = 0; i < m; i++) {
-        const wi = -this.slices[i].weight * this.dqds[i];
-        for (let j = 0; j < m; j++) M[i * m + j] = wi * this.T[i * m + j];
-      }
-      for (let i = 0; i < m; i++) {
-        for (let j = 0; j < m; j++) {
-          // G_ik = Y[k][cols[i]]
-          let s = 0;
-          for (let k = 0; k < m; k++) s += Y[k * n + cols[i]] * M[k * m + j];
-          A[i * m + j] = (i === j ? 1 : 0) + s;
-        }
-      }
-      const z = new Float64Array(m);
-      for (let i = 0; i < m; i++) z[i] = du[cols[i]];
-      if (denseSolve(A, m, z)) {
-        // du -= Y (M z)
-        for (let k = 0; k < m; k++) {
-          let mz = 0;
-          for (let j = 0; j < m; j++) mz += M[k * m + j] * z[j];
-          if (mz === 0) continue;
-          const off = k * n;
-          for (let i = 0; i < n; i++) du[i] -= Y[off + i] * mz;
-        }
-      }
+      // closing the screw thins the strip (aᵀx₂ > 0 in gauge) and loads it (aᵀx₂ < 0 in force)
+      const usable = p.mode === 'gauge' ? ax2 > 0.02 : ax2 < -1e8;
+      dS = usable ? (c0 + ax1) / ax2 : -c0 / (p.mode === 'gauge' ? -0.5 : 4e9);
+      const cap = 0.15 * p.h0 + 20e-6;
+      dS = Math.max(-cap, Math.min(cap, dS));
+      dS = Math.max(SCREW_MIN, Math.min(SCREW_MAX, this.screw + dS)) - this.screw;
+      for (let i = 0; i < du.length; i++) du[i] -= dS * x2[i];
     }
-    let mx = 0;
-    for (let i = 0; i < du.length; i++) {
-      // slopes are scaled by dx so the clip means the same thing for them
-      const d = i % 2 === 0 ? du[i] : du[i] * this.dx;
-      mx = Math.max(mx, Math.abs(d));
-    }
-    const clip = mx > STEP_CLIP ? STEP_CLIP / mx : 1;
-    // backtracking: the residual has to come down, or the step is shortened
-    // (a contact opening or the strip lifting off is not something a
-    // tangent knows about)
+
     const base = this.uTrial;
     base.set(u);
-    let alpha = clip;
-    let res = Infinity;
-    for (let tries = 0; tries < 5; tries++) {
-      for (let i = 0; i < u.length; i++) u[i] = base[i] + alpha * du[i];
-      this.stripSolve(false);
-      res = this.assemble(false);
-      if (res < res0 * (1 - 1e-3 * alpha / clip) || res < 1e-7) break;
-      alpha *= 0.4;
+    const baseS = this.screw;
+    /**
+     * Backtracking along (step, dS): the merit has to come down, or the step
+     * is shortened (a contact opening or the strip lifting off is not
+     * something a tangent knows about). Returns whether it came down.
+     */
+    const search = (step: Float64Array, ds: number) => {
+      let mx = Math.abs(ds);
+      for (let i = 0; i < step.length; i++) {
+        // slopes are scaled by dx so the clip means the same thing for them
+        const d = i % 2 === 0 ? step[i] : step[i] * this.dx;
+        mx = Math.max(mx, Math.abs(d));
+      }
+      const clip = mx > STEP_CLIP ? STEP_CLIP / mx : 1;
+      let alpha = clip, res = Infinity, c = c0, ok = false;
+      for (let tries = 0; tries < 5; tries++) {
+        for (let i = 0; i < u.length; i++) u[i] = base[i] + alpha * step[i];
+        this.screw = baseS + alpha * ds;
+        this.stripSolve(false);
+        res = this.assemble(false);
+        c = this.targetValue();
+        const merit = res + this.targetMerit(c);
+        if (merit < merit0 * (1 - 1e-3 * alpha / clip) || merit < 1e-7) { ok = true; break; }
+        alpha *= 0.4;
+      }
+      return { ok, alpha, res, c, mx };
+    };
+    let ls = search(du, dS);
+    // Near the elastic end of a light pass the target's gradient is poor
+    // (a slice's thickness barely follows its gap) and the screw it asks
+    // for can spoil the force balance the plain step would have mended; a
+    // bordered step that cannot bring the merit down is retried with the
+    // screw held, which is the step the solver took before.
+    if (!ls.ok && bordered && dS !== 0) {
+      const tried = ls;
+      ls = search(plain, 0);
+      if (!ls.ok && tried.res + this.targetMerit(tried.c) < ls.res + this.targetMerit(ls.c)) {
+        // neither came down: keep whichever is lower
+        ls = search(du, dS);
+      }
     }
-    this.debug = { alpha, res0, res, mx, tries: 0 };
-    this.residual = res;
-    this.stepMax = mx * alpha;
+    this.debug = { alpha: ls.alpha, res0, res: ls.res, mx: ls.mx, tries: 0 };
+    this.residual = ls.res;
+    this.targetResidual = this.targetMerit(ls.c);
+    this.stepMax = ls.mx * ls.alpha;
     this.iterations++;
     this.result.solveMs = performance.now() - t0;
+  }
+
+  /**
+   * ∂c/∂v at each slice's work-roll DOF, through the slice's own gap and
+   * through the tension coupling: a slice's exit thickness and load move
+   * with its own gap (dh₁/dg, dq/dg) and with every slice's tension
+   * (dh₁/dσ, dq/dσ times T = dσ/dv).
+   */
+  private targetGradient(): Float64Array {
+    const p = this.p;
+    const m = this.slices.length;
+    const a = new Float64Array(m);
+    const T = this.T, live = this.tensionLive;
+    let W = 0;
+    for (const sl of this.slices) W += sl.weight;
+    for (let j = 0; j < m; j++) {
+      const sj = this.slices[j];
+      let v = p.mode === 'gauge' ? 2 * sj.weight * sj.dh1dg : 2 * sj.weight * sj.dqdg;
+      if (live) {
+        for (let i = 0; i < m; i++) {
+          const si = this.slices[i];
+          const t = T[i * m + j];
+          if (t === 0) continue;
+          v += si.weight * (p.mode === 'gauge' ? si.dh1ds : this.dqds[i]) * t;
+        }
+      }
+      a[j] = p.mode === 'gauge' ? v / Math.max(W, 1e-12) : v;
+    }
+    return a;
+  }
+
+  /**
+   * The pieces of the Woodbury update for the strip's tension coupling,
+   * K_full = K + U M Uᵀ with U the work-roll v-DOFs of the slices and
+   * M = −diag(w dq/dσ) T:  x_full = x − Y M (I + G M)⁻¹ Uᵀ x,  Y = K⁻¹U,
+   * G = UᵀY. M is not inverted (a clipped slice has a zero row), so this is
+   * the form that only needs I + G M - m×m dense, factorised once here and
+   * applied to as many right-hand sides as the iteration has.
+   */
+  private prepareWoodbury(): { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; n: number; m: number } | null {
+    const K = this.K;
+    const n = this.u.length, m = this.slices.length;
+    const Y = this.woodburyY(n, m);
+    const cols = Int32Array.from(this.slices, (sl) => this.idx(sl.s, this.stack.wr, 0));
+    if (this.yAge >= Y_REUSE || this.yAge < 0) {
+      const e = this.scratch;
+      for (let j = 0; j < m; j++) {
+        K.solveUnit(cols[j], e);
+        Y.set(e, j * n);
+      }
+      this.yAge = 0;
+    }
+    this.yAge++;
+    const M = new Float64Array(m * m), A = new Float64Array(m * m);
+    for (let i = 0; i < m; i++) {
+      const wi = -this.slices[i].weight * this.dqds[i];
+      for (let j = 0; j < m; j++) M[i * m + j] = wi * this.T[i * m + j];
+    }
+    for (let i = 0; i < m; i++) {
+      for (let j = 0; j < m; j++) {
+        // G_ik = Y[k][cols[i]]
+        let sum = 0;
+        for (let k = 0; k < m; k++) sum += Y[k * n + cols[i]] * M[k * m + j];
+        A[i * m + j] = (i === j ? 1 : 0) + sum;
+      }
+    }
+    const piv = new Int32Array(m);
+    if (!luFactor(A, m, piv)) return null;
+    return { Y, M, A, piv, cols, n, m };
+  }
+
+  private applyWoodbury(wb: { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; n: number; m: number }, v: Float64Array): void {
+    const { Y, M, A, piv, cols, n, m } = wb;
+    const z = new Float64Array(m);
+    for (let i = 0; i < m; i++) z[i] = v[cols[i]];
+    luSolve(A, m, piv, z);
+    for (let k = 0; k < m; k++) {
+      let mz = 0;
+      for (let j = 0; j < m; j++) mz += M[k * m + j] * z[j];
+      if (mz === 0) continue;
+      const off = k * n;
+      for (let i = 0; i < n; i++) v[i] -= Y[off + i] * mz;
+    }
   }
 
   private woodburyY(n: number, m: number): Float64Array {
@@ -843,6 +1002,7 @@ export class StackSolver {
       let change = 0;
       for (let i = 0; i < n; i++) { change = Math.max(change, Math.abs(1 - this.femRatio[i]), Math.abs(this.femEps![i]) * 50); }
       this.femRatio.fill(1); this.femEps!.fill(0); this.femResult = null;
+      this.aaX = []; this.aaF = [];
       return change;
     }
     // the FEM needs an arc everywhere: a floor, so an unloaded slice has a
@@ -854,6 +1014,7 @@ export class StackSolver {
     const r = p.stripModel === 'fem3d' ? this.fem3d.solve({ ...femInput, ny: p.stripNy }) : this.fem.solve(femInput);
     this.femResult = r;
     let change = 0;
+    const target = new Float64Array(2 * n);
     for (let i = 0; i < n; i++) {
       // Only a slice with a real draft is corrected. Under the elastic draft
       // the slab load ramps to zero while the FEM (rigid-plastic, no elastic
@@ -873,14 +1034,87 @@ export class StackSolver {
       const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(0.5, Math.min(2.5, r.q[i] / qSlab[i])) : 1;
       const k = 1 + t * (kRaw - 1);
       const de = t * (r.eps[i] - epsSlab[i]);
-      change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * 50);
-      // Damped. The correction feeds back through the flattening (a heavier
-      // load opens the gap, which lightens the FEM's load) with a gain past
-      // one, and an undamped update cycled between two states.
-      this.femRatio[i] += FEM_RELAX * (k - this.femRatio[i]);
-      this.femEps![i] += FEM_RELAX * (de - this.femEps![i]);
+      change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * AA_EPS_SCALE);
+      target[i] = k; target[n + i] = de;
+    }
+    // Not taken as it stands. The correction feeds back through the
+    // flattening (a heavier load opens the gap, which lightens the FEM's
+    // load) with a gain past one, and an undamped update cycles between two
+    // states; a damped one (0.3) converged, in seventy-odd rounds. The
+    // update is Anderson-accelerated instead, from the same damping.
+    const xv = new Float64Array(2 * n), fv = new Float64Array(2 * n);
+    for (let i = 0; i < n; i++) {
+      xv[i] = this.femRatio[i]; fv[i] = target[i] - this.femRatio[i];
+      xv[n + i] = AA_EPS_SCALE * this.femEps![i]; fv[n + i] = AA_EPS_SCALE * (target[n + i] - this.femEps![i]);
+    }
+    const next = this.andersonStep(xv, fv);
+    // The load ratio keeps its bounds. The elongation offset has none: a
+    // barely rolled edge column is dragged along by its neighbours in the
+    // FEM, and offsets of 0.2 there are part of legitimate answers (a bound
+    // at 0.1 kept three such passes from ever converging).
+    for (let i = 0; i < n; i++) {
+      this.femRatio[i] = Math.max(0.5, Math.min(2.5, next[i]));
+      this.femEps![i] = next[n + i] / AA_EPS_SCALE;
     }
     return change;
+  }
+
+  /**
+   * One Anderson-accelerated step of the fixed point x = G(x), given the
+   * iterate x and its residual f = G(x) − x (type II, Walker & Ni 2011):
+   *
+   *     x⁺ = x + β f − (ΔX + β ΔF) γ,   γ = argmin ‖f − ΔF γ‖,
+   *
+   * ΔX, ΔF the differences of the last few iterates and residuals, β the
+   * damping the plain iteration needed. With no history it is that plain
+   * damped step. The map is only piecewise smooth - a slice's tension
+   * reaching a limit, a column coming into contact - so the history is
+   * dropped when the residual jumps, and the plain step is taken whenever
+   * the least squares asks for large coefficients.
+   */
+  private andersonStep(x: Float64Array, f: Float64Array): Float64Array {
+    const beta = FEM_RELAX;
+    const norm = (v: Float64Array) => { let s = 0; for (let i = 0; i < v.length; i++) s += v[i] * v[i]; return Math.sqrt(s); };
+    const H = this.aaX.length;
+    if (H > 0 && (this.aaX[H - 1].length !== x.length || norm(f) > AA_RESTART_GROWTH * norm(this.aaF[H - 1]))) {
+      this.aaX = []; this.aaF = [];
+    }
+    this.aaX.push(Float64Array.from(x)); this.aaF.push(Float64Array.from(f));
+    if (this.aaX.length > AA_DEPTH + 1) { this.aaX.shift(); this.aaF.shift(); }
+    const out = new Float64Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] + beta * f[i];
+    const mh = this.aaX.length - 1;
+    if (mh === 0) return out;
+    const len = x.length;
+    const dF: Float64Array[] = [], dX: Float64Array[] = [];
+    for (let j = 0; j < mh; j++) {
+      const a = new Float64Array(len), b = new Float64Array(len);
+      for (let i = 0; i < len; i++) { a[i] = this.aaF[j + 1][i] - this.aaF[j][i]; b[i] = this.aaX[j + 1][i] - this.aaX[j][i]; }
+      dF.push(a); dX.push(b);
+    }
+    // normal equations, lightly regularised
+    const G = new Float64Array(mh * mh), rhs = new Float64Array(mh);
+    let trace = 0;
+    for (let a = 0; a < mh; a++) {
+      for (let b = 0; b < mh; b++) {
+        let s = 0;
+        for (let i = 0; i < len; i++) s += dF[a][i] * dF[b][i];
+        G[a * mh + b] = s;
+      }
+      let s = 0;
+      for (let i = 0; i < len; i++) s += dF[a][i] * f[i];
+      rhs[a] = s;
+      trace += G[a * mh + a];
+    }
+    if (!(trace > 0)) return out;
+    for (let a = 0; a < mh; a++) G[a * mh + a] += 1e-10 * trace;
+    if (!denseSolve(G, mh, rhs)) return out;
+    for (let a = 0; a < mh; a++) if (!(Math.abs(rhs[a]) <= AA_MAX_GAMMA)) return out;
+    for (let a = 0; a < mh; a++) {
+      const g = rhs[a];
+      for (let i = 0; i < len; i++) out[i] -= g * (dX[a][i] + beta * dF[a][i]);
+    }
+    return out;
   }
 
   /**
@@ -1084,12 +1318,16 @@ export class StackSolver {
     T.fill(0);
     if (!this.tensionLive) return;
     buildJ();
+    // one LU of J, then a back-substitution per column (J was being
+    // refactorised for every column, n LUs where one does)
+    const piv = new Int32Array(n);
+    if (!luFactor(J, n, piv)) { T.fill(0); this.tensionLive = false; return; }
     const col = new Float64Array(n);
     for (let j = 0; j < n; j++) {
       const hv = 2 * this.slices[j].dh1dg;
-      for (let i = 0; i < n; i++) col[i] = Fh[i * n + j] * hv;
-      const A = Float64Array.from(J);
-      if (!denseSolve(A, n, col)) { T.fill(0); this.tensionLive = false; return; }
+      let any = false;
+      for (let i = 0; i < n; i++) { col[i] = Fh[i * n + j] * hv; if (col[i] !== 0) any = true; }
+      if (any) luSolve(J, n, piv, col);
       for (let i = 0; i < n; i++) T[i * n + j] = col[i];
     }
   }
@@ -1136,44 +1374,38 @@ export class StackSolver {
       this.iterate();
       n++;
       moved = true;
-      // A Newton that cannot settle at this screw position for a long
-      // while (a barely touching strip at the start, where the tension's
-      // active set flips) is not allowed to hold the screw either: nearly
-      // settled after many iterations counts, and the next screw position
-      // is a better-posed problem.
       this.sinceStep++;
-      const settled = (this.residual < 2e-6 && this.stepMax < 5e-9)
-        || (this.sinceStep > STEP_ESCAPE_ITERS && this.residual < 1e-2 && !this.screwSettled() && this.p.mode !== 'screw');
-      if (settled) {
-        // With the strip FEM on, a settled Newton is a solution of the
-        // corrected slab model; the FEM is then asked again at this state,
-        // and only once its correction stops changing is the state a
-        // solution of the coupled problem (or the screw moved).
+      // The screw moves inside the Newton, so a settled Newton is on target
+      // unless the screw is at its travel limit or has had no contact to
+      // steer by. A Newton that cannot settle for a long while (a barely
+      // touching strip, where the tension's active set flips) still lets
+      // the FEM correction be refreshed once it is nearly settled.
+      const settled = this.residual < 2e-6 && this.stepMax < 5e-9;
+      const stalled = !settled && this.sinceStep > STEP_ESCAPE_ITERS && this.residual < 1e-2;
+      if (settled || stalled) {
+        this.sinceStep = 0;
+        let femSettled = true;
         if (this.p.stripModel !== 'slab') {
           const change = this.femCorrection(this.sigmaSlices());
           this.femRounds++;
           this.femLastChange = change;
-          // A correction that keeps moving a little must not hold the screw:
-          // on a one-sided contact the set of loaded slices flips between
-          // rounds and the change never quite dies, and a screw that waits
-          // for it never moves (which is what would grow the contact and
-          // settle the flip). Loosely settled is enough to step; the tight
-          // tolerance is for calling the whole thing converged.
           // Settled tightly, or loosely for several rounds running: the
-          // relaxed fixed point can hold a limit cycle of a few 1e-3 in the
-          // load ratio (the FEM's own iterate moves with the roll position)
-          // that never dies but changes nothing anyone can see.
+          // correction can hold a small limit cycle (a slice's load flipping
+          // on a one-sided contact) that never dies but changes nothing
+          // anyone can see.
           this.femLooseRuns = change <= 10 * FEM_FIXED_TOL ? this.femLooseRuns + 1 : 0;
-          const tight = change <= FEM_FIXED_TOL || this.femLooseRuns >= FEM_LOOSE_RUNS;
-          const loose = change <= 10 * FEM_FIXED_TOL || this.femRounds > FEM_MAX_ROUNDS;
-          if (!tight && !(loose && !this.screwSettled())) { this.converged = false; continue; }
-          if (!tight && this.screwSettled()) { this.converged = false; continue; }
+          femSettled = change <= FEM_FIXED_TOL || this.femLooseRuns >= FEM_LOOSE_RUNS;
         }
-        if (this.screwSettled()) { this.converged = true; break; }
-        this.stepScrew();
-        this.femRounds = 0;
-        this.femLooseRuns = 0;
-        this.sinceStep = 0;
+        const onTarget = this.screwSettled();
+        if (settled && onTarget && femSettled) { this.converged = true; break; }
+        // off target with the Newton settled: the screw at a limit, or no
+        // contact yet - the secant step as a fallback
+        if (settled && !onTarget && this.p.mode !== 'screw') {
+          this.stepScrew();
+          this.femRounds = 0;
+          this.femLooseRuns = 0;
+          this.aaX = []; this.aaF = [];
+        }
         this.converged = false;
       }
       if (performance.now() - t0 > budgetMs) break;

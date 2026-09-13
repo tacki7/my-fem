@@ -39,6 +39,10 @@ const G = 1 / Math.sqrt(3);
 /** 2×2×2 Gauss points in (ξ, η, ζ) */
 const GP3: [number, number, number][] = [];
 for (const a of [-G, G]) for (const b of [-G, G]) for (const c of [-G, G]) GP3.push([a, b, c]);
+/** conjugate-gradient limits for the Picard linear solves (see `linearSolve`) */
+const PCG_MAX = 40;
+const PCG_REFACTOR_AT = 12;
+const PCG_TOL = 1e-9;
 /** corner signs of the hex, in the node order used below */
 const SX = [-1, 1, 1, -1, -1, 1, 1, -1];
 const SY = [-1, -1, -1, -1, 1, 1, 1, 1];
@@ -52,6 +56,24 @@ export class StripFem3D {
   private ny = 0;
   /** the last solve's stiffness was not positive definite (a diagnostic) */
   singular = false;
+  /**
+   * The linear solve of each Picard iteration reuses a Cholesky factor.
+   * Assembling K is cheap; factorising it (n hb² ≈ 26 M flops on the
+   * default mesh) is what the 3D FEM spent three quarters of its time on,
+   * once per Picard iteration. Between iterations - and between calls, as
+   * the rolls settle - K changes little: the penalty and constraint rows
+   * are the same, only the frozen viscosities and friction slopes move. So
+   * K x = f is solved by conjugate gradients preconditioned with the factor
+   * of an earlier K (one back-substitution per iteration, a twenty-fifth of
+   * a factorisation), from the previous iterate; the factor is refreshed
+   * when that takes more than a dozen iterations.
+   */
+  private K: BandMatrix | null = null;
+  private P: BandMatrix | null = null;
+  private refactor = true;
+  private pcg: { r: Float64Array; z: Float64Array; d: Float64Array; kd: Float64Array } | null = null;
+  /** counts from the last solve, for diagnostics */
+  stats = { picard: 0, factorizations: 0, pcgIterations: 0 };
 
   solve(inp: StripFem3DInput): StripFemResult {
     const nx = inp.x.length, nz = Math.max(2, Math.round(inp.nz)), ny = Math.max(1, Math.round(inp.ny));
@@ -215,9 +237,16 @@ export class StripFem3D {
     // the farthest coupling in an element is (i, j, k) to (i+1, j+1, k+1):
     // a node-id difference of (rows + 1) lay + 1, three DOFs each, plus two
     const hb = 3 * ((rows + 1) * lay + 1) + 2;
-    const K = new BandMatrix(ndof, hb);
+    if (!this.K || this.K.n !== ndof || this.K.hb !== hb) {
+      this.K = new BandMatrix(ndof, hb);
+      this.P = new BandMatrix(ndof, hb);
+      this.refactor = true;
+      this.pcg = { r: new Float64Array(ndof), z: new Float64Array(ndof), d: new Float64Array(ndof), kd: new Float64Array(ndof) };
+    }
+    const K = this.K;
     const rhs = new Float64Array(ndof);
     const unew = new Float64Array(ndof);
+    this.stats = { picard: 0, factorizations: 0, pcgIterations: 0 };
     const ue = new Float64Array(24);
     const ke = new Float64Array(576);
     const gvec = new Float64Array(24);
@@ -323,8 +352,8 @@ export class StripFem3D {
           if (k === 0 && i < nx - 1) { const m = node(i + 1, 0, 0); K.add(3 * nIn + 2, 3 * nIn + 2, KTIE); K.add(3 * m + 2, 3 * m + 2, KTIE); K.add(3 * m + 2, 3 * nIn + 2, -KTIE); }
         }
       }
-      if (!K.cholesky()) { this.singular = true; break; }
-      K.solve(rhs, unew);
+      this.stats.picard++;
+      if (!this.linearSolve(rhs, u, unew, V)) { this.singular = true; break; }
       let du = 0, un = 0;
       for (let d = 0; d < ndof; d++) { du = Math.max(du, Math.abs(unew[d] - u[d])); un = Math.max(un, Math.abs(unew[d])); }
       u.set(unew);
@@ -384,4 +413,57 @@ export class StripFem3D {
       debug: { sy: new Float64Array(0), sz: new Float64Array(0), sm: new Float64Array(0), div: new Float64Array(0), eq: new Float64Array(0) },
     };
   }
+  /**
+   * K x = rhs for the assembled K: preconditioned conjugate gradients from
+   * x0 with the kept factor, or a fresh factorisation when there is none,
+   * when conjugate gradients stall, or when the last solve needed many
+   * iterations. The stopping test is on the preconditioned residual, which
+   * with a factor of a nearby K is close to the error itself; it is set far
+   * under the Picard tolerance so the answer is the same as a direct solve.
+   */
+  private linearSolve(rhs: Float64Array, x0: Float64Array, x: Float64Array, V: number): boolean {
+    const K = this.K!, P = this.P!, w = this.pcg!;
+    const n = K.n;
+    const direct = (): boolean => {
+      P.a.set(K.a);
+      this.stats.factorizations++;
+      if (!P.cholesky()) { this.refactor = true; return false; }
+      this.refactor = false;
+      P.solve(rhs, x);
+      return true;
+    };
+    if (this.refactor) return direct();
+    const { r, z, d, kd } = w;
+    x.set(x0);
+    K.mulVec(x, kd);
+    let xmax = 0;
+    for (let i = 0; i < n; i++) { r[i] = rhs[i] - kd[i]; xmax = Math.max(xmax, Math.abs(x[i])); }
+    const tol = PCG_TOL * Math.max(V, xmax);
+    P.solve(r, z);
+    let rz = 0;
+    for (let i = 0; i < n; i++) { d[i] = z[i]; rz += r[i] * z[i]; }
+    let it = 0;
+    for (; it < PCG_MAX; it++) {
+      let zmax = 0;
+      for (let i = 0; i < n; i++) zmax = Math.max(zmax, Math.abs(z[i]));
+      if (zmax <= tol) break;
+      K.mulVec(d, kd);
+      let dkd = 0;
+      for (let i = 0; i < n; i++) dkd += d[i] * kd[i];
+      if (!(dkd > 0) || !(rz > 0)) { it = PCG_MAX; break; }
+      const alpha = rz / dkd;
+      for (let i = 0; i < n; i++) { x[i] += alpha * d[i]; r[i] -= alpha * kd[i]; }
+      P.solve(r, z);
+      let rzNew = 0;
+      for (let i = 0; i < n; i++) rzNew += r[i] * z[i];
+      const beta = rzNew / rz;
+      rz = rzNew;
+      for (let i = 0; i < n; i++) d[i] = z[i] + beta * d[i];
+    }
+    this.stats.pcgIterations += it;
+    if (it >= PCG_MAX) return direct();
+    if (it > PCG_REFACTOR_AT) this.refactor = true;
+    return true;
+  }
+
 }

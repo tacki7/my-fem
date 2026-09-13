@@ -65,6 +65,24 @@ export class BandMatrix {
     return true;
   }
 
+  /** y = A x for the symmetric matrix held in the band (call before `cholesky`, which overwrites it) */
+  mulVec(x: Float64Array, y: Float64Array): void {
+    const { n, hb, w, a } = this;
+    y.fill(0);
+    for (let i = 0; i < n; i++) {
+      const bi = i * w + hb - i;
+      const xi = x[i];
+      let s = a[bi + i] * xi;
+      const j0 = Math.max(0, i - hb);
+      for (let j = j0; j < i; j++) {
+        const v = a[bi + j];
+        s += v * x[j];
+        y[j] += v * xi;
+      }
+      y[i] += s;
+    }
+  }
+
   /** solve L·Lᵀ x = e_j (unit vector at row j) into x; the forward sweep starts at j */
   solveUnit(j: number, x: Float64Array): void {
     const { n, hb, w, a } = this;
@@ -141,4 +159,53 @@ export function denseSolve(A: Float64Array, m: number, b: Float64Array): boolean
     b[i] = s / A[i * m + i];
   }
   return true;
+}
+
+/**
+ * LU with partial pivoting, in place on a row-major m×m array, kept for
+ * several right-hand sides: `piv[k]` is the row swapped into row k at step k.
+ * Zero multipliers are skipped, which on the strip's Jacobians (a held
+ * slice is an identity row) is most of them. Returns false if singular.
+ */
+export function luFactor(A: Float64Array, m: number, piv: Int32Array): boolean {
+  for (let k = 0; k < m; k++) {
+    let p = k, best = Math.abs(A[k * m + k]);
+    for (let i = k + 1; i < m; i++) {
+      const v = Math.abs(A[i * m + k]);
+      if (v > best) { best = v; p = i; }
+    }
+    piv[k] = p;
+    if (!(best > 1e-300)) return false;
+    if (p !== k) {
+      const rk = k * m, rp = p * m;
+      for (let j = 0; j < m; j++) { const t = A[rk + j]; A[rk + j] = A[rp + j]; A[rp + j] = t; }
+    }
+    const d = A[k * m + k];
+    for (let i = k + 1; i < m; i++) {
+      const ri = i * m;
+      const f = A[ri + k] / d;
+      A[ri + k] = f;
+      if (f === 0) continue;
+      const rk = k * m;
+      for (let j = k + 1; j < m; j++) A[ri + j] -= f * A[rk + j];
+    }
+  }
+  return true;
+}
+
+/** solve with the factors of `luFactor`; `b` is overwritten with the solution */
+export function luSolve(A: Float64Array, m: number, piv: Int32Array, b: Float64Array): void {
+  for (let k = 0; k < m; k++) {
+    const p = piv[k];
+    if (p !== k) { const t = b[k]; b[k] = b[p]; b[p] = t; }
+    const bk = b[k];
+    if (bk === 0) continue;
+    for (let i = k + 1; i < m; i++) b[i] -= A[i * m + k] * bk;
+  }
+  for (let i = m - 1; i >= 0; i--) {
+    const ri = i * m;
+    let s = b[i];
+    for (let j = i + 1; j < m; j++) s -= A[ri + j] * b[j];
+    b[i] = s / A[ri + i];
+  }
 }
