@@ -3599,6 +3599,11 @@ if (DEBUG_TITLE) {
         agcDeadband: p.agcDeadband,
         agcSensitivity: d.agcSensitivity,
         method: p.agcMethod,
+        // the two linear solves: strip (every frame) and roll (every rollEvery)
+        cgIterations: d.cgIterations,
+        cgResidual: d.cgResidual,
+        rollCgIterations: d.rollCgIterations,
+        rollCgResidual: d.rollCgResidual,
       };
     }),
     setLoad: (k: number, tonf: number) => {
