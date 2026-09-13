@@ -1396,7 +1396,29 @@ export class StackSolver {
         if (held[i] === 0) { wL += w[i]; sumL += w[i] * (p.frontTension - Eeff * D[i]); }
         else sumC += w[i] * sigma[i];
       }
-      lambda = wL > 0 ? (ws * p.frontTension - sumC - sumL) / wL : 0;
+      if (wL > 0) {
+        lambda = (ws * p.frontTension - sumC - sumL) / wL;
+      } else {
+        // Every slice held: no live slice is left to carry the mean, and
+        // λ = 0 said nothing about which slices should come off their
+        // limits. λ is then the offset at which the clamped free stresses
+        // keep the mean at σ̄ (the clamped mean only grows with it, so a
+        // bisection finds it), and the release test below works from that.
+        // With λ = 0 a 6Hi on 200 tonf benders held all 29 slices at a mean
+        // of 85 MPa against 80, released four with the wrong stress, held
+        // them again, and the outer Newton alternated between the two
+        // states sixty iterations at a time.
+        let fMin = Infinity, fMax = -Infinity;
+        for (let i = 0; i < n; i++) { const f = p.frontTension - Eeff * D[i]; fMin = Math.min(fMin, f); fMax = Math.max(fMax, f); }
+        let a0 = lo - fMax, a1 = hi - fMin;
+        for (let k = 0; k < 80 && a1 - a0 > 1e-6 * Math.max(1, Math.abs(a0), Math.abs(a1)); k++) {
+          const mid = 0.5 * (a0 + a1);
+          let acc = 0;
+          for (let i = 0; i < n; i++) acc += w[i] * Math.max(lo, Math.min(hi, p.frontTension - Eeff * D[i] + mid));
+          if (acc < ws * p.frontTension) a0 = mid; else a1 = mid;
+        }
+        lambda = 0.5 * (a0 + a1);
+      }
       for (let i = 0; i < n; i++) free[i] = p.frontTension + lambda - Eeff * D[i];
     };
     /** F_h = dfree/dh1 on the live rows (m×m); held rows are zero */
