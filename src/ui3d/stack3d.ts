@@ -430,12 +430,13 @@ export class StackView3D {
       };
       cap(first, centre(rings[0]), -1);
       cap(prev!, centre(rings[rings.length - 1]), 1);
-      // supports: a bearing chock around the neck (screw / chock rolls), or
-      // a small saddle bracket on the far side of a backing shaft
+      // supports: a small saddle bracket on the far side of a backing shaft
+      // (the end bearings are left out of the picture)
       for (const s of r.supports) {
+        if (d.support !== 'saddle') continue;
         const c = [R.x[s], sign * (d.cy + vAt(s) * mag), d.cz + wAt(s) * mag];
-        const mark: Col = d.support === 'saddle' ? [1, 0.77, 0.42, 0] : d.support === 'screw' ? [1, 0.42, 0.5, 0] : [0.43, 0.9, 0.65, 0];
-        if (d.support === 'saddle') {
+        const mark: Col = [1, 0.77, 0.42, 0];
+        {
           // outward from the work roll through this shaft's centre
           const oy = sign * d.cy, oz = d.cz;
           const on = Math.hypot(oy, oz) || 1;
@@ -446,11 +447,6 @@ export class StackView3D {
           box(b, [p0[0] - hw, Math.min(p0[1], p1[1]) - t * Math.abs(uz), Math.min(p0[2], p1[2]) - t * Math.abs(uy)],
             [p1[0] + hw, Math.max(p0[1], p1[1]) + t * Math.abs(uz), Math.max(p0[2], p1[2]) + t * Math.abs(uy)], CHOCK);
           box(b, [p1[0] - hw, p1[1] - t * 0.5, p1[2] - t * 0.5], [p1[0] + hw, p1[1] + t * 0.5, p1[2] + t * 0.5], mark);
-        } else {
-          const h = d.Dn / 2 * 1.2, hw = Math.max(0.012, dx * 0.9);
-          box(b, [c[0] - hw, c[1] - h, c[2] - h * 0.9], [c[0] + hw, c[1] + h, c[2] + h * 0.9], CHOCK);
-          const capY = sign > 0 ? [c[1] + h, c[1] + h * 1.2] : [c[1] - h * 1.2, c[1] - h];
-          box(b, [c[0] - hw, capY[0], c[2] - h * 0.5], [c[0] + hw, capY[1], c[2] + h * 0.5], mark);
         }
       }
     };
