@@ -219,8 +219,8 @@ export class StackView3D {
   private labelPts: { x: number; y: number; z: number; text: string }[] = [];
   private drag: { x: number; y: number; yaw: number; pitch: number } | null = null;
   private labelNodes: HTMLElement[] = [];
-  /** what the colours span, for a legend */
-  legend = '';
+  /** the colour bars of the current colouring, for the legend */
+  bars: { title: string; gradient: string; lo: string; mid: string; hi: string; unit: string }[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private labelBox: HTMLElement) {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -509,9 +509,19 @@ export class StackView3D {
           const t = Math.min(1, m / 4e-3);
           return [0.93, 0.78 - 0.3 * t, 0.36 - 0.2 * t, 0.35];
         };
-        this.legend = stress
-          ? `色: ロール = 曲げ縁応力 ±${(bendScale / 1e6).toFixed(0)} MPa（青 = 圧縮、赤 = 引張）／ 接触線 = Hertz 最大面圧 ≤ ${(p0Scale / 1e6).toFixed(0)} MPa ／ 板 = 張力 0〜${(sigMax / 1e6).toFixed(0)} MPa（暗 = 緩み）`
-          : `色: 胴 = 接触線荷重 0〜${(qmax / 1e6).toFixed(2)} kN/mm ／ 板 = 顕在形状（橙 = 波）`;
+        // the colour bars for the legend: each a gradient with its range
+        const css = (c: Col) => `rgb(${(c[0] * 255) | 0},${(c[1] * 255) | 0},${(c[2] * 255) | 0})`;
+        const ramp = (f: (t: number) => Col, n = 9) => Array.from({ length: n }, (_, i) => css(f(i / (n - 1)))).join(',');
+        this.bars = stress
+          ? [
+            { title: 'ロール 曲げ縁応力', gradient: ramp((t) => diverge(2 * t - 1)), lo: `−${(bendScale / 1e6).toFixed(0)}`, mid: '0', hi: `+${(bendScale / 1e6).toFixed(0)}`, unit: 'MPa（青 圧縮／赤 引張）' },
+            { title: '接触線 Hertz 面圧', gradient: `${css(STEEL)},rgb(255,242,191),rgb(255,255,255)`, lo: '0', mid: '', hi: (p0Scale / 1e6).toFixed(0), unit: 'MPa' },
+            { title: '板 張力', gradient: ramp(tensionCol), lo: '0', mid: '', hi: (sigMax / 1e6).toFixed(0), unit: 'MPa（暗 = 緩み）' },
+          ]
+          : [
+            { title: '胴 接触線荷重', gradient: ramp(heat), lo: '0', mid: (qmax / 2e6).toFixed(2), hi: (qmax / 1e6).toFixed(2), unit: 'kN/mm' },
+            { title: '板 顕在形状（波）', gradient: 'rgb(237,199,92),rgb(237,161,61),rgb(237,122,41)', lo: '0', mid: '', hi: '≥ 400', unit: 'I-unit' },
+          ];
         // grid of the mid-surface: rows along z, columns at the slices
         const mid = (s: number, z: number) => {
           const ramp = z <= 0 ? 0 : Math.min(1, z / (0.12 * zl));

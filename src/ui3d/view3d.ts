@@ -446,7 +446,22 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
           ? `${r.def.id}\n曲げ σ ${mpa(r.bendMax)} 面圧 p₀ ${mpa(r.hertzMax)}`
           : `${r.def.id}\n撓み ${um(r.bow)} 扁平 ${um(r.flatMax)}`),
       });
-      if (legendBox.textContent !== stack3d.legend) legendBox.textContent = stack3d.legend;
+      // the colour bars: rebuilt only when their text changes
+      const sig = stack3d.bars.map((b) => `${b.title}|${b.gradient}|${b.lo}|${b.mid}|${b.hi}|${b.unit}`).join('\u0001');
+      if (legendBox.dataset.sig !== sig) {
+        legendBox.dataset.sig = sig;
+        legendBox.replaceChildren(...stack3d.bars.map((b) => {
+          const row = el('div', 'v3-bar');
+          const title = el('span', 'v3-bar-title', b.title);
+          const bar = el('span', 'v3-bar-ramp');
+          bar.style.background = `linear-gradient(90deg, ${b.gradient})`;
+          const ticks = el('span', 'v3-bar-ticks');
+          ticks.append(el('span', '', b.lo), el('span', '', b.mid), el('span', '', b.hi));
+          const unit = el('span', 'v3-bar-unit', b.unit);
+          row.append(title, bar, ticks, unit);
+          return row;
+        }));
+      }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
 

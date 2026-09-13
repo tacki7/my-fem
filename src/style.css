@@ -955,9 +955,15 @@ body.resizing * { cursor: inherit !important; }
 #view3d .chart-head .v3-front-mode:first-of-type { margin-left: auto; }
 #view3d .v3-legend {
   position: absolute; left: 8px; bottom: 6px; pointer-events: none;
-  font-family: var(--mono); font-size: 10px; color: #b7c4d8; white-space: nowrap;
-  background: rgba(7, 10, 18, .7); border-radius: 4px; padding: 2px 7px;
+  display: flex; flex-direction: column; gap: 3px;
+  font-family: var(--mono); font-size: 10px; color: #b7c4d8;
+  background: rgba(7, 10, 18, .72); border-radius: 5px; padding: 4px 8px;
 }
+#view3d .v3-bar { display: grid; grid-template-columns: 11em 120px auto; grid-template-rows: auto auto; column-gap: 8px; align-items: center; }
+#view3d .v3-bar-title { grid-column: 1; grid-row: 1 / span 2; white-space: nowrap; }
+#view3d .v3-bar-ramp { grid-column: 2; grid-row: 1; display: block; width: 120px; height: 8px; border-radius: 2px; border: 1px solid rgba(140,170,210,.25); }
+#view3d .v3-bar-unit { grid-column: 3; grid-row: 1 / span 2; white-space: nowrap; color: var(--fg-faint); }
+#view3d .v3-bar-ticks { grid-column: 2; grid-row: 2; display: flex; justify-content: space-between; width: 120px; font-size: 9px; color: var(--fg-dim); }
 #view3d .v3-stage.flat > .v3-legend { display: none; }
 #view3d .v3-front-mode .btn { padding: 2px 8px; font-size: 10.5px; border-radius: 5px; }
 #view3d .v3-charts {
