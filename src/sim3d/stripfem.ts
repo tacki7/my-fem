@@ -192,7 +192,13 @@ export class StripFem {
     const epsRef = Math.max((V * dhm) / (hm * Math.max(Lm, 1e-6)), 1e-3);
     const epsReg = 0.02 * epsRef;
     const muRef = kfm / Math.max(epsRef, 1e-9);
-    const KPEN = 60 * muRef;
+    // The incompressibility penalty. At 60 times the reference viscosity the
+    // results were still moving with it like 1/K: the elongation profile sat
+    // 270-330 I-units and the load 0.4-0.9 % from the incompressible limit.
+    // At 6000 both are within 3 I-units and 0.01 %, and the Picard, PCG and
+    // factorisation counts are the same (the volumetric term is integrated
+    // at the element centre, so a stiff penalty does not lock).
+    const KPEN = 6000 * muRef;
     const vReg = 0.03 * V;
     // The incoming strip is rigid: its entry nodes share one longitudinal
     // speed. The tie that says so was 1e3 times the reference stiffness and
