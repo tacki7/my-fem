@@ -1501,7 +1501,10 @@ export class StackSolver {
     if (!withJacobian) return;
     // T = dσ/dz = J⁻¹ F_h h_z, h_z = diag(gain · dh1/dg), z as in `gapGain`
     const wL = buildFh();
-    this.tensionLive = wL > 1e-9 * ws;
+    // with the feedback off the strip carries its set tension everywhere
+    // (E' = 0): F_h, and so T, is zero, and the Woodbury update would cost
+    // m band solves an iteration to add nothing
+    this.tensionLive = Eeff > 0 && wL > 1e-9 * ws;
     const T = this.T;
     T.fill(0);
     if (!this.tensionLive) return;
