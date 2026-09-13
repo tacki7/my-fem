@@ -23,7 +23,7 @@ import { el } from './controls';
 export type Theme = 'classic' | 'modern' | 'chic';
 export const THEMES: Theme[] = ['classic', 'modern', 'chic'];
 
-type Prop = '--col-left' | '--col-right' | '--row-line' | '--row-charts' | '--chart-nip' | '--chart-agc';
+type Prop = '--col-left' | '--col-right' | '--row-line' | '--row-charts' | '--chart-nip' | '--chart-agc' | '--v3-front';
 /** the properties written as a share of the chart band rather than in pixels */
 const PERCENT: ReadonlySet<Prop> = new Set<Prop>(['--chart-nip', '--chart-agc']);
 
@@ -55,9 +55,9 @@ interface Gutter {
  * first column there.
  */
 const DEFAULTS: Record<Theme, Record<Prop, number>> = {
-  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 460, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16 },
-  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 380, '--row-charts': 340, '--chart-nip': 38, '--chart-agc': 16 },
-  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 440, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16 },
+  classic: { '--col-left': 292, '--col-right': 332, '--row-line': 460, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16, '--v3-front': 360 },
+  modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 380, '--row-charts': 340, '--chart-nip': 38, '--chart-agc': 16, '--v3-front': 360 },
+  chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 440, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16, '--v3-front': 360 },
 };
 
 const GAP = 10;
@@ -115,14 +115,18 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
   // Boxes, relative to the app's own - the handles are its children.
   const box = (id: string): DOMRect | null => {
     const n = document.getElementById(id);
-    if (!n || n.hidden) return null;
+    // hidden by attribute, or not laid out at all (the 2D panels while the
+    // 3D tab is up are display:none by a class on the app)
+    if (!n || n.hidden || n.getClientRects().length === 0) return null;
     const r = n.getBoundingClientRect();
     const a = app.getBoundingClientRect();
     return new DOMRect(r.left - a.left, r.top - a.top, r.width, r.height);
   };
   /** the side panel in the first column, and the one in the last */
+  // The 3D tab's side panels sit on the same column tracks; while it is up
+  // they are the panels the column handles measure.
   const sides = () => {
-    const l = box('left'), r = box('right');
+    const l = box('left') ?? box('v3-left'), r = box('right') ?? box('v3-right');
     // With one panel hidden the other keeps its column: whichever side of
     // the app it sits on says which handle it gets.
     if (!l || !r) {
@@ -146,6 +150,17 @@ export function installLayout(app: HTMLElement, onResize: () => void): LayoutHan
   };
 
   const gutters: Gutter[] = [
+    {
+      // The 3D tab's split between the front view and its charts: under the
+      // front view, dragging down enlarges it.
+      prop: '--v3-front', axis: 'y', sign: () => 1, min: 160, max: 900,
+      place: (n) => {
+        const f = box('v3-front');
+        if (!f) { n.hidden = true; return; }
+        n.hidden = false;
+        setBox(n, f.left, f.bottom + (8 - HANDLE) / 2, f.width, HANDLE);
+      },
+    },
     {
       // The first column, whichever side panel is in it. Its handle runs the
       // panel's own height, on the panel's outer edge.

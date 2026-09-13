@@ -41,9 +41,17 @@ const saveFolded = () => {
   try { localStorage.setItem(FOLD_KEY, JSON.stringify(Object.fromEntries(folded))); }
   catch { /* private mode; the app works, it just forgets */ }
 };
+/**
+ * The input panels' fold state, for this visit only. Those panels start
+ * folded on every load: remembered across visits, a section opened once
+ * stayed open for good, and the folded default never showed again. Within a
+ * visit a section the reader opened stays open when its panel is rebuilt
+ * (the 3D tab rebuilds its inputs on every mill switch and model change).
+ */
+const foldedThisVisit = new Map<string, boolean>();
 
 export function section(
-  title: string, opts: { open?: boolean; hint?: string } = {},
+  title: string, opts: { open?: boolean; hint?: string; remember?: boolean } = {},
 ): SectionHandle {
   const root = el('section', 'panel-section');
   const head = el('div', 'panel-head');
@@ -58,14 +66,17 @@ export function section(
   const body = el('div', 'panel-body');
   root.append(head, body);
   // A remembered choice wins over the default; without one, the default.
-  const shut = folded.get(title) ?? opts.open === false;
+  // `remember: false` keeps the choice for this visit only (the input panels).
+  const remember = opts.remember !== false;
+  const store = remember ? folded : foldedThisVisit;
+  const shut = store.get(title) ?? opts.open === false;
   if (shut) root.classList.add('collapsed');
   btn.setAttribute('aria-expanded', String(!shut));
   btn.addEventListener('click', () => {
     const nowShut = root.classList.toggle('collapsed');
     btn.setAttribute('aria-expanded', String(!nowShut));
-    folded.set(title, nowShut);
-    saveFolded();
+    store.set(title, nowShut);
+    if (remember) saveFolded();
   });
   return { root, body };
 }
@@ -73,6 +84,7 @@ export function section(
 /** Unfold every section and forget the remembered state. */
 export function resetFolds(): void {
   folded.clear();
+  foldedThisVisit.clear();
   saveFolded();
   for (const s of document.querySelectorAll('.panel-section.collapsed')) {
     s.classList.remove('collapsed');
@@ -155,6 +167,8 @@ export function slider(o: SliderOpts): SliderHandle {
   if (o.hint) lab.append(helpMark(o.hint));
   const out = el('input', 'ctrl-value');
   out.type = 'text';
+  // a long unit (tonf/chock) needs a wider field than the default 7.6em
+  if (o.unit && o.unit.length > 5) out.style.width = `${7.6 + (o.unit.length - 5) * 0.62}em`;
   out.inputMode = 'decimal';
   out.spellcheck = false;
   top.append(lab, out);

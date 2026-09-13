@@ -881,3 +881,102 @@ body.resizing * { cursor: inherit !important; }
   grid-template-rows: 52px min(var(--row-line), 46vh) minmax(0, 1fr);
   grid-template-areas: "topbar topbar" "millline millline" "bottom left";
 }
+
+
+/* ── the 3D tab ──────────────────────────────────────────────────────────────
+   One container spanning every row under the top bar; the 2D panels and
+   their gutters are hidden while it is up, and it lays out its own three
+   columns on the same movable track widths. */
+/* leftmost in the bar, so a crowded bar can never push them out of reach */
+#mode-tabs { display: flex; gap: 3px; flex: none; }
+#mode-tabs .btn { padding: 3px 8px; font-size: 10.5px; border-radius: 6px; font-weight: 600; }
+#app.mode-3d > :is(#millline, #left, #stage, #bottom, #right) { display: none; }
+#app.mode-3d :is(#topbar-presets, #topbar-actions, #topbar-badges) { display: none; }
+#view3d {
+  grid-column: 1 / -1;
+  grid-row: 2 / -1;
+  display: grid;
+  grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+#view3d[hidden] { display: none; }
+#view3d .v3-panel { overflow-y: auto; min-height: 0; }
+#view3d .v3-centre {
+  display: grid;
+  /* the front view's height is a movable track, like the 2D tab's rows */
+  grid-template-rows: auto minmax(120px, min(var(--v3-front, 360px), 60vh)) minmax(0, 1fr) auto;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+}
+/* the headline chips over the front view; same chips as the 2D top bar,
+   with a short label in front of the number */
+.v3-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.v3-status .badge { padding: 3px 8px; }
+.v3-status .badge i { font-style: normal; color: var(--fg-dim); font-size: 10px; margin-right: 2px; }
+.v3-status .v3-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); align-self: center;
+}
+.v3-status .badge.ok .v3-dot { background: var(--green); }
+.v3-status .badge.busy .v3-dot { background: var(--amber); animation: v3-pulse 1s ease-in-out infinite; }
+@keyframes v3-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+.v3-warnings { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.v3-warnings .badge { padding: 3px 8px; }
+.v3-warnings .badge span { color: var(--amber); font-size: 10.5px; font-family: var(--sans); }
+.v3-warnings .badge.bad span { color: var(--red); }
+.v3-hint {
+  text-align: center; font-size: 10px; color: var(--fg-faint);
+  padding: 2px 10px 0;
+}
+#view3d .v3-cell {
+  background: var(--panel-grad);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+  min-height: 0;
+}
+#view3d .v3-cell canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+/* the stack cell: the 3D canvas and the flat front view share one box, one shown at a time */
+#view3d .v3-stage { position: relative; flex: 1; min-height: 0; }
+#view3d .v3-stage > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#view3d .v3-stage > canvas.v3-gl { cursor: grab; }
+#view3d .v3-stage > canvas.v3-gl:active { cursor: grabbing; }
+#view3d .v3-stage.flat > canvas.v3-gl, #view3d .v3-stage.flat > .v3-labels { display: none; }
+#view3d .v3-stage:not(.flat) > canvas:not(.v3-gl) { display: none; }
+#view3d .v3-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#view3d .v3-label {
+  position: absolute; transform: translate(-50%, -100%);
+  font-family: var(--mono); font-size: 9.5px; line-height: 1.25; color: #dce6f5; white-space: pre; text-align: center;
+  background: rgba(7, 10, 18, .78); border: 1px solid rgba(140, 170, 210, .18); border-radius: 4px; padding: 1px 6px;
+}
+#view3d .v3-front-mode { flex: none; gap: 3px; }
+#view3d .chart-head .v3-front-mode:first-of-type { margin-left: auto; }
+#view3d .v3-legend {
+  position: absolute; left: 8px; bottom: 6px; pointer-events: none;
+  display: flex; flex-direction: column; gap: 3px;
+  font-family: var(--mono); font-size: 10px; color: #b7c4d8;
+  background: rgba(7, 10, 18, .72); border-radius: 5px; padding: 4px 8px;
+}
+#view3d .v3-bar { display: grid; grid-template-columns: 11em 120px auto; grid-template-rows: auto auto; column-gap: 8px; align-items: center; }
+#view3d .v3-bar-title { grid-column: 1; grid-row: 1 / span 2; white-space: nowrap; }
+#view3d .v3-bar-ramp { grid-column: 2; grid-row: 1; display: block; width: 120px; height: 8px; border-radius: 2px; border: 1px solid rgba(140,170,210,.25); }
+#view3d .v3-bar-unit { grid-column: 3; grid-row: 1 / span 2; white-space: nowrap; color: var(--fg-faint); }
+#view3d .v3-bar-ticks { grid-column: 2; grid-row: 2; display: flex; justify-content: space-between; width: 120px; font-size: 9px; color: var(--fg-dim); }
+#view3d .v3-stage.flat > .v3-legend { display: none; }
+#view3d .v3-front-mode .btn { padding: 2px 8px; font-size: 10.5px; border-radius: 5px; }
+#view3d .v3-charts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+}
+#v3-end { width: 100%; height: 240px; display: block; border-radius: 6px; }
+#v3-section { width: 100%; height: 230px; display: block; border-radius: 6px; }
+.v3-asu { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.v3-asu .num-field { width: 100%; min-width: 0; padding: 3px 2px; text-align: center; font-size: 10.5px; }
+@media (max-width: 1500px) {
+  #view3d .v3-charts { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); }
+}
