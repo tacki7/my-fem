@@ -1347,6 +1347,7 @@ OFF はロール解析（`solveRoll`）を呼ばなくするだけで、緩和�
  band.ts LDLᵀ（継ぎ目の無い帯 = 直接解法）         max |Δu|/max|u| 1.5e-13
  pcgFiltered + 帯前処理（tol 1e-10）               1 反復、4.1e-14
  pcgFiltered + Jacobi（tol 1e-14）                 27 反復、7.0e-15
+ element.ts の面積、ジッタした凸四辺形 2000 個       靴ひも公式と 6.7e-16（Lean: det J は任意の四辺形で 1 次式、Q4Jacobian.lean）
  （ハーネス校正）ν を 1% ずらした要素剛性           7.4e-3 で不一致を検出
 ```
 

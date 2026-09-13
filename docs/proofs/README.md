@@ -6,6 +6,7 @@
 | ファイル | 対応するコード | 示したこと |
 |---|---|---|
 | `Orowan.lean` | `src/sim/slab.ts` `orowanPressure` | Prandtl の w(a) は [0, 1] で単調減少（1 → π/4）。圧力の方程式 `p = max(q + w(min(1, 2μp/kf))·kf, 0)` の解は μ ≥ 0・kf > 0 ならただ 1 つで、`[max(q + π/4·kf, 0), max(q + kf, 0)]` にある。残差 `p − T(p)` は狭義単調増加（区間での求根が正しい根に収束する根拠） |
+| `Q4Jacobian.lean` | `src/sim/element.ts`（`flow.ts` も同じ形） | 任意の四辺形で det J は (ξ, η) の 1 次式。だから 2×2 Gauss の det J の和は点の位置によらず 4 det J(0,0)＝靴ひも公式の面積 — 偏差項の Gauss 積分と体積項の重心 1 点・重み 4 が同じ面積で重み付けされている根拠 |
 | `SlabFormulas.lean` | `muinv.ts` `flatRadius`、`slab.ts` `blandFordSetup`、`solver.ts` `meanPlaneStrainLmnRange` | Hitchcock の R′ ⇔ `L² = RΔh + 4b²`、圧下ゼロで両式とも `L = 2b`、Roberts の弧はどの圧下でも Hitchcock 以上。Bland & Ford の両枝の比は kf・h によらず、中立点はただ 1 つで閉形式どおり。ひずみ平均 kf の閉形式（積分から） |
 | `MuInverse.lean` | `src/sim/muinv.ts` `slabLoad` / `muFromLoad` | R から登る扁平の反復は最小の固定点に行き着く。荷重の式と扁平の式が単調性の仮定 `Hyp` を満たせば P(μ) は単調（μ に狭義なら狭義）で、発散する μ の集合は上に閉じている。Kármán × Hitchcock / Roberts は `Hyp` を満たし狭義単調（二分法の答えが一意である根拠） |
 

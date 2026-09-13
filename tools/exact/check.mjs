@@ -42,6 +42,26 @@ const mat = { E, nu, rho: 1 };
   check('  (harness) nu off by 1 % is detected', eOff > 1e-3, `max |ΔK|/max|K| ${eOff.toExponential(2)}`);
 }
 
+// --- 1b. general quadrilaterals: area --------------------------------------------------
+// Not a parallelogram, so no exact stiffness here - but docs/proofs/Q4Jacobian.lean shows
+// det J is affine for any quad, so the 2x2 Gauss sum element.ts keeps as `area` is the
+// shoelace area exactly, and equals the 4 det J(0,0) the volumetric term is weighted by.
+{
+  let worst = 0, n = 0;
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  for (let t = 0; t < 2000; t++) {
+    // a convex, counter-clockwise quad: jitter the corners of a unit square
+    const xe = Float64Array.from([0, 0, 1, 0, 1, 1, 0, 1].map((v) => v + 0.3 * (rnd() - 0.5)));
+    const shoelace = 0.5 * ((xe[0] * xe[3] - xe[2] * xe[1]) + (xe[2] * xe[5] - xe[4] * xe[3])
+      + (xe[4] * xe[7] - xe[6] * xe[5]) + (xe[6] * xe[1] - xe[0] * xe[7]));
+    const { area } = precomputeElements(xe, Int32Array.from([0, 1, 2, 3]), mat);
+    worst = Math.max(worst, Math.abs(area[0] / shoelace - 1));
+    n++;
+  }
+  check('element.ts area (2x2 Gauss Σ det J) = shoelace, any quad', worst <= 1e-14, `${n} jittered quads, worst ${worst.toExponential(2)}`);
+}
+
 // --- 2. assembly into CSR ---------------------------------------------------------------
 const m = ref.mesh;
 const X = vec(m.X);
