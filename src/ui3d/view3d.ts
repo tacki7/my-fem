@@ -275,11 +275,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const buildLeft = () => {
     left.replaceChildren();
     // presets
-    const preSec = section('プリセット', { open: false, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
+    const preSec = section('プリセット', { remember: false, open: false, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
     preSec.body.append(buttonRow(PRESETS.map((pr) => ({ text: pr.name, title: pr.note, onClick: () => applyPreset(pr) }))));
     left.append(preSec.root);
     // mill type
-    const millSec = section('ミル形式', { open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えても板・圧延条件、制御、アクチュエータ、ロールプロファイル、解析の設定はそのまま。変わるのはロール寸法だけで、形式ごとに記憶される（初めて選ぶ形式は既定寸法）。その形式の典型条件にしたいときはプリセット。' });
+    const millSec = section('ミル形式', { remember: false, open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えても板・圧延条件、制御、アクチュエータ、ロールプロファイル、解析の設定はそのまま。変わるのはロール寸法だけで、形式ごとに記憶される（初めて選ぶ形式は既定寸法）。その形式の典型条件にしたいときはプリセット。' });
     const millRow = buttonRow(MILLS.map((m) => ({ text: MILL_LABEL[m], onClick: () => switchMill(m) })));
     [...millRow.children].forEach((b, i) => b.classList.toggle('active', MILLS[i] === params.mill));
     millSec.body.append(millRow);
@@ -287,7 +287,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(millSec.root);
 
     // control
-    const ctlSec = section('制御・目標', { open: false });
+    const ctlSec = section('制御・目標', { remember: false, open: false });
     ctlSec.body.append(select<'gauge' | 'force' | 'screw'>('制御モード', [
       { value: 'gauge', text: '出側板厚（圧下率）一定' }, { value: 'force', text: '圧延荷重一定' }, { value: 'screw', text: '圧下位置 手動' },
     ], params.mode, (v) => { params.mode = v; apply(); syncModeDials(); }, 'スクリュー位置は目標に合うようフレームごとに割線法で追い込む。').root);
@@ -299,7 +299,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(ctlSec.root);
 
     // actuators
-    const actSec = section('アクチュエータ', { open: false });
+    const actSec = section('アクチュエータ', { remember: false, open: false });
     if (params.mill === '4hi' || params.mill === '6hi') {
       actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf/chock', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
     }
@@ -353,7 +353,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(actSec.root);
 
     // profiles
-    const profSec = section('ロールプロファイル', { open: false });
+    const profSec = section('ロールプロファイル', { remember: false, open: false });
     profSec.body.append(num('wrCrown', 'WR 研削クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン: 中央と胴端の直径差。正で中央が太い（放物線）。'));
     profSec.body.append(num('wrThermal', 'WR サーマルクラウン', 'µm', 0, 200, 5, 1e-6, '熱膨張による直径クラウン（入力値。温度分布は解かない）。'));
     if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
@@ -365,7 +365,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(profSec.root);
 
     // strip
-    const stripSec = section('板・圧延条件', { open: false });
+    const stripSec = section('板・圧延条件', { remember: false, open: false });
     stripSec.body.append(select<'slab' | 'fem' | 'fem3d'>('材料の変形計算', [
       { value: 'fem3d', text: '3 次元 FEM（幅 × 圧延方向 × 板厚、ロールと連成）' },
       { value: 'fem', text: '平面 FEM（幅 × 圧延方向、ロールと連成）' },
@@ -395,7 +395,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(stripSec.root);
 
     // roll geometry
-    const geoSec = section('ロール寸法', { open: false });
+    const geoSec = section('ロール寸法', { remember: false, open: false });
     geoSec.body.append(num('wrD', 'WR 直径', 'mm', 30, 900, 5, 1e-3));
     geoSec.body.append(num('wrLb', 'WR 胴長', 'mm', 500, 2500, 10, 1e-3));
     geoSec.body.append(num('wrLs', 'WR 支持スパン', 'mm', 600, 3000, 10, 1e-3));
@@ -429,7 +429,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(geoSec.root);
 
     // numerics / display
-    const numSec = section('解析・表示', { open: false });
+    const numSec = section('解析・表示', { remember: false, open: false });
     numSec.body.append(num('stations', '幅方向 分割数', '', 21, 241, 2, 1, '全ロール共通の節点数。増やすと帯行列の解法時間が線形に伸びる。'));
     numSec.body.append(select<'hertz' | 'ring'>('扁平モデル', [
       { value: 'hertz', text: 'Hertz 式（Johnson の円筒近似）' },

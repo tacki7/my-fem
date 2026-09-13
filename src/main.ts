@@ -1284,7 +1284,7 @@ function paintTargetLock(c: StandRowCells, mode: AgcMode): void {
   if (load.title !== loadWhy) load.title = loadWhy;
 }
 
-const sLine = section('ライン構成', { open: false,
+const sLine = section('ライン構成', { remember: false, open: false,
   hint: 'ラインの形と段数。タンデムは複数スタンドが同じ板を同時に噛むので、板厚・質量流量・張力がスタンド間で結合する。リバースは 1 スタンドを板が往復するので、'
       + 'パス間で引き継ぐのは板厚だけ。各スタンド（パス）の圧下率・目標・張力・μ・ロール半径は画面上部の表で入力する。',
 });
@@ -1427,7 +1427,7 @@ const sWidth = slider({
 // The strip itself: one gauge, one width, one material for the whole line, no
 // matter how many stands it runs through. They live in the top-left panel,
 // away from the per-stand dials, because there is nothing to select for them.
-const sStrip = section('ライン共通 — 板寸法', { open: false,
+const sStrip = section('ライン共通 — 板寸法', { remember: false, open: false,
   hint: '板そのものを決める量。ラインに 1 枚しか通っていないので、スタンドを選ぶ余地がない。'
     + 'この下の「被圧延材」「加工発熱」も同じくライン共通。',
 });
@@ -1436,7 +1436,7 @@ sStrip.body.append(sH0.root, sWidth.root);
 sLine.body.append(sMode.root, modeHint, sCount.root, lineHint,
   tAutoSpeed.root, speedHint);
 
-const sMat = section('被圧延材 (LMN 式)', { open: false,
+const sMat = section('被圧延材 (LMN 式)', { remember: false, open: false,
   hint: '変形抵抗 kf = L·(ε̄ + M)^N。L は係数 [MPa]、M は予ひずみ（ε̄ = 0 で kf を有限にする）、'
     + 'N は硬化指数。冷延材の実測 kf 曲線がこの 3 つで与えられることが多い。'
     + 'LMN が返すのは平面ひずみ変形抵抗で、解析が持つ単軸相当応力は σf = (√3/2)·kf。',
@@ -1495,7 +1495,7 @@ const HEAT_ABOUT =
   + 'だから板は自分で出した熱をそのまま持ったまま出ていく（断熱）とみなし、'
   + '塑性仕事 β·σf·ε̄̇ を熱源として、ひずみと同じ流線に沿って温度を運ぶ。'
   + 'ロールへの抜熱は入れていないので、これは温度上昇の上限側の見積り。';
-const sHeat = section('加工発熱 (断熱)', { open: false, hint: HEAT_ABOUT,
+const sHeat = section('加工発熱 (断熱)', { remember: false, open: false, hint: HEAT_ABOUT,
 });
 const heatDials: { setEnabled(on: boolean): void }[] = [];
 const tHeat = toggle('加工発熱で変形抵抗を変える', params.heatOn, (v) => {
@@ -1562,7 +1562,7 @@ const heatOutHint = el('div', 'ctrl-hint');
 sHeat.body.append(heatOutHint);
 for (const dial of heatDials) dial.setEnabled(params.heatOn);
 
-const sProc = section('圧延条件', { open: false,
+const sProc = section('圧延条件', { remember: false, open: false,
   hint: '選択中スタンドの運転条件。ロール周速と送り速度、およびそこから決まる幾何（h₁・接触弧長・噛み込み角）。摩擦係数 μ・張力・圧下率・ロール半径はスタンドごとの量なので上部の表で入力する。',
 });
 const sOmega = slider({
@@ -1651,7 +1651,7 @@ const AGC_HINT: Record<AgcMode, string> = {
     + '捨てずに済むよう、次のメッシュ再構築まで反映を持ち越す。',
 };
 
-const sAgc = section('自動制御 (AGC / 定圧延荷重)', { open: false,
+const sAgc = section('自動制御 (AGC / 定圧延荷重)', { remember: false, open: false,
   hint: 'スクリュー（ロールギャップ）を測定値で閉ループ制御するときの設定。制御モードと目標はスタンドごとに上部の表で選ぶ。ここは全スタンド共通のループ設定 — 探索方式・ゲイン・不感帯・更新間隔・可動範囲。'
       + '「ミルスプリングを補正する」は制御が目標をどう解釈するか（実測板厚を合わせるか、指令として 1 回置くか）。',
 });
@@ -1837,7 +1837,7 @@ sAgc.body.append(agcHint, agcTargetHint,
   sFloor.root, floorHint);
 syncMethodHint();
 
-const sRoll = section('ミル弾性 (ロール扁平・ミルスプリング)', { open: false,
+const sRoll = section('ミル弾性 (ロール扁平・ミルスプリング)', { remember: false, open: false,
   hint: '負荷でミルが変形する 3 つの効果: ロール表面の扁平（接触弧が伸び、荷重が上がる）、板の弾性回復（「被圧延材」の弾性変形）'
       + '、ハウジングと圧下ねじの伸び（ミル剛性）。この 3 つの合計が「出側板厚 − スクリュー位置」＝ミルスプリングで、板厚制御が払っている量。',
 });
@@ -1917,7 +1917,7 @@ sRoll.body.append(
 sMillK.setEnabled(params.millSpringOn);
 syncMillModulus();
 
-const sNum = section('数値解析', { open: false,
+const sNum = section('数値解析', { remember: false, open: false,
   hint: 'メッシュとソルバの設定。結果を変える「物理」ではなく、同じ物理をどの精度・速さで解くか。メッシュを細かくすると荷重の離散化誤差（接触列の出入りによる段差）'
       + 'が下がる。既定は 100×8 で、検証値はすべてこの設定。',
 });
@@ -2086,7 +2086,7 @@ sNum.body.append(
   }).root,
 );
 
-const sDisp = section('表示', { open: false });
+const sDisp = section('表示', { remember: false, open: false });
 const fieldSel = select<FieldKind>('スカラー場', FIELDS, view.field, (v) => {
   view.field = v;
   view.rangeMin = 0;
@@ -2162,7 +2162,7 @@ const TENSION_ABOUT =
   + '実機の τ は 10 ms 程度でフレームより短いので、実時間ではどのモデルも剛体に見える。時間倍率で遅回しにすると差が見える。'
   + '張力制御 ON で、各スタンド間の実績を目標に合わせるよう上流スタンドのロール周速を PI で操作する。'
   + '出側板厚の受け渡しもスタンド間の搬送遅れ L/v を持つ。リバースでは無効。';
-const sTension = section('スタンド間張力 (動特性・張力制御)', { hint: TENSION_ABOUT, open: false });
+const sTension = section('スタンド間張力 (動特性・張力制御)', { remember: false, hint: TENSION_ABOUT, open: false });
 const tensionHint = el('div', 'ctrl-hint');
 const tensionReadout = el('div', 'ctrl-hint');
 const tensionDials: { setEnabled(on: boolean): void }[] = [];
