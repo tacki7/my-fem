@@ -1801,7 +1801,10 @@ export class RollingSim {
     else if (d.contactNodes === 0) d.slabStatus = 'nobite';
     else {
       pt = slabHook(p, c, p.mu);
-      if (!(pt.kEff > 0)) { d.slabStatus = 'tension'; pt = null; }
+      // A zero load is a pull the theory cannot roll against, not a runaway
+      // (that is an infinite one): Bland & Ford gives zero as soon as either
+      // end's pull reaches its own kf, with the mean still under it.
+      if (!(pt.kEff > 0) || pt.load === 0) { d.slabStatus = 'tension'; pt = null; }
       else if (!Number.isFinite(pt.load) || !(pt.load > 0)) {
         // Its own flattening has no fixed point: the theory at the radius
         // the FEM is actually rolling with, which always exists. Reported
