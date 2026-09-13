@@ -112,6 +112,14 @@ export interface Params3D {
   lateralLen: number;
   /** buckling stress the strip can carry in compression before it waves [Pa] */
   sigmaCr: number;
+  /**
+   * Tension feedback: the longitudinal tension in the strip lowers the roll
+   * pressure at which it yields (p = kf − σt), brings the onset of plastic
+   * deformation forward, and is itself redistributed by the elongation
+   * differences the rolls produce - which changes the loads on the work
+   * roll and so its deflection. Off, the strip is rolled as if untensioned.
+   */
+  tensionFeedback: boolean;
   /** control */
   mode: 'gauge' | 'force' | 'screw';
   targetForce: number;
@@ -174,7 +182,7 @@ export function defaultParams(mill: MillType): Params3D {
     backTension: 50e6, frontTension: 80e6,
     lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, entryStrain: 0,
     mu: 0.06, Estrip: 206e9, nuStrip: 0.3,
-    lateralLen: 0.02, sigmaCr: 2e6,
+    lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true,
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
     wrD: 0.5, wrLb: 1.6, wrLs: 2.1, wrDn: 0.3,

@@ -184,6 +184,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     g.append(stats.root.lastElementChild!);
   };
   into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
+  into(gLoad, 'relief', '張力による降伏緩和 σ̄t/k̄f', '%');
   into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
   into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
@@ -361,6 +362,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stripSec.body.append(num('lmnN', 'N', '', 0, 0.6, 0.005, 1));
     stripSec.body.append(num('entryStrain', '入側予ひずみ', '', 0, 2, 0.05, 1));
     stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。下限は幅方向の分割点間隔（それより短いと隣接スライスが結合されず、市松状の数値モードが出る）。'));
+    stripSec.body.append(toggle('張力フィードバック', params.tensionFeedback, (v) => { params.tensionFeedback = v; apply(); },
+      'ON: 板の長手張力が降伏条件（p = kf − σt）と塑性変形の開始点（弾性圧下量）を下げ、幅方向の伸び差で張力が再配分され、材料 FEM の入出側トラクションにも入る。これが荷重を通じて WR の撓み・扁平に返る。OFF: 張力なしで圧延したときの挙動（比較用）。').root);
     stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。'));
     left.append(stripSec.root);
 
@@ -532,6 +535,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // stats
     stats.set('force', (R.force / TONF).toFixed(1));
     stats.set('screw', (R.screw * 1e3).toFixed(3));
+    stats.set('relief', params.tensionFeedback ? (R.yieldRelief * 100).toFixed(1) : 'OFF');
     stats.set('h1', `${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`);
     stats.set('crown', (R.crown * 1e6).toFixed(1));
     stats.set('wedge', (R.wedge * 1e6).toFixed(1));

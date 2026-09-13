@@ -168,6 +168,8 @@ export interface Result3D {
   wedge: number;
   edgeDropL: number;
   edgeDropR: number;
+  /** how much the tension lowers the yield pressure: σ̄t / k̄f over the loaded slices (0 with the feedback off) */
+  yieldRelief: number;
   /** flatness, as the peak-to-peak of the latent and manifest elongation [I-units = 1e-5] */
   latentIU: number;
   manifestIU: number;
@@ -407,7 +409,7 @@ export class StackSolver {
     const wr = rolls[this.stack.wr];
     this.law = {
       lmnL: p.lmnL, lmnM: p.lmnM, lmnN: p.lmnN, E: p.Estrip, nu: p.nuStrip,
-      entryStrain: p.entryStrain, mu: p.mu, R: wr.D / 2, Eroll: wr.E, nuRoll: wr.nu,
+      entryStrain: p.entryStrain, mu: p.mu, tensionFeedback: p.tensionFeedback, R: wr.D / 2, Eroll: wr.E, nuRoll: wr.nu,
     };
     this.wsLaw = makeContactLaw(wr.E, wr.nu, wr.D / 2, p.Estrip, p.nuStrip, Infinity, { ring1: this.ringFor(wr) });
     // strip slices: stations whose cell overlaps the strip
@@ -824,7 +826,7 @@ export class StackSolver {
       const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
       const slab = this.sliceCore(sl, g, sigma[i], sl.q);
       x[i] = sl.x; w[i] = sl.weight; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
-      sB[i] = p.backTension; sF[i] = sigma[i];
+      sB[i] = p.tensionFeedback ? p.backTension : 0; sF[i] = p.tensionFeedback ? sigma[i] : 0;
       qSlab[i] = slab.q; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
     });
     let Lmax = 0, dhMax = 0;
@@ -931,7 +933,9 @@ export class StackSolver {
       }
       if (norm > 0) for (let j = 0; j < n; j++) S[i * n + j] /= norm;
     }
-    const Eeff = p.Estrip / (1 - p.nuStrip * p.nuStrip);
+    // with the feedback off the strip carries its set tension everywhere:
+    // no redistribution by the elongation differences (E' = 0 below)
+    const Eeff = p.tensionFeedback ? p.Estrip / (1 - p.nuStrip * p.nuStrip) : 0;
     // the strip yields in tension near its resistance: cap there
     const e0 = Math.max(p.entryStrain, 0);
     const hi = TENSION_CAP * kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - p.reduction)));
@@ -1179,7 +1183,7 @@ export class StackSolver {
       x: this.x, rolls: this.rolls, contacts: this.contacts,
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
-      latentIU: 0, manifestIU: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
+      latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
       iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
     };
   }
@@ -1283,6 +1287,18 @@ export class StackSolver {
     R.edgeDropL = at(-W / 2 + 0.1) - at(-W / 2 + 0.015);
     R.edgeDropR = at(W / 2 - 0.1) - at(W / 2 - 0.015);
     R.latentIU = Number.isFinite(lat1 - lat0) ? (lat1 - lat0) * 1e5 : 0;
+    {
+      let rel = 0, n = 0;
+      if (p_.tensionFeedback) {
+        const e0 = Math.max(p_.entryStrain, 0);
+        for (const sl of this.slices) {
+          if (sl.q <= 0) continue;
+          const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(sl.h0 / Math.max(sl.h1, 1e-9)));
+          rel += Math.min(0.5 * (p_.backTension + this.sigmaF[sl.s]), TENSION_CAP * kf) / kf; n++;
+        }
+      }
+      R.yieldRelief = n ? rel / n : 0;
+    }
     R.manifestIU = man * 1e5;
     R.screw = this.screw;
     // upper and lower work rolls meeting beside the strip: the symmetric

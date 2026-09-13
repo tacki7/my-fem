@@ -36,6 +36,8 @@ export interface StripLaw {
   entryStrain: number;
   /** friction coefficient in the bite */
   mu: number;
+  /** whether the tensions act on the yield (see Params3D.tensionFeedback) */
+  tensionFeedback: boolean;
   /** work roll radius [m] and elastic constants, for Hitchcock */
   R: number;
   Eroll: number;
@@ -105,7 +107,8 @@ export function sliceLoad(
   const r = dh / h0;
   // A tension near the resistance would stretch the strip rather than roll
   // it; the formula is not asked about that regime.
-  const tens = Math.max(1 - Math.min(0.5 * (sigmaB + sigmaF), TENSION_CAP * kf) / kf, 1 - TENSION_CAP);
+  const sigT = s.tensionFeedback ? Math.min(0.5 * (sigmaB + sigmaF), TENSION_CAP * kf) : 0;
+  const tens = Math.max(1 - sigT / kf, 1 - TENSION_CAP);
   const C = (16 * (1 - s.nuRoll * s.nuRoll)) / (Math.PI * s.Eroll);
   // The arc of contact in Roberts' form: the plastic parabola plus one Hertz
   // half-width, L = b + √(b² + R Δh), b² = C R q / 4. Unlike Hitchcock's
@@ -157,7 +160,10 @@ export function sliceLoad(
   // Below an elastic draft the strip is only squeezed, not rolled: the
   // load rises smoothly from zero over that draft rather than jumping to
   // the plastic value.
-  const dhElastic = (h0 * kf * (1 - s.nu * s.nu)) / s.E;
+  // the strip yields once the roll pressure reaches kf − σt: under tension
+  // the elastic compression it takes to get there is shorter, and plastic
+  // deformation starts at a smaller draft
+  const dhElastic = (h0 * Math.max(kf - sigT, 0.3 * kf) * (1 - s.nu * s.nu)) / s.E;
   if (dh < dhElastic) { const t = dh / dhElastic; q *= t * t * (3 - 2 * t); }
   return { q, runaway, Rp: (L * L) / dh, arc: L, kf, kfExit };
 }
