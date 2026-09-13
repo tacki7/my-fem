@@ -126,11 +126,16 @@ export class StripFem3D {
         e++;
       }
     }
-    // flow stress per element from the strain at its centre (thickness strain per column)
+    // flow stress per element from the strain at its centre: the thickness
+    // strain of the element's four corner columns-and-rows. It used to be
+    // column i's alone - half a column to the left - which made a mirror-
+    // symmetric strip come out asymmetric (load 0.8-3.4 %, exit thickness
+    // 0.9 µm on the coupled 4Hi and 20Hi).
     const kfEl = new Float64Array(ne);
     for (let e = 0; e < ne; e++) {
       const i = elCol[e], j = elRow[e];
-      const h = 0.5 * (hAt(i, j) + hAt(i, j + 1)), h0 = inp.h0[i];
+      const h = 0.25 * (hAt(i, j) + hAt(i, j + 1) + hAt(i + 1, j) + hAt(i + 1, j + 1));
+      const h0 = 0.5 * (inp.h0[i] + inp.h0[i + 1]);
       const eps = (2 / Math.sqrt(3)) * Math.log(h0 / Math.max(h, 1e-9));
       kfEl[e] = 0.5 * (inp.kf(i, eps) + inp.kf(Math.min(i + 1, nx - 1), eps));
     }
