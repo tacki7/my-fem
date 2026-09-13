@@ -4,6 +4,8 @@
 tools/sim2d/build.sh && node tools/exact/check.mjs     # 参照値との照合（FAIL で exit 1）
 ```
 
+`npm run check`（2D の回帰関門一式）にも入っている。
+
 `reference.json` は `ExactRef.lean`（Lean 4、演算はすべて有理数 ℚ）が出力したもの。丸め誤差が
 ゼロの答えと突き合わせるので、ずれはそのまま実装側の誤差か誤りになる。
 
