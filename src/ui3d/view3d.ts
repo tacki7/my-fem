@@ -9,6 +9,7 @@
  */
 
 import { StackSolver, WARNING_TEXT, type Warning3D } from '../sim3d/solver';
+import { RemainingTime, type Eta } from '../sim3d/eta';
 import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
@@ -46,6 +47,26 @@ const PRESETS: Preset3D[] = [
 ];
 /** solve time allowed per frame [ms] */
 const FRAME_BUDGET = 14;
+/** a gap between solving frames longer than this is a pause or a hidden tab, not part of the solve [ms] */
+const ETA_GAP_MS = 1000;
+
+/** the remaining-time estimate as the status chip says it */
+function etaText(e: Eta): string {
+  switch (e.kind) {
+    case 'remaining': {
+      // whole seconds: the estimate is good to a few tens of percent, and a
+      // tenth that changed every frame said more than it knew
+      const s = e.ms / 1000;
+      if (s < 1) return '残り 1 秒未満';
+      if (s < 60) return `残り 約 ${Math.round(s)} 秒`;
+      const m = Math.floor(Math.round(s) / 60);
+      return `残り 約 ${m} 分 ${Math.round(s) - 60 * m} 秒`;
+    }
+    case 'estimating': return '残り 推定中';
+    case 'stalled': return '残り 不明';
+    default: return '';
+  }
+}
 
 export interface View3DHandle {
   setActive(on: boolean): void;
@@ -164,6 +185,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     res: chip('', '残差'), ms: chip('ms', '解法'),
   };
   chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
+  chips.conv.title = [
+    '推定残り時間: ここまでの反復から外挿した、収束までの実時間（描画の時間も含む）。',
+    '材料 FEM のときは、補正ラウンドの変化量の減り方（初回の比は除く）から残りのラウンド数を、ラウンドの間隔とその縮み方から 1 ラウンドの時間を出す。',
+    'スラブ法は Newton の残差の減り方から。ダイヤルを動かすと解き直しなので推定もやり直す（同じメッシュなら前回のラウンド時間を使う）。',
+    '「推定中」はまだ手がかりが無いとき、「不明」は残差が 80 反復下がらず補正ラウンドにも進めないとき（収束しない可能性が高い）。',
+  ].join('\n');
   chips.res.title = '外側 Newton の相対残差（力の不釣り合い ÷ 最大の力、収束判定 2e-6）／ 材料 FEM のときはその補正の変化量（荷重比、収束判定 2e-3）';
   status.append(chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms);
   const warnBox = el('div', 'v3-warnings');
@@ -602,7 +629,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     setChip(chips.h1, (R.h1Mean * 1e3).toFixed(3));
     setChip(chips.crown, (R.crown * 1e6).toFixed(0));
     setChip(chips.manifest, R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    setChip(chips.conv, R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
+    setChip(chips.conv, R.converged ? '収束' : running ? `反復中 ${etaText(eta)}` : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
     chips.conv.classList.toggle('busy', !R.converged && running);
     {
       const res = Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—';
@@ -646,12 +673,28 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   /* ── loop ── */
   let raf = 0;
   let idleFrames = 0;
+  // The remaining-time estimate runs on its own clock, which only moves
+  // while the solve does: from the end of the previous solving frame (the
+  // page's drawing between frames is part of how long a solve takes), or
+  // just this frame's solve after a pause or a hidden tab.
+  const remaining = new RemainingTime();
+  let eta: Eta = { kind: 'estimating' };
+  let etaClock = 0;
+  let lastSolveEnd = 0;
+  const etaKey = () => `${params.stripModel}|${params.stripNz}|${params.stripNy}|${solver.result.dof}|${solver.slices.length}`;
   const tick = () => {
     raf = 0;
     if (!active) return;
     let moved = false;
     if (running && !solver.isConverged) {
+      const t0 = performance.now();
       moved = solver.advance(FRAME_BUDGET, 6);
+      const t1 = performance.now();
+      etaClock += lastSolveEnd > 0 && t0 - lastSolveEnd < ETA_GAP_MS ? t1 - lastSolveEnd : t1 - t0;
+      lastSolveEnd = t1;
+      eta = remaining.update(etaClock, solver.progress(), etaKey());
+    } else {
+      lastSolveEnd = 0;
     }
     if (moved || dirty) {
       drawAll();
@@ -687,7 +730,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   });
   void idleFrames;
   // a hook for headless checks, like the 2D tab's
-  (window as unknown as { __v3: unknown }).__v3 = { solver, get params() { return params; }, handle };
+  (window as unknown as { __v3: unknown }).__v3 = { solver, get params() { return params; }, get eta() { return eta; }, handle };
   return handle;
 }
 

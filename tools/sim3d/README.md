@@ -11,6 +11,7 @@ node tools/sim3d/bench.mjs [out.json] # 速度と結果のベンチマーク（�
 node tools/sim3d/sixhi.mjs           # 6Hi の IR シフト: 下半分の点対称（|v上(x) − v下(−x)|）と、鏡像モデルとの経路一致
 node tools/sim3d/sixhi2.mjs          # 同じ検算を制御モード・板モデル・板幅・シフト量・分割数を振って
 node tools/sim3d/irshift.mjs [build] # IR シフト掃引の表（docs/validation.md）。別ビルドのディレクトリを渡すと旧コードで測る
+node tools/sim3d/eta.mjs [filter]    # 推定残り時間: 収束を記録して描画込みのフレーム刻みで再生し、推定と実際の残り時間を比べる（OVERHEAD=60 で描画を重く）
 ```
 
 スクリプトは `tools/sim3d/build/` の相対パスで読むので、`cd tools/sim3d` してから

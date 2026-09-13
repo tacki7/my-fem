@@ -74,6 +74,48 @@ const FEM_RELAX = 0.3;
 const FEM_LOOSE_RUNS = 6;
 /** outer iterations at one screw position after which a nearly settled Newton lets the screw move */
 const STEP_ESCAPE_ITERS = 60;
+/** the Newton is settled under this residual and this largest update [m]; it may escape to a correction round under `NEAR_SETTLED` */
+const SETTLED_RESIDUAL = 2e-6;
+const SETTLED_STEP = 5e-9;
+const NEAR_SETTLED = 1e-2;
+
+/**
+ * The convergence rules `advance` applies, for anything that has to reason
+ * about how far a solve still has to go (see `eta.ts`).
+ */
+export const CONVERGENCE = {
+  residual: SETTLED_RESIDUAL,
+  step: SETTLED_STEP,
+  nearSettled: NEAR_SETTLED,
+  escapeIters: STEP_ESCAPE_ITERS,
+  stepClip: STEP_CLIP,
+  femTol: FEM_FIXED_TOL,
+  femLooseTol: 10 * FEM_FIXED_TOL,
+  femLooseRuns: FEM_LOOSE_RUNS,
+} as const;
+
+/** where a solve stands, as `StackSolver.progress` reports it */
+export interface SolveProgress {
+  /** which solve this is: counts up every time the inputs change */
+  solve: number;
+  /** outer Newton iterations since the inputs last changed */
+  iterations: number;
+  /** the last iteration's relative force residual and largest update [m] */
+  residual: number;
+  stepMax: number;
+  /** whether the strip model runs correction rounds (the FEMs) at all */
+  usesFem: boolean;
+  /** correction rounds run at the current screw position, and the last one's change */
+  rounds: number;
+  femChange: number;
+  /** rounds in a row the change has been under the loose tolerance */
+  looseRuns: number;
+  /** iterations since the last round (or since the screw last moved) */
+  sinceRound: number;
+  /** the solve started from a kept correction (a dial change on the same mesh), not from scratch */
+  warm: boolean;
+  converged: boolean;
+}
 /**
  * Anderson acceleration of the FEM correction (see `andersonStep`): the
  * history depth, the residual growth that restarts it, the largest mixing
@@ -327,6 +369,10 @@ export class StackSolver {
   private sinceStep = 0;
   /** the last correction round's change, for diagnostics */
   femLastChange = 0;
+  /** this solve started from the last one's correction (see `setParams`) */
+  private warmStart = false;
+  /** solves started so far: one more for every change of inputs */
+  private solveCount = 0;
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -354,6 +400,8 @@ export class StackSolver {
     // threw away most of the last solve's work (re-convergence after a
     // dial change took up to twice as long). A new mesh starts it over.
     if (newMesh) { this.femRatio = null; this.femEps = null; }
+    this.warmStart = this.femRatio !== null;
+    this.solveCount++;
     this.aaX = []; this.aaF = [];
     this.sinceStep = 0; this.femRounds = 0; this.femLooseRuns = 0;
   }
@@ -1478,8 +1526,8 @@ export class StackSolver {
       // steer by. A Newton that cannot settle for a long while (a barely
       // touching strip, where the tension's active set flips) still lets
       // the FEM correction be refreshed once it is nearly settled.
-      const settled = this.residual < 2e-6 && this.stepMax < 5e-9;
-      const stalled = !settled && this.sinceStep > STEP_ESCAPE_ITERS && this.residual < 1e-2;
+      const settled = this.residual < SETTLED_RESIDUAL && this.stepMax < SETTLED_STEP;
+      const stalled = !settled && this.sinceStep > STEP_ESCAPE_ITERS && this.residual < NEAR_SETTLED;
       if (settled || stalled) {
         this.sinceStep = 0;
         let femSettled = true;
@@ -1753,6 +1801,23 @@ export class StackSolver {
   }
 
   get isConverged(): boolean { return this.converged; }
+
+  /** where the solve stands (see `SolveProgress`) - cheap, for a status line every frame */
+  progress(): SolveProgress {
+    return {
+      solve: this.solveCount,
+      iterations: this.iterations,
+      residual: this.residual,
+      stepMax: this.stepMax,
+      usesFem: this.p.stripModel !== 'slab',
+      rounds: this.femRounds,
+      femChange: this.femLastChange,
+      looseRuns: this.femLooseRuns,
+      sinceRound: this.sinceStep,
+      warm: this.warmStart,
+      converged: this.converged,
+    };
+  }
   wake(): void { this.converged = false; }
 }
 
