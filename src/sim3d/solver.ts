@@ -74,6 +74,16 @@ const FEM_FIXED_TOL = 2e-3;
 const FEM_RELAX = 0.3;
 /** rounds the correction has to stay within ten times the tolerance to count as settled */
 const FEM_LOOSE_RUNS = 6;
+/**
+ * Bounds on the correction's load ratio (FEM load over slab load). They are
+ * a guard against a broken FEM answer, not a limit on the physics: at
+ * 0.5-2.5 they held 38 of the 202 stress cases (27 of them converged, the
+ * 2Hi default among them - the centre of its strongly crowned strip carries
+ * 0.45 of its slab load); at 0.1-5 the converged cases settle between 0.12
+ * and 4.6, and no case is lost.
+ */
+const FEM_RATIO_MIN = 0.1;
+const FEM_RATIO_MAX = 5;
 /** outer iterations at one screw position after which a nearly settled Newton lets the screw move */
 const STEP_ESCAPE_ITERS = 60;
 /** the Newton is settled under this residual and this largest update [m]; it may escape to a correction round under `NEAR_SETTLED` */
@@ -1198,7 +1208,7 @@ export class StackSolver {
       const dhEl = (sl.h0 * kfMean(law, e0, e0 + 0.1) * (1 - law.nu * law.nu)) / law.E;
       const thr = Math.max(4 * dhEl, 0.005 * sl.h0);
       const t = qSlab[i] > 0 ? Math.max(0, Math.min(1, (sl.h0 - h1[i] - thr) / thr)) : 0;
-      const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(0.5, Math.min(2.5, r.q[i] / qSlab[i])) : 1;
+      const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(FEM_RATIO_MIN, Math.min(FEM_RATIO_MAX, r.q[i] / qSlab[i])) : 1;
       const k = 1 + t * (kRaw - 1);
       const de = t * (r.eps[i] - epsSlab[i]);
       change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * AA_EPS_SCALE);
@@ -1220,7 +1230,7 @@ export class StackSolver {
     // FEM, and offsets of 0.2 there are part of legitimate answers (a bound
     // at 0.1 kept three such passes from ever converging).
     for (let i = 0; i < n; i++) {
-      this.femRatio[i] = Math.max(0.5, Math.min(2.5, next[i]));
+      this.femRatio[i] = Math.max(FEM_RATIO_MIN, Math.min(FEM_RATIO_MAX, next[i]));
       this.femEps![i] = next[n + i] / AA_EPS_SCALE;
     }
     return change;
