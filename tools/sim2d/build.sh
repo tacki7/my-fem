@@ -11,5 +11,5 @@ OUT=${1:-$HERE/build}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 cd "$ROOT" && npx tsc --outDir "$OUT" --rootDir src --module es2022 --moduleResolution bundler \
-  --target es2022 --noEmit false --skipLibCheck src/sim/solver.ts src/sim/muinv.ts
+  --target es2022 --noEmit false --skipLibCheck src/sim/solver.ts src/sim/muinv.ts src/sim/mill.ts
 cd "$OUT" && for f in sim/*.js; do sed -i '' -E "s#from '(\.\.?/[A-Za-z0-9/]+)'#from '\1.js'#g" "$f"; done

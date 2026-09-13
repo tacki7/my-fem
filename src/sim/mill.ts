@@ -790,9 +790,14 @@ export class Mill {
       const ud = up.diag, dd = dn.diag;
       const h1 = ud.exitThickness > 0 ? ud.exitThickness : up.params.h0 * (1 - up.params.reduction);
       // Transport: what left the upstream stand goes in at the back, what the
-      // downstream stand took comes off the front. The two are equal by
-      // construction here (the feed is prescribed at the exit speed), so the
-      // length in the gap is conserved and only the thickness profile moves.
+      // downstream stand took comes off the front. The two are meant to be
+      // equal - the feed is prescribed at the exit speed - but not in the same
+      // frame: push reads this frame's exit speed, pop the feed the downstream
+      // stand was given, and through the start-up transient they differ. On
+      // the three-stand default (tools/sim2d, 40 s, 'simple') the gaps settle
+      // 11 mm and 6 mm short of the 4.5 m stand distance, -0.25 % and -0.14 %.
+      // Popping exactly what was pushed moves the settled tension by +0.06 %
+      // and +0.09 % ('dist': -0.02 % / -0.10 %), so it is left, and recorded.
       if (ud.exitSpeed > 0 && dtm > 0) {
         g.queue.push(ud.exitSpeed * dtm, h1);
         g.queue.pop((dn.params.feedSpeed > 0 ? dn.params.feedSpeed : ud.exitSpeed) * dtm);
