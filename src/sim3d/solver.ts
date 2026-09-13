@@ -55,6 +55,8 @@ const K_CHOCK_Y = 1e6;
 const STEP_CLIP = 0.25e-3;
 /** the softest an active contact is allowed to look to the Jacobian [N/m²] */
 const KT_FLOOR = 1e9;
+/** the slice's load fixed point is solved to this fraction of the load (see `sliceCore`) */
+const SLICE_TOL = 1e-9;
 /** the thinnest exit a slice may report, as a fraction of its entry thickness */
 const H_MIN_FRAC = 0.05;
 /** the residual is measured against the largest force in play, but never against less than this [N] */
@@ -1026,7 +1028,15 @@ export class StackSolver {
   }
 
   /**
-   * The slice's load at a rigid gap g: q = P(h1), h1 = g + 2 δ_ws(q) + springback.
+   * The slice's load at a rigid gap g: q = k P(h1), h1 = g + 2 δ_ws(q) + springback.
+   *
+   * k is the strip FEM's load correction for this slice (1 with the slab
+   * model, see `femCorrection`). It belongs inside the fixed point: the
+   * flattening has to be that of the load the roll actually carries. It used
+   * to be applied to the slab load after the fact, so the exit thickness came
+   * from the flattening under P while the roll carried k P - on a 4Hi the
+   * exit thickness was 73 µm too thin on average, a millimetre at a 2Hi edge,
+   * and the crown and flatness were far off.
    *
    * φ(q) = q − P(h1(q)) is increasing in q: a heavier load flattens the
    * roll more, which opens the gap, which lowers the load the gap asks
@@ -1035,7 +1045,7 @@ export class StackSolver {
    * steep pass (high friction, foil), lands where the gap has opened, sees
    * no contact, and oscillates between zero and a huge load.
    */
-  private sliceCore(sl: Slice, g: number, sigmaF: number, qStart: number): SliceState {
+  private sliceCore(sl: Slice, g: number, sigmaF: number, qStart: number, k = 1): SliceState {
     const p = this.p;
     const law = this.law;
     // The width the flattening is spread over is frozen for this call at
@@ -1045,7 +1055,10 @@ export class StackSolver {
     // outer iteration later, which is where the tangent is taken anyway.
     const ws = this.wsLaw;
     ws.bFloor = Math.max(0, sl.arc / 2);
-    const P = (h1: number, guess: number) => sliceLoad(law, sl.h0, h1, p.backTension, sigmaF, guess);
+    const P = (h1: number, guess: number) => {
+      const r0 = sliceLoad(law, sl.h0, h1, p.backTension, sigmaF, guess / k);
+      return k === 1 ? r0 : { ...r0, q: k * r0.q };
+    };
     let q = Math.max(qStart, 0);
     // a cold slice starts from the load the rigid gap would take, which is
     // near the root; doubling up from nothing took a dozen rounds
@@ -1065,7 +1078,10 @@ export class StackSolver {
       const r = open ? NO_LOAD : P(h1, q);
       arc = r.arc; runaway = r.runaway;
       const phi = q - r.q;
-      if (Math.abs(phi) <= 1e-6 * Math.max(q, 1)) { if (open) q = 0; break; }
+      // tight: the outer Newton settles on displacements of a few nm, and a
+      // slice load resolved to 1e-6 left a noise floor above that (a 2Hi at
+      // 1600 mm width then crept through 800 iterations on the stall escape)
+      if (Math.abs(phi) <= SLICE_TOL * Math.max(q, 1)) { if (open) q = 0; break; }
       if (phi < 0) lo = q; else hi = q;
       if (phi > 0 && q === 0) break;
       // Newton on the load's own slope; a step outside the bracket is
@@ -1089,15 +1105,15 @@ export class StackSolver {
    * the springback - and an inconsistent tangent costs far more in
    * shortened outer steps than the extra solves cost here.
    */
-  private solveSlice(sl: Slice, g: number, sigmaF: number): SliceState & {
+  private solveSlice(sl: Slice, g: number, sigmaF: number, k = 1): SliceState & {
     dqdg: number; dqds: number; dh1dg: number; dh1ds: number;
   } {
-    const base = this.sliceCore(sl, g, sigmaF, sl.q);
+    const base = this.sliceCore(sl, g, sigmaF, sl.q, k);
     if (base.q <= 0) return { ...base, dqdg: 0, dqds: 0, dh1dg: 1, dh1ds: 0 };
     const dg = 2e-3 * sl.h0;
     const ds = Math.max(1e6, 0.02 * Math.abs(sigmaF));
-    const atG = this.sliceCore(sl, g - dg, sigmaF, base.q);
-    const atS = this.sliceCore(sl, g, sigmaF + ds, base.q);
+    const atG = this.sliceCore(sl, g - dg, sigmaF, base.q, k);
+    const atS = this.sliceCore(sl, g, sigmaF + ds, base.q, k);
     return {
       ...base,
       dqdg: (base.q - atG.q) / dg,
@@ -1137,10 +1153,14 @@ export class StackSolver {
     const qSlab = new Float64Array(n), epsSlab = new Float64Array(n);
     this.slices.forEach((sl, i) => {
       const g = this.gapAt(sl.s);
-      const slab = this.sliceCore(sl, g, sigma[i], sl.q);
+      // the slice as the coupled solve has it, flattened under the corrected
+      // load; the FEM is asked about that exit thickness and arc, and the
+      // new ratio is its load over the slab load at the same thickness
+      const k = this.femRatio![i];
+      const slab = this.sliceCore(sl, g, sigma[i], sl.q, k);
       x[i] = sl.x; w[i] = sl.weight; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
       sB[i] = p.tensionFeedback ? p.backTension : 0; sF[i] = p.tensionFeedback ? sigma[i] : 0;
-      qSlab[i] = slab.q; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
+      qSlab[i] = slab.q / k; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
     });
     let Lmax = 0, dhMax = 0;
     for (let i = 0; i < n; i++) { Lmax = Math.max(Lmax, L[i]); dhMax = Math.max(dhMax, h0[i] - h1[i]); }
@@ -1341,8 +1361,10 @@ export class StackSolver {
 
     // With the strip FEM on, the slab slices still drive the Newton (their
     // tangents are smooth and cheap) but are corrected to the FEM: the load
-    // by a ratio and the elongation by an offset, both taken once per strip
-    // solve at the current state (see `femCorrection`). Across the outer
+    // by a ratio - inside the slice's own fixed point, so the flattening and
+    // the exit thickness follow the corrected load - and the elongation by
+    // an offset, both taken once per strip solve at the current state (see
+    // `femCorrection`). Across the outer
     // iterations the corrections refresh, and the solution converges to the
     // FEM's - a defect correction. Calling the FEM inside the tension Newton
     // instead made that Newton chase a function whose tangent it did not
@@ -1352,10 +1374,9 @@ export class StackSolver {
       this.slices.forEach((sl, i) => {
         if (onlyLive && held[i] !== 0) return;
         const g = this.gapAt(sl.s);
-        const out = this.solveSlice(sl, g, sigma[i]);
-        const k = ratio ? ratio[i] : 1;
-        sl.g = g; sl.q = out.q * k; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
-        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds; sl.dqdg = out.dqdg * k; sl.dqds = out.dqds * k;
+        const out = this.solveSlice(sl, g, sigma[i], ratio ? ratio[i] : 1);
+        sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
+        sl.dh1dg = out.dh1dg; sl.dh1ds = out.dh1ds; sl.dqdg = out.dqdg; sl.dqds = out.dqds;
         eps[i] = sl.q > 0 ? Math.log(sl.h0 / Math.max(sl.h1, 1e-9)) + (off ? off[i] : 0) : 0;
       });
     };
