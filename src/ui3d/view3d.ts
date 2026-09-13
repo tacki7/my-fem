@@ -145,7 +145,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
   const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
   const cGauge = cell('v3-gauge', '板厚プロファイル', '出側 h₁（実線）と入側 h₀（破線）の平均からの偏差');
-  const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（平均比）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
+  const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
   const cFlow = cell('v3-flow', '横流れ速度 u_x(x, z)', '材料 FEM ／ ロール周速比 [%] ／ 正 = +x 側へ（板端へ広がる流れ）');
@@ -529,10 +529,19 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       { label: 'h₀ − 平均', color: '#8ea0bd', x: R.x, y: dev(R.h0), dash: true },
     ], { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true });
 
-    const iu = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e5);
+    // Each curve shifted so its smallest value across the strip reads zero:
+    // the shortest fibre is the reference, as a flatness profile is quoted,
+    // and every other position is how much longer it is. (The solver keeps
+    // the elongation relative to the width mean; the shift is display only.)
+    const iuFromMin = (a: Float64Array) => {
+      let m = Infinity;
+      for (let i = 0; i < a.length; i++) if (Number.isFinite(a[i]) && a[i] < m) m = a[i];
+      if (!Number.isFinite(m)) m = 0;
+      return Float64Array.from(a, (v) => (v - m) * 1e5);
+    };
     charts.eps.draw([
-      { label: '潜在 Δε', color: '#7fe4ff', x: R.x, y: iu(R.dEps) },
-      { label: '顕在（波）', color: '#ff6b81', x: R.x, y: iu(R.manifest), fill: true },
+      { label: '潜在 Δε', color: '#7fe4ff', x: R.x, y: iuFromMin(R.dEps) },
+      { label: '顕在（波）', color: '#ff6b81', x: R.x, y: iuFromMin(R.manifest), fill: true },
     ], { unit: 'I-unit', halfWidth: strip * 1.05, strip, zero: true, symmetric: false });
 
     charts.sig.draw([
