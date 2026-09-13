@@ -6,32 +6,35 @@ const TONF = 9.80665e3;
 const p = defaultParams(process.argv[2] ?? '4hi'); Object.assign(p, JSON.parse(process.argv[3] ?? '{}'));
 const sv = new StackSolver(p);
 for (let f = 0; f < 300; f++) { sv.advance(1e9, 6); if (sv.isConverged) break; }
-const R = sv.result, st = sv.stack, u = sv.u, DOF = 4, nr = sv.nr;
-const idx = (s, r, d) => (s * nr + r) * DOF + d;
+const R = sv.result, st = sv.stack, u = sv.u, nr = sv.nr;
+// the solver's own numbering and gap: vertical stacks number v and w as
+// separate blocks, and a stack with a shifted roll solves its lower half
+const idx = (s, r, d) => sv.idx(s, r, d);
 console.log(p.mill, 'converged', R.converged, 'F', (R.force / TONF).toFixed(1), 'tonf');
-// 1. equilibrium per roll
+// 1. equilibrium per roll - every solved roll, the lower half's too (R.rolls/R.contacts hold only the upper half)
+const allRolls = sv.rolls, allContacts = sv.contacts;
 for (let r = 0; r < nr; r++) {
   let fy = 0, fz = 0;
-  for (const c of R.contacts) {
+  for (const c of allContacts) {
     let F = 0; for (let s = 0; s < R.x.length; s++) F += c.q[s] * c.weight[s];
     if (c.a === r) { fy -= F * c.ny; fz -= F * c.nz; }
     if (c.b === r) { fy += F * c.ny; fz += F * c.nz; }
   }
-  if (r === st.wr) fy += R.force;
-  const roll = R.rolls[r];
+  if (r === st.wr || r === sv.wrLower) fy += R.force;
+  const roll = allRolls[r];
   let ry = 0;
   roll.reactions.forEach((v) => { ry += roll.def.support === 'chock' ? v : -v; });
   // reactions: stored as -ky(ty-u) = force the housing must supply downward; sum of contact + strip + support = 0
   console.log(`  ${roll.def.id.padEnd(6)} contacts+strip fy=${(fy / TONF).toFixed(2).padStart(8)} fz=${(fz / TONF).toFixed(2).padStart(8)}  support=${(ry / TONF).toFixed(2).padStart(8)}  net=${((fy + ry) / TONF).toFixed(3)} tonf`);
 }
 // 2. contact kinematics
-for (const c of R.contacts) {
-  const A = R.rolls[c.a], B = R.rolls[c.b];
+for (const c of allContacts) {
+  const A = allRolls[c.a], B = allRolls[c.b];
   let worst = 0, worstQ = 0, n = 0, open = 0;
   for (let s = 0; s < R.x.length; s++) {
     if (c.weight[s] <= 0) continue;
     const ia = idx(s, c.a, 0), ib = idx(s, c.b, 0);
-    const gapChange = (u[ib] - u[ia]) * c.ny + (u[ib + 2] - u[ia + 2]) * c.nz;
+    const gapChange = (u[ib] - u[ia]) * c.ny + (u[idx(s, c.b, 2)] - u[idx(s, c.a, 2)]) * c.nz;
     const delta = A.prof[s] + B.prof[s] - gapChange;
     const [q] = loadAt(c.law, delta, 0);
     worst = Math.max(worst, Math.abs(delta - c.delta[s]));
@@ -48,7 +51,7 @@ const wr = R.rolls[st.wr];
 let worstH = 0, worstQ = 0;
 for (const sl of sv.slices) {
   const v = u[idx(sl.s, st.wr, 0)];
-  const g = p.h0 + 2 * (v - wr.prof[sl.s]);
+  const g = sv.gapAt(sl.s);
   const [flat] = approach({ ...sv.wsLaw, bFloor: sl.arc / 2 }, sl.q);
   const r = sliceLoad(sv.law, sl.h0, sl.h1, p.backTension, sv.sigmaF[sl.s]);
   const h1 = g + 2 * flat + springback(sv.law, g + 2 * flat, r.kfExit, sv.sigmaF[sl.s]);
