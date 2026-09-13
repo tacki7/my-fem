@@ -159,10 +159,12 @@ export interface Params3D {
   nuRoll: number;
   /** stations across the widest roll */
   stations: number;
-  /** how the strip is solved: slab passes per slice, or the plan-view rigid-plastic FEM (see stripfem.ts) */
-  stripModel: 'slab' | 'fem';
-  /** rows along the rolling direction of the strip FEM */
+  /** how the strip is solved: slab passes per slice, the plan-view rigid-plastic FEM (stripfem.ts), or the three-dimensional one (stripfem3d.ts) */
+  stripModel: 'slab' | 'fem' | 'fem3d';
+  /** rows along the rolling direction of the strip FEMs */
   stripNz: number;
+  /** element layers through the upper half of the thickness (3D FEM) */
+  stripNy: number;
   /** how a roll flattens at a contact: the Hertz/Johnson closed form, or the cross-section ring FEM */
   flatModel: 'hertz' | 'ring';
   /** ring FEM: circumferential divisions, rings through the wall, radial grading, hub radius as a fraction of R */
@@ -200,7 +202,7 @@ export function defaultParams(mill: MillType): Params3D {
     clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
     stations: 81,
-    stripModel: 'fem', stripNz: 8,
+    stripModel: 'fem', stripNz: 8, stripNy: 2,
     flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
   };
   switch (mill) {

@@ -22,6 +22,7 @@ import { BandMatrix, denseSolve } from './band';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, type StripFemResult } from './stripfem';
+import { StripFem3D } from './stripfem3d';
 import {
   sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
@@ -269,6 +270,7 @@ export class StackSolver {
   private rings = new Map<string, RingInfluence>();
   /** the strip FEM and its last result (strip model 'fem') */
   private fem = new StripFem();
+  private fem3d = new StripFem3D();
   femResult: StripFemResult | null = null;
   /** correction rounds since the screw last moved, and rounds in a row the correction has been loosely settled */
   private femRounds = 0;
@@ -843,9 +845,8 @@ export class StackSolver {
     // from it (a sliver swapped for the real arc at first contact made two
     // FEM solutions alternate on a 0.06 µm difference in thickness)
     for (let i = 0; i < n; i++) L[i] = Math.max(L[i], 0.05 * Lmax);
-    const r = this.fem.solve({
-      x, w, h0, h1, L, kf: (_i, e) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1,
-    });
+    const femInput = { x, w, h0, h1, L, kf: (_i: number, e: number) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1 };
+    const r = p.stripModel === 'fem3d' ? this.fem3d.solve({ ...femInput, ny: p.stripNy }) : this.fem.solve(femInput);
     this.femResult = r;
     let change = 0;
     for (let i = 0; i < n; i++) {
@@ -1021,7 +1022,7 @@ export class StackSolver {
       }
     };
 
-    if (p.stripModel !== 'fem') { this.femRatio = null; this.femEps = null; this.femResult = null; }
+    if (p.stripModel === 'slab') { this.femRatio = null; this.femEps = null; this.femResult = null; }
     evalSlices(false);
     if (this.counters) this.counters.stripCalls++;
     for (let round = 0; round < 10; round++) {
@@ -1143,7 +1144,7 @@ export class StackSolver {
         // corrected slab model; the FEM is then asked again at this state,
         // and only once its correction stops changing is the state a
         // solution of the coupled problem (or the screw moved).
-        if (this.p.stripModel === 'fem') {
+        if (this.p.stripModel !== 'slab') {
           const change = this.femCorrection(this.sigmaSlices());
           this.femRounds++;
           this.femLastChange = change;
@@ -1265,7 +1266,7 @@ export class StackSolver {
       }
       this.rolls[r].hertzMax = hm;
     }
-    R.fem = p_.stripModel === 'fem' ? this.femResult : null;
+    R.fem = (p_.stripModel === 'fem' || p_.stripModel === 'fem3d') ? this.femResult : null;
     R.arc.fill(NaN);
     R.h0.fill(NaN); R.h1.fill(NaN); R.q.fill(NaN); R.flat.fill(NaN);
     R.dEps.fill(NaN); R.manifest.fill(NaN); R.sigmaF.fill(NaN);
@@ -1366,11 +1367,11 @@ export class StackSolver {
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
-    if (p.stripModel === 'fem' && this.femResult && !this.femResult.converged) w.push('fem');
+    if ((p.stripModel === 'fem' || p.stripModel === 'fem3d') && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the
     // roll above has lifted off, which no cluster is built to do
     if (this.converged && this.contacts.some((c) => c.total <= 0)) w.push('openContact');
-    const stuckAt = p.stripModel === 'fem' ? STUCK_ITERS_FEM : STUCK_ITERS;
+    const stuckAt = (p.stripModel === 'fem' || p.stripModel === 'fem3d') ? STUCK_ITERS_FEM : STUCK_ITERS;
     if (this.iterations > stuckAt && !this.converged) w.push('stuck');
     if (p.mode !== 'screw' && this.iterations > stuckAt && !this.screwSettled()
       && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');

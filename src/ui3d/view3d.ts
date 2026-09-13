@@ -343,13 +343,17 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
     // strip
     const stripSec = section('板・圧延条件', { open: false });
-    stripSec.body.append(select<'slab' | 'fem'>('材料の変形計算', [
+    stripSec.body.append(select<'slab' | 'fem' | 'fem3d'>('材料の変形計算', [
+      { value: 'fem3d', text: '3 次元 FEM（幅 × 圧延方向 × 板厚、ロールと連成）' },
       { value: 'fem', text: '平面 FEM（幅 × 圧延方向、ロールと連成）' },
       { value: 'slab', text: 'スラブ法（幅方向スライス）' },
     ], params.stripModel, (v) => { params.stripModel = v; apply(); buildLeft(); },
-    '平面 FEM: 噛み込み域の板を幅方向 × 圧延方向に分割した剛塑性 FEM（板厚方向は一様速度の薄板近似、板厚はロールギャップ）。圧力・摩擦丘・横流れが結果として出て、ロールの撓み・扁平と連立して解く。スラブ法: 幅方向スライスごとの Bland & Ford。').root);
-    if (params.stripModel === 'fem') {
+    '3 次元 FEM: 板厚の上半分（中央面対称）を六面体で分割した剛塑性 FEM。ロール面は法線速度拘束＋クーロン摩擦、圧力はその反力。板厚方向の速度分布・横流れ・摩擦丘が結果として出る。平面 FEM: 板厚方向を一様速度とした薄板近似（速い）。スラブ法: 幅方向スライスごとの Bland & Ford（最速）。いずれもロールの撓み・扁平と連成。').root);
+    if (params.stripModel === 'fem' || params.stripModel === 'fem3d') {
       stripSec.body.append(num('stripNz', '材料 FEM 圧延方向 分割数', '', 4, 32, 1, 1, '噛み込み弧に沿った要素数。幅方向は「幅方向 分割数」の板上の点数に従う。'));
+    }
+    if (params.stripModel === 'fem3d') {
+      stripSec.body.append(num('stripNy', '材料 FEM 板厚方向 分割数', '', 1, 6, 1, 1, '板厚の上半分の層数（中央面は対称面）。結果は 1〜3 でほぼ変わらない。計算時間は層数に比例。'));
     }
     stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3));
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
@@ -546,7 +550,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}`);
-    stats.set('fem', R.fem ? `${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
+    stats.set('fem', R.fem ? `${params.stripModel === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];
       const inf = solver.ringFor(wr);
