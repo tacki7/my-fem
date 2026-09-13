@@ -2763,7 +2763,12 @@ export class RollingSim {
     const rc = Math.max(p.rhoStrip * p.cpStrip, 1);
     const beta = Math.max(0, Math.min(1, p.taylorQuinney));
 
-    // nodal strain rate, area averaged from the Gauss points
+    // Nodal strain rate: each element's Gauss-point mean, averaged over the
+    // elements around the node with equal weights - not by area, which is
+    // what this comment used to say. Weighting by area instead moves the
+    // settled load by -0.049 % (default), -0.035 % (45 % reduction) and
+    // -0.063 % (foil), measured headless over frames 900-1200: under the
+    // +-0.25 % load resolution, so it is left as it is.
     this.strainRateNode.fill(0);
     const wsum = this.rateW;
     wsum.fill(0);

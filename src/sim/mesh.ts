@@ -121,7 +121,7 @@ export interface RollMesh extends Mesh {
   /** reference polar angle per node, for the surface marking shader */
   theta0: Float64Array;
   radius0: Float64Array;
-  /** geometric growth ratio of the core rings towards the hub */
+  /** largest width ratio of adjacent rings, inwards from the skin (1 without a skin layer) */
   coreGrowth: number;
 }
 
@@ -167,15 +167,19 @@ export function radialStations(
     if (hSkin >= uniform) {
       for (let k = 1; k <= nCore; k++) r[nCore - k] = rSkin - k * uniform;
     } else {
-      // solve hSkin * (q^nCore - 1) / (q - 1) = L for the growth ratio q > 1
-      let lo = 1 + 1e-9, hi = 8;
+      // solve hSkin * (q^nCore - 1) / (q - 1) = L for the growth ratio q > 1.
+      // Once there are two terms the series is at least hSkin (1 + q), so the
+      // root is under L / hSkin. The bracket used to stop at 8, which a
+      // three-ring core (nr 7 with four skin rings, default 190 mm roll)
+      // already needs past, at q 8.6 - the series then fell short and the hub
+      // pin below stretched the last ring to make up the difference.
+      let lo = 1 + 1e-9, hi = Math.max(2, L / hSkin);
       for (let it = 0; it < 60; it++) {
         const mid = 0.5 * (lo + hi);
         const sum = hSkin * (Math.pow(mid, nCore) - 1) / (mid - 1);
         if (sum < L) lo = mid; else hi = mid;
       }
       const q = 0.5 * (lo + hi);
-      growth = q;
       // Element sizes are hSkin, hSkin*q, hSkin*q^2 ... going inward, matching
       // the series that was solved. Multiplying before the first use would put
       // the coarse end against the skin and leave the series short of the hub.
@@ -187,6 +191,16 @@ export function radialStations(
     }
   }
   r[0] = Rhub;
+  // Report the grading the mesh has, not the q the series was solved for. With
+  // one or two core rings the series never reaches the mesh - the hub pin
+  // overwrites its only use - and q was just where the bracket stopped: the
+  // default roll (one core ring) read "q = 8.00" for a ring 167 times wider
+  // than the skin element outside it. The largest ratio of a ring's width to
+  // the width of the ring outside it, from the skin inwards.
+  for (let j = 0; j + 1 < nr; j++) {
+    const inner = r[j + 1] - r[j], outer = r[j + 2] - r[j + 1];
+    if (outer > 0) growth = Math.max(growth, inner / outer);
+  }
   return { r, growth };
 }
 
