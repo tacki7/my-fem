@@ -146,10 +146,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   };
   const chips = {
     mill: chip('', 'ミル'), force: chip('tonf', '荷重'), h1: chip('mm', '平均板厚'),
-    crown: chip('µm', 'C25'), manifest: chip('I-unit', '顕在形状'), conv: chip('', ''), ms: chip('ms', '解法'),
+    crown: chip('µm', 'C25'), manifest: chip('I-unit', '顕在形状'), conv: chip('', ''),
+    res: chip('', '残差'), ms: chip('ms', '解法'),
   };
   chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
-  status.append(chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.ms);
+  chips.res.title = '外側 Newton の相対残差（力の不釣り合い ÷ 最大の力、収束判定 2e-6）／ 材料 FEM のときはその補正の変化量（荷重比、収束判定 2e-3）';
+  status.append(chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms);
   const warnBox = el('div', 'v3-warnings');
   status.append(warnBox);
   const setChip = (c: HTMLElement, text: string, tone?: 'ok' | 'warn' | 'bad') => {
@@ -261,7 +263,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(millSec.root);
 
     // control
-    const ctlSec = section('制御・目標', { open: true });
+    const ctlSec = section('制御・目標', { open: false });
     ctlSec.body.append(select<'gauge' | 'force' | 'screw'>('制御モード', [
       { value: 'gauge', text: '出側板厚（圧下率）一定' }, { value: 'force', text: '圧延荷重一定' }, { value: 'screw', text: '圧下位置 手動' },
     ], params.mode, (v) => { params.mode = v; apply(); syncModeDials(); }, 'スクリュー位置は目標に合うようフレームごとに割線法で追い込む。').root);
@@ -273,7 +275,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(ctlSec.root);
 
     // actuators
-    const actSec = section('アクチュエータ', { open: true });
+    const actSec = section('アクチュエータ', { open: false });
     if (params.mill === '4hi' || params.mill === '6hi') {
       actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf/chock', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
     }
@@ -327,7 +329,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(actSec.root);
 
     // profiles
-    const profSec = section('ロールプロファイル', { open: true });
+    const profSec = section('ロールプロファイル', { open: false });
     profSec.body.append(num('wrCrown', 'WR 研削クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン: 中央と胴端の直径差。正で中央が太い（放物線）。'));
     profSec.body.append(num('wrThermal', 'WR サーマルクラウン', 'µm', 0, 200, 5, 1e-6, '熱膨張による直径クラウン（入力値。温度分布は解かない）。'));
     if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
@@ -339,7 +341,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(profSec.root);
 
     // strip
-    const stripSec = section('板・圧延条件', { open: true });
+    const stripSec = section('板・圧延条件', { open: false });
     stripSec.body.append(select<'slab' | 'fem'>('材料の変形計算', [
       { value: 'fem', text: '平面 FEM（幅 × 圧延方向、ロールと連成）' },
       { value: 'slab', text: 'スラブ法（幅方向スライス）' },
@@ -544,6 +546,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     setChip(chips.manifest, R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
     setChip(chips.conv, R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
     chips.conv.classList.toggle('busy', !R.converged && running);
+    {
+      const res = Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—';
+      const fem = R.fem ? ` / 補正 ${solver.femLastChange.toExponential(1)}` : '';
+      setChip(chips.res, res + fem, R.converged ? 'ok' : R.residual < 1e-3 ? 'warn' : 'bad');
+    }
     setChip(chips.ms, R.solveMs.toFixed(0));
     const warns = [...R.warnings.map((w: Warning3D) => WARNING_TEXT[w]), ...R.notes];
     const want = warns.join('\u0001');
