@@ -8,9 +8,14 @@
  * so no hourglass stabilisation is needed.
  *
  * The material is linear, so the element stiffness in the *material* frame is
- * constant and precomputed once. Large rotation of the spinning roll is handled
- * by the co-rotational update in solver.ts, which only needs a 2x2 rotation per
- * element per step.
+ * constant and precomputed once. The spinning roll needs no co-rotational
+ * update - the ring is solved in the stand's frame, where a turned ring is the
+ * same ring, and its spin only moves the surface markings (`solver.ts`). An
+ * earlier version of this comment promised such an update; there is none.
+ *
+ * Checked against an exact rational stiffness on a parallelogram
+ * (tools/exact): equal to 4e-16, rank 5 with the three rigid modes as the
+ * kernel - no hourglass mode survives the full 2x2 deviatoric integration.
  */
 
 /** 1/sqrt(3) Gauss stations for 2x2 quadrature. */

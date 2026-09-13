@@ -20,7 +20,13 @@
  * friction would explain it.
  *
  * **It is bisected, not stepped to.** P(mu) is monotone increasing, so a
- * bracket cannot lose the answer. Secant and gradient steps are faster and
+ * bracket cannot lose the answer. That is proved, for Kármán with either
+ * flattening, in `docs/proofs/MuInverse.lean`: from the load increasing in mu
+ * and in R' at a fixed R', and the flattening increasing in the load and never
+ * under R, the climb below lands on the smallest fixed point, that point grows
+ * with mu, and so does the load on it - strictly. Bland & Ford and Orowan meet
+ * the same hypotheses on every pass `tools/slab/muinv.mjs` tries, Orowan only
+ * weakly (its load stops moving once the whole arc sticks). Secant and gradient steps are faster and
  * were tried: below mu ~ 0.005 the bite condition mu >= tan(alpha) fails, the
  * pass stops being physical and the monotonicity both of them assume is gone -
  * and one step into that region never came back. A secant version answered
@@ -111,7 +117,10 @@ export function slabLoad(p: RollingParams, c: SlabCase, mu: number, Rp?: number)
   // image, so the iteration climbs monotonically onto the *smallest* fixed
   // point - the physical one. The map also has a second, spurious crossing
   // further out where the exponential has taken over, and every method that
-  // does not start below and climb can land on it.
+  // does not start below and climb can land on it. (`flatLimit_le` in
+  // docs/proofs/MuInverse.lean: the climb never passes any fixed point above R.
+  // `runaway_up`: if it runs away at some mu it runs away at every higher one,
+  // which is what lets the bisection read Infinity as "too high".)
   //
   // No fixed point at all is a real answer, not a failure: past Stone's
   // minimum rollable thickness the roll flattens faster than the gap closes
@@ -159,7 +168,11 @@ export type MuInverseStatus =
   | 'ok'
   /** h1 >= h0, or a thickness / radius that is not a positive number */
   | 'geometry'
-  /** the mean pull is at or above the deformation resistance: no pass at all */
+  /**
+   * the pull is at or above the deformation resistance: the mean pull, for
+   * every theory, or for Bland & Ford either end's alone (sigma_b >= kf0 or
+   * sigma_f >= kf1), where it gives no load at any mu
+   */
   | 'tension'
   /** the flattening runs away even at MU_MIN - under Stone's minimum thickness */
   | 'runaway'
@@ -215,6 +228,12 @@ export function muFromLoad(
   if (!(at0.kEff > 0)) return fail('tension');
   if (!Number.isFinite(at0.load)) return fail('runaway', at0.load, at0.load);
   const at1 = slabLoad(p, c, MU_MAX);
+  // The mean pull under kf is not enough for Bland & Ford, which needs each end
+  // under its own yield and returns a zero load otherwise. This used to fall
+  // through to 'high' and ask for a load over "上限 0 tonf". Zero at MU_MAX
+  // rather than at MU_MIN, so a theory whose hill only rises above zero at a
+  // higher friction still gets searched.
+  if (at1.load === 0) return fail('tension', at0.load, at1.load);
   if (load <= at0.load) return fail('low', at0.load, at1.load);
   if (load >= at1.load) return fail('high', at0.load, at1.load);
 

@@ -60,8 +60,9 @@ export type SlabStatus =
 /** How the slab theories flatten the roll; see `flatRadius` in `muinv.ts`. The FEM solves it. */
 export type FlatteningModel = 'hitchcock' | 'roberts';
 
-/** the stand counts as settled below this residual, relative to h0 */
-const MILL_SETTLED = 1e-3;
+/** iteration budget and relative-residual target of the roll's elastic PCG solve */
+const ROLL_CG_ITER = 200;
+const ROLL_CG_TOL = 1e-6;
 /** restarts after a NaN solve allowed inside the window before the stand is left alone [count, ms] */
 const DIVERGE_LIMIT = 5;
 const DIVERGE_WINDOW = 30000;
@@ -679,6 +680,10 @@ export interface RollingDiagnostics {
   picardDelta: number;
   cgIterations: number;
   cgResidual: number;
+  /** the roll's elastic solve, last time it ran: iterations (ROLL_CG_ITER = out of budget) */
+  rollCgIterations: number;
+  /** ... and its relative residual, against ROLL_CG_TOL */
+  rollCgResidual: number;
   /** |dh1| / h1 per frame; how settled the roll flattening loop is */
   couplingResidual: number;
   /** current adaptive damping factor on rollRelax, 1 = undamped */
@@ -716,7 +721,11 @@ export interface RollingDiagnostics {
   millSpring: number;
   /** the housing/screw part of that spring, P/M [m]; 0 with a rigid stand */
   millStretch: number;
-  /** |stretch - P/M| / h0; how far the stand is from its own equilibrium */
+  /**
+   * |stretch - P/M| / h0; how far the stand is from its own equilibrium.
+   * Always 0 since the stretch became P/M outright (700c5a2); kept so the
+   * `__lab` readout and traces keep their column.
+   */
   millResidual: number;
   /** screw travel the loop is allowed, given the stretch it currently has [m] */
   gapLimitLo: number;
@@ -1801,7 +1810,10 @@ export class RollingSim {
     else if (d.contactNodes === 0) d.slabStatus = 'nobite';
     else {
       pt = slabHook(p, c, p.mu);
-      if (!(pt.kEff > 0)) { d.slabStatus = 'tension'; pt = null; }
+      // A zero load is a pull the theory cannot roll against, not a runaway
+      // (that is an infinite one): Bland & Ford gives zero as soon as either
+      // end's pull reaches its own kf, with the mean still under it.
+      if (!(pt.kEff > 0) || pt.load === 0) { d.slabStatus = 'tension'; pt = null; }
       else if (!Number.isFinite(pt.load) || !(pt.load > 0)) {
         // Its own flattening has no fixed point: the theory at the radius
         // the FEM is actually rolling with, which always exists. Reported
@@ -2262,9 +2274,10 @@ export class RollingSim {
    * stiffness against a few kN/mm of load is millimetres of stretch, where the
    * flattening modelled here is tens of microns.
    *
-   * It is relaxed rather than applied outright because it is the other half of
-   * the same fixed point as the flattening: more load opens the gap, which
-   * takes load back off. That loop is stabilising, but it still has to settle.
+   * It is the other half of the same fixed point as the flattening: more load
+   * opens the gap, which takes load back off. That loop is stabilising, and
+   * it settles through the gauge loop rather than through a relaxation of
+   * its own - the stretch is P/M outright each frame (see below for why).
    */
   private updateMillStretch(): void {
     const p = this.params;
@@ -2461,12 +2474,12 @@ export class RollingSim {
     if (++this.agcTick < Math.max(1, p.agcEvery | 0)) return;
     this.agcTick = 0;
 
-    // Wait for the stand. The screws and the housing both move the barrel, and
-    // if they revise on the same cadence with the same step they simply cancel
-    // - the loop walks the screw position and the stretch apart forever while
-    // the separation, and therefore the measurement, never moves at all. The
-    // stand is the inner loop: let it reach its own equilibrium first.
-    if (d.millResidual > MILL_SETTLED) return;
+    // No wait for the stand's own equilibrium here any more. There used to be
+    // one - the housing stretch was relaxed onto P/M by its own Newton step,
+    // and a loop revising on the same cadence walked the screws and the stretch
+    // apart - but since 700c5a2 the stretch is P/M outright every frame
+    // (`updateMillStretch`), `millResidual` is identically zero, and the gate
+    // had not fired once since. Removed rather than left looking like a guard.
 
     // Same for the mesh: while its entry column is still walking onto the
     // barrel crossing, the arc - and so the load - is not yet this screw
@@ -2750,7 +2763,12 @@ export class RollingSim {
     const rc = Math.max(p.rhoStrip * p.cpStrip, 1);
     const beta = Math.max(0, Math.min(1, p.taylorQuinney));
 
-    // nodal strain rate, area averaged from the Gauss points
+    // Nodal strain rate: each element's Gauss-point mean, averaged over the
+    // elements around the node with equal weights - not by area, which is
+    // what this comment used to say. Weighting by area instead moves the
+    // settled load by -0.049 % (default), -0.035 % (45 % reduction) and
+    // -0.063 % (foil), measured headless over frames 900-1200: under the
+    // +-0.25 % load resolution, so it is left as it is.
     this.strainRateNode.fill(0);
     const wsum = this.rateW;
     wsum.fill(0);
@@ -2861,8 +2879,14 @@ export class RollingSim {
       this.rollF[2 * nd + 1] += (-pr * ny - tr * ty) * seg;
     }
 
-    pcgFiltered(this.rollPat, this.rollVals, this.rollF, this.rollFree,
-      this.rollU, this.rollWs, 200, 1e-6, true, this.rollPre);
+    // Kept, not thrown away: the band factor drops the ring's seam, so this is
+    // a genuine iteration and it can run out. The strip's solve has always
+    // reported its count and residual; the roll's did not, so a barrel that
+    // stopped short was indistinguishable from one that had converged.
+    const rollRes = pcgFiltered(this.rollPat, this.rollVals, this.rollF, this.rollFree,
+      this.rollU, this.rollWs, ROLL_CG_ITER, ROLL_CG_TOL, true, this.rollPre);
+    this.diag.rollCgIterations = rollRes.iterations;
+    this.diag.rollCgResidual = rollRes.residual;
 
     // The adaptive damping (`relaxScale`) acts here, on the one relaxation
     // the coupling has: the barrel the strip is meshed against is read off
@@ -3142,7 +3166,10 @@ export class RollingSim {
    * `slab.ts`), with tension, evaluated at the radius the FEM is actually
    * rolling with - so the comparison isolates the friction-hill model from
    * the flattening. Without the hook (no app around the solver) the Siebel
-   * form is written out here.
+   * form is written out here - the same one `slab.ts` `karman` evaluates, pulls
+   * off the resistance and expm1 included. It used to take the bare kf and
+   * exp(a) - 1, so a headless run disagreed with the app by the whole tension
+   * term.
    */
   slabMethod(): { load: number; meanPressure: number; arc: number; torque: number; kf: number } {
     const p = this.params;
@@ -3168,9 +3195,10 @@ export class RollingSim {
     const e0 = Math.max(this.entryStrain, 0);
     const eps = e0 + (2 / Math.sqrt(3)) * Math.log(p.h0 / h1);
     const kf = meanPlaneStrainLmnRange(p, e0, eps);
+    const kEff = Math.max(kf - (p.backTension + p.frontTension) / 2, 0);
     const a = (p.mu * Lc) / hm;
-    const Qp = a > 1e-6 ? (Math.exp(a) - 1) / a : 1;
-    const pm = kf * Qp;
+    const Qp = a > 1e-12 ? Math.expm1(a) / a : 1;
+    const pm = kEff * Qp;
     return { load: pm * Lc, meanPressure: pm, arc: Lc, torque: pm * Lc * Lc * 0.5, kf };
   }
 
@@ -3391,6 +3419,7 @@ function emptyDiag(): RollingDiagnostics {
     meanFlowStressTheory: 0, peakStrainRate: 0, rollFlattening: 0, hitchcockR: 0,
     stoneHMin: 0, biteLimitH1: 0, biteLimitH1Cont: 0,
     rollPeakVm: 0, feedReaction: 0, feedFace: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
+    rollCgIterations: 0, rollCgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
     feedResidual: 0, feedFloor: 0, meshResidual: 0,
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,

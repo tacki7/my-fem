@@ -163,8 +163,12 @@ export interface PcgResult {
  * `free[i] === 0`. Caller adds back the prescribed increment.
  *
  * @param pre  preconditioner; falls back to Jacobi when null
- * @param tol  target for the relative *true* residual, so the stopping rule
- *             does not shift when the preconditioner changes
+ * @param tol  target for ||r|| / ||b|| over the free DOFs. r is the unpreconditioned
+ *             residual, so the stopping rule does not shift when the preconditioner
+ *             changes - but it is the recursively updated one, r <- r - alpha A d,
+ *             not b - A z recomputed. The two agree in exact arithmetic and drift
+ *             apart by rounding over many iterations; the returned `residual` is
+ *             the recursive one too.
  */
 export function pcgFiltered(
   p: CsrPattern,
