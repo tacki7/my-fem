@@ -2439,8 +2439,9 @@ function muInvWhy(r: MuInverseResult, c: SlabCase, target: number): string {
       return `出側板厚 ${(c.h1 * 1000).toFixed(4)} mm が入側 ${(c.h0 * 1000).toFixed(4)} mm`
         + ' 以上 — 圧下がないので荷重の式が立たない。「出側板厚 目標」か「圧下率 目標」を直す';
     case 'tension':
-      return `張力平均 ${(((c.backTension + c.frontTension) / 2) / 1e6).toFixed(0)} MPa が`
-        + ' 変形抵抗 kf 以上 — この張力では板は圧延ではなく引き抜かれる。張力を下げる';
+      return `張力（後方 ${(c.backTension / 1e6).toFixed(0)} / 前方 ${(c.frontTension / 1e6).toFixed(0)} MPa）が`
+        + ' 変形抵抗 kf 以上 — この張力では板は圧延ではなく引き抜かれる'
+        + '（Bland & Ford は入側・出側それぞれの kf で判定するので、平均が kf 未満でも片側で超えれば解けない）。張力を下げる';
     case 'runaway':
       return `μ ${MU_MIN.toFixed(3)} でもロール扁平が発散する`
         + '（Stone の最小圧延可能板厚を割っている）— 出側板厚を上げるか、'
@@ -3161,8 +3162,10 @@ function slabWhy(st: RollingSim): string {
         + `（Stone の最小圧延可能板厚 h_min ${(d.stoneHMin * 1000).toFixed(3)} mm に対し h₁ ${(d.exitThickness * 1000).toFixed(4)} mm）。`
         + `FEM の R′ ${(d.hitchcockR * 1000).toFixed(1)} mm で評価した値を表示している`;
     case 'tension':
-      return `${theory}: 張力平均 ${(((p.backTension + p.frontTension) / 2) / 1e6).toFixed(0)} MPa が`
-        + ` 変形抵抗 kf 以上 — 摩擦丘が立たず式が解けない（荷重 0）。張力を下げる`;
+      return `${theory}: 張力（後方 ${(p.backTension / 1e6).toFixed(0)} / 前方 ${(p.frontTension / 1e6).toFixed(0)} MPa）が`
+        + ` 変形抵抗 kf 以上 — 摩擦丘が立たず式が解けない（荷重 0）。`
+        + (p.slabTheory === 'blandford' ? '入側・出側それぞれの kf で判定するので、平均が kf 未満でも片側で超えれば解けない。' : '')
+        + '張力を下げる';
     case 'geometry':
       return `${theory}: 出側板厚 ${(d.exitThickness * 1000).toFixed(4)} mm が入側 ${(p.h0 * 1000).toFixed(4)} mm 以上`
         + ' — 圧下がなく式が立たない（荷重 0）';
@@ -3388,7 +3391,7 @@ function refreshMeshHint(): void {
     ? `ロール表層 ${(skinT * 1000).toFixed(3)} mm を ${params.rollSkinRings} 分割`
       + ` → 表層要素 ${(sim.skinElementSize * 1e6).toFixed(1)} µm 厚`
       + `（接触弧の ${(100 * sim.skinElementSize / Math.max(arc, 1e-12)).toFixed(1)}%）`
-      + ` ／ 内層 成長率 q = ${sim.roll.coreGrowth.toFixed(2)}`
+      + ` ／ 内層 隣接リング幅の比 最大 ${sim.roll.coreGrowth.toFixed(2)}`
       + (sim.roll.coreGrowth > 2.5
         ? ' ⚠ 内層が急に粗くなりすぎ。ロール半径方向分割 nr を増やすこと'
         : '')
@@ -3596,6 +3599,11 @@ if (DEBUG_TITLE) {
         agcDeadband: p.agcDeadband,
         agcSensitivity: d.agcSensitivity,
         method: p.agcMethod,
+        // the two linear solves: strip (every frame) and roll (every rollEvery)
+        cgIterations: d.cgIterations,
+        cgResidual: d.cgResidual,
+        rollCgIterations: d.rollCgIterations,
+        rollCgResidual: d.rollCgResidual,
       };
     }),
     setLoad: (k: number, tonf: number) => {
