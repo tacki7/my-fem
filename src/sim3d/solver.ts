@@ -301,10 +301,12 @@ export class StackSolver {
     this.yAge = -1;
     this.iterations = 0;
     this.femRatio = null; this.femEps = null;
+    this.sinceStep = 0; this.femRounds = 0; this.femLooseRuns = 0;
   }
 
   private rebuild(): void {
     const p = this.p;
+    const previousType = this.stack?.type;
     this.geomKey = geometryKey(p);
     this.stack = buildStack(p);
     const rolls = this.stack.rolls;
@@ -324,7 +326,10 @@ export class StackSolver {
     this.du = new Float64Array(n);
     this.scratch = new Float64Array(n);
     this.uTrial = new Float64Array(n);
-    this.screw = p.mode === 'screw' ? p.screw : this.screw;
+    // The screw carries over as a warm start for a changed dimension, but
+    // not to another mill type: a 4Hi's 2.5 mm closure driven into a 20Hi
+    // stack starts the search deep in a closed gap.
+    this.screw = p.mode === 'screw' ? p.screw : previousType === p.mill ? this.screw : 0;
     this.secant = null;
 
     this.rolls = rolls.map((def) => {

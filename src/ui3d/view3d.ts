@@ -57,6 +57,20 @@ interface Dial {
   set(v: number): void;
 }
 
+/**
+ * The roll dimensions belong to a mill type, not to the pass: a 500 mm 4Hi
+ * work roll cannot sit in a 20Hi cluster. Switching type swaps these and
+ * nothing else, and each type remembers its own set - what the dials said
+ * the last time it was the active type, its defaults the first time.
+ */
+const GEOMETRY_KEYS = [
+  'wrD', 'wrLb', 'wrLs', 'wrDn', 'irD', 'irLb', 'irLs', 'irDn', 'ir2D', 'ir2Lb',
+  'burD', 'burLb', 'burLs', 'burDn', 'bbD', 'bbShaft', 'bbLb', 'angle1',
+] as const;
+type GeometryKey = typeof GEOMETRY_KEYS[number];
+const pickGeometry = (p: Params3D): Pick<Params3D, GeometryKey> =>
+  Object.fromEntries(GEOMETRY_KEYS.map((k) => [k, p[k]])) as Pick<Params3D, GeometryKey>;
+
 export function installView3D(root: HTMLElement, opts: { initialMill?: MillType } = {}): View3DHandle {
   let params: Params3D = defaultParams(opts.initialMill ?? '4hi');
   const solver = new StackSolver(params);
@@ -241,9 +255,21 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     return h.root;
   };
 
+  const geometryByMill = new Map<MillType, Pick<Params3D, GeometryKey>>();
+  /** a preset sets everything, by design - but the type it leaves keeps its remembered dimensions */
   const applyPreset = (pr: Preset3D) => {
+    geometryByMill.set(params.mill, pickGeometry(params));
     params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)], asu2: [...(pr.patch.asu2 ?? defaultParams(pr.mill).asu2)] };
     solver.setParams(params); dirty = true; running = true; buildLeft();
+  };
+  /** a new mill type with every other setting kept: only the roll dimensions change */
+  const switchMill = (m: MillType) => {
+    if (m === params.mill) return;
+    geometryByMill.set(params.mill, pickGeometry(params));
+    const geometry = geometryByMill.get(m) ?? pickGeometry(defaultParams(m));
+    params = { ...params, ...geometry, mill: m, asu: [...params.asu], asu2: [...params.asu2] };
+    apply();
+    buildLeft();
   };
 
   const buildLeft = () => {
@@ -253,11 +279,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     preSec.body.append(buttonRow(PRESETS.map((pr) => ({ text: pr.name, title: pr.note, onClick: () => applyPreset(pr) }))));
     left.append(preSec.root);
     // mill type
-    const millSec = section('ミル形式', { open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えるとロール寸法と圧延条件はその形式の既定値に戻る。' });
-    const millRow = buttonRow(MILLS.map((m) => ({
-      text: MILL_LABEL[m],
-      onClick: () => { params = defaultParams(m); solver.setParams(params); dirty = true; running = true; buildLeft(); },
-    })));
+    const millSec = section('ミル形式', { open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えても板・圧延条件、制御、アクチュエータ、ロールプロファイル、解析の設定はそのまま。変わるのはロール寸法だけで、形式ごとに記憶される（初めて選ぶ形式は既定寸法）。その形式の典型条件にしたいときはプリセット。' });
+    const millRow = buttonRow(MILLS.map((m) => ({ text: MILL_LABEL[m], onClick: () => switchMill(m) })));
     [...millRow.children].forEach((b, i) => b.classList.toggle('active', MILLS[i] === params.mill));
     millSec.body.append(millRow);
     millSec.body.append(el('div', 'ctrl-hint', millNote(params.mill)));
@@ -650,7 +673,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     if (e.key === 'r' || e.key === 'R') { solver.setParams(params); solver.wake(); dirty = true; running = true; }
     const k = Number(e.key);
     if (k >= 1 && k <= MILLS.length && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      params = defaultParams(MILLS[k - 1]); solver.setParams(params); dirty = true; running = true; buildLeft();
+      switchMill(MILLS[k - 1]);
     }
   });
   void idleFrames;
