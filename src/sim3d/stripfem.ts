@@ -16,7 +16,11 @@
  *
  *     Π(u) = ∫ σ̄ ε̇_eq h dA + (K/2) ∫ (div(h u))²/h dA + friction work − tension work
  *
- * with ε̇_eq from the in-plane strain rates and ε̇_y = −(ε̇_x + ε̇_z).
+ * with ε̇_eq from the in-plane strain rates and ε̇_y = −(ε̇_x + ε̇_z). ε̇_eq is
+ * the von Mises equivalent rate, so σ̄ is the uniaxial flow stress,
+ * σ̄ = (√3/2) kf: plane-strain compression then yields at 2σ̄/√3 = kf. (σ̄
+ * used to be kf itself, which made the strip 15 % harder than the slab
+ * slices and the 2D tab - the 2D solve converts the same way.)
  * Friction is Coulomb on both faces against the roll surface speed,
  * regularised (Picard-frozen), with the contact pressure recovered from the
  * previous iterate: p = −σ_y = −(s_y + σ_m), s_y the deviatoric stress
@@ -40,6 +44,9 @@
  */
 
 import { BandMatrix } from './band';
+
+/** uniaxial flow stress over plane-strain resistance, σ̄ = FLOW · kf (von Mises) */
+export const FLOW = Math.sqrt(3) / 2;
 
 export interface StripFemInput {
   /** column positions [m] and their widths [m] */
@@ -244,7 +251,7 @@ export class StripFem {
           }
           const ey = (ux * hx + uz * hz) / h;
           const eq = Math.sqrt((2 / 3) * (ex * ex + ez * ez + ey * ey) + gxz * gxz / 3 + epsReg * epsReg);
-          const mu = kf / eq;
+          const mu = (FLOW * kf) / eq;
           // K = mu Bᵀ M B h w with M = diag(2/3, 2/3, 2/3, 1/3) on (ε̇_x, ε̇_z, ε̇_y, γ̇)
           const c = mu * h * wgt[4 * el + g];
           const yx = hx / h, yz = hz / h;
@@ -390,11 +397,11 @@ export class StripFem {
       }
       const ey = (ux * hx + uz * hz) / h;
       const eq = Math.sqrt((2 / 3) * (ex * ex + ez * ez + ey * ey) + gxz * gxz / 3 + epsReg * epsReg);
-      const sy = ((2 * kfEl[el]) / (3 * eq)) * ey;
+      const sy = ((2 * FLOW * kfEl[el]) / (3 * eq)) * ey;
       const divhu = h * (ex + ez) + ux * hx + uz * hz;
       const sm = (KPEN * divhu) / h;
       const p = -(sy + sm);
-      this.dbg.sy[el] = sy; this.dbg.sz[el] = ((2 * kfEl[el]) / (3 * eq)) * ez; this.dbg.sm[el] = sm; this.dbg.div[el] = divhu / h; this.dbg.eq[el] = eq;
+      this.dbg.sy[el] = sy; this.dbg.sz[el] = ((2 * FLOW * kfEl[el]) / (3 * eq)) * ez; this.dbg.sm[el] = sm; this.dbg.div[el] = divhu / h; this.dbg.eq[el] = eq;
       // damped: the friction of the next iterate is built on it
       out[el] += 0.8 * (p - out[el]);
       if (!Number.isFinite(out[el])) out[el] = kfEl[el];

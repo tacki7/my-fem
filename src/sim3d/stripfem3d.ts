@@ -28,7 +28,7 @@
  */
 
 import { BandMatrix } from './band';
-import type { StripFemInput, StripFemResult } from './stripfem';
+import { FLOW, type StripFemInput, type StripFemResult } from './stripfem';
 
 export interface StripFem3DInput extends StripFemInput {
   /** element layers through the upper half of the thickness */
@@ -270,7 +270,8 @@ export class StripFem3D {
             gxy += dy * ux + dx * uy; gyz += dz * uy + dy * uz; gzx += dz * ux + dx * uz;
           }
           const eq = Math.sqrt((2 / 3) * (exx * exx + eyy * eyy + ezz * ezz) + (gxy * gxy + gyz * gyz + gzx * gzx) / 3 + epsReg * epsReg);
-          const c = (kf / eq) * wgt[8 * e + g];
+          // σ̄ ε̇_eq with σ̄ the uniaxial flow stress (see `FLOW`): kf is the plane-strain resistance
+          const c = ((FLOW * kf) / eq) * wgt[8 * e + g];
           // K += c Bᵀ M B, M = diag(2/3 ×3, 1/3 ×3)
           for (let a = 0; a < 8; a++) {
             const ax = dN[off + 3 * a], ay = dN[off + 3 * a + 1], az = dN[off + 3 * a + 2];
