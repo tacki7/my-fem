@@ -414,8 +414,11 @@ export function orowanPressure(q: number, kf: number, mu: number): number {
  * vertical component and the friction's, the torque the friction's moment
  * about the roll axis, entry side driving and exit side resisting.
  */
-/** Orowan's two pressure branches on the sample grid, and where they meet. */
-function orowanBranches(p: RollingParams, c: SlabCase, mu: number, Rp: number) {
+/**
+ * Orowan's two pressure branches on the sample grid, and where they meet.
+ * Exported for the headless checks in tools/slab; the app goes through `orowan`.
+ */
+export function orowanBranches(p: RollingParams, c: SlabCase, mu: number, Rp: number) {
   const { dh } = common(p, c, mu, Rp);
   const h0 = c.h0, h1 = c.h1;
   const cos0 = 1 - dh / (2 * Rp);
@@ -471,7 +474,15 @@ function orowanBranches(p: RollingParams, c: SlabCase, mu: number, Rp: number) {
   // the entry branch rising from the entry. Interpolated between samples;
   // at the exit plane if the entry branch is under the exit one everywhere
   // (all backward slip), at the entry plane in the opposite case.
-  let cross = N;
+  //
+  // `cross` starts past the last sample, so "no crossing" is its own case. It
+  // used to start at N, which left the entry-plane branch unreachable and the
+  // case to the interpolation on the last interval, with both differences
+  // negative. That still landed on the entry plane - the exit branch rises and
+  // the entry branch falls towards the entry, so the gap closes there and the
+  // fraction clamps to 1 (37 such passes in tools/slab/consistency.mjs, all
+  // identical before and after) - but only by that accident.
+  let cross = N + 1;
   for (let i = 0; i <= N; i++) if (pE[i] >= pI[i]) { cross = i; break; }
   let phin: number;
   if (cross === 0) phin = 0;

@@ -84,6 +84,12 @@ export class StripQueue {
     // stand would otherwise add one slice per frame for as long as it runs.
     if (last && Math.abs(last.h - h) <= 1e-4 * h) last.len += len;
     else this.slices.push({ len, h });
+    // NB on a merge this adds len/h while the slice keeps its own h, so the
+    // sum and the slices part by up to 1e-4 a merge until the next recount:
+    // measured 4.8e-4 at worst on the three-stand default. Adding len/last.h
+    // instead moves the settled 'dist' tension by +0.04 % / -0.10 % but its
+    // start-up transient by up to 0.8 % at 20 s, against figures in
+    // docs/validation.md taken in the browser - so it is recorded, not changed.
     this.sumLoH += len / h;
     this.total += len;
     if (++this.ops % 4096 === 0) this.recount();
@@ -137,7 +143,7 @@ export interface GapState {
   trim: number;
   /** model time constant used at the last update [s]; NaN under rigid */
   tau: number;
-  /** |dΔv/dT| [(m/s)/(N/m)], from Bland–Ford at the operating point */
+  /** −dΔv/dT [(m/s)/(N/m)], from Bland–Ford at the operating point; kept only while positive */
   sens: number;
   /** the tension the entry-face reaction says would balance the speeds [N/m] */
   Trigid: number;
@@ -161,7 +167,8 @@ export function newGapState(T: number, L: number, h: number): GapState {
 }
 
 /**
- * |dΔv/dT| at the operating point, by Bland–Ford on both sides of the gap.
+ * −dΔv/dT at the operating point, by Bland–Ford on both sides of the gap:
+ * positive on a line that restores its own tension, NaN otherwise.
  *
  * Δv = v_in,k+1 − v_out,k with v_out = ωR(1+f) and v_in = ωR(1+ε), ε the
  * backward slip that volume constancy pins to the forward one:
@@ -199,7 +206,14 @@ export function speedSensitivity(
   const dT = Math.max(0.05 * Math.abs(T), 1e5 * Math.min(upH1, dn.h0));
   const a = dv(T + dT), b = dv(Math.max(0, T - dT));
   if (!Number.isFinite(a) || !Number.isFinite(b)) return NaN;
-  const s = Math.abs((a - b) / (T + dT - Math.max(0, T - dT)));
+  // The sign is the model's stability, so it is kept rather than folded away
+  // by abs(): more pull speeds the upstream exit and slows the downstream
+  // entry, dΔv/dT < 0, and that is what lets tension restore itself. A slope
+  // of the other sign has no time constant to give, and is NaN like no slope.
+  // Over 414 passes with a neutral point (tools/sim2d/tension.mjs) it was
+  // negative or exactly zero - a neutral point pinned to its plane - every
+  // time, so the answers are what abs() gave; the precondition is now checked.
+  const s = -(a - b) / (T + dT - Math.max(0, T - dT));
   return s > 0 ? s : NaN;
 }
 

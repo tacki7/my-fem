@@ -3391,7 +3391,7 @@ function refreshMeshHint(): void {
     ? `ロール表層 ${(skinT * 1000).toFixed(3)} mm を ${params.rollSkinRings} 分割`
       + ` → 表層要素 ${(sim.skinElementSize * 1e6).toFixed(1)} µm 厚`
       + `（接触弧の ${(100 * sim.skinElementSize / Math.max(arc, 1e-12)).toFixed(1)}%）`
-      + ` ／ 内層 成長率 q = ${sim.roll.coreGrowth.toFixed(2)}`
+      + ` ／ 内層 隣接リング幅の比 最大 ${sim.roll.coreGrowth.toFixed(2)}`
       + (sim.roll.coreGrowth > 2.5
         ? ' ⚠ 内層が急に粗くなりすぎ。ロール半径方向分割 nr を増やすこと'
         : '')
@@ -3599,6 +3599,11 @@ if (DEBUG_TITLE) {
         agcDeadband: p.agcDeadband,
         agcSensitivity: d.agcSensitivity,
         method: p.agcMethod,
+        // the two linear solves: strip (every frame) and roll (every rollEvery)
+        cgIterations: d.cgIterations,
+        cgResidual: d.cgResidual,
+        rollCgIterations: d.rollCgIterations,
+        rollCgResidual: d.rollCgResidual,
       };
     }),
     setLoad: (k: number, tonf: number) => {
