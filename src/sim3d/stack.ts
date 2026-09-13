@@ -2,12 +2,15 @@
  * The upper half of a rolling mill, as a set of rolls, how each is held, and
  * which touches which.
  *
- * Everything is the upper half: the mill is symmetric about the pass line,
- * so the lower rolls are the mirror of the upper ones and the strip's
- * mid-plane is a plane of symmetry. A one-sided actuator (an intermediate
- * roll shifted one way on top and the other way below) is therefore seen
- * only through its upper half; that is the price of the symmetry and it is
- * stated in the docs.
+ * Everything is described as the upper half. When the mill is symmetric
+ * about the pass line the lower rolls are the mirror of the upper ones and
+ * the strip's mid-plane is a plane of symmetry, so the upper half is all
+ * that is solved. A roll shifted along its axis breaks that: the 6Hi's
+ * intermediate rolls shift one way on top and the other way below, so the
+ * lower half is the upper one turned half a turn about the rolling
+ * direction - the same rolls with x reversed - and not its mirror image.
+ * Such a stack carries that lower half (`Stack.lower`) for the solver to
+ * solve alongside the upper one.
  *
  * Coordinates: x along the roll axes (the strip width), y up, z across the
  * pass line in the end view. Roll centres are laid out in the (y, z) plane;
@@ -89,6 +92,14 @@ export interface Stack {
   wr: number;
   /** rolls whose supports the screw moves */
   screwRolls: number[];
+  /**
+   * The lower half, when it is not the mirror image of the upper one (see
+   * `lowerHalf`); null when it is. Its rolls are described in the upper
+   * half's frame - y pointing away from the strip, x as on the mill - so the
+   * same supports, contacts and strip load apply to them unchanged, and its
+   * indices (`wr`, `screwRolls`, the contacts' `a` and `b`) count within it.
+   */
+  lower: { rolls: RollDef[]; contacts: ContactDef[]; wr: number; screwRolls: number[] } | null;
 }
 
 export interface Params3D {
@@ -143,7 +154,11 @@ export interface Params3D {
   /** actuators */
   wrBender: number;
   irBender: number;
-  /** 6Hi intermediate roll shift: barrel end past the strip edge [m], + outside */
+  /**
+   * 6Hi intermediate roll shift, as where the barrel end sits against the
+   * strip edge [m], + outside: the upper roll's +x barrel end at W/2 + irShift,
+   * the lower roll's −x end at −(W/2 + irShift)
+   */
   irShift: number;
   /** 20Hi first intermediate taper: start relative to the strip edge [m] (+ outside), length and depth */
   taperShift: number; taperLen: number; taperDepth: number;
@@ -307,13 +322,14 @@ export function buildStack(p: Params3D): Stack {
       wr.support = 'chock'; wr.benderForce = p.wrBender;
       const Ri = p.irD / 2, Rb = p.burD / 2;
       rolls.push(roll({
-        id: 'IR', label: '中間ロール', D: p.irD, Dn: p.irDn, Ls: p.irLs,
+        id: 'IR', label: '中間ロール', D: p.irD, Dn: p.irDn, Lb: p.irLb, Ls: p.irLs,
         cy: Rw + Ri, crown: p.irCrown, support: 'chock', benderForce: p.irBender,
-        // Shift. The upper roll is shifted one way and the lower the other,
-        // so between them the work rolls lose support past the strip edge
-        // on both sides; in a half model that is a barrel ending at
-        // W/2 + irShift on each side, i.e. a symmetric barrel of that length.
-        Lb: Math.min(p.irLb, p.width + 2 * p.irShift),
+        // Shift. The whole roll - barrel, necks and chocks - moves along its
+        // axis until its +x barrel end is `irShift` outside the strip edge;
+        // the lower one moves the other way (see `lowerHalf`). Each work
+        // roll then loses its intermediate's support past one strip edge,
+        // the upper past +x and the lower past −x.
+        shift: p.width / 2 + p.irShift - p.irLb / 2,
       }));
       rolls.push(roll({
         id: 'BUR', label: 'バックアップロール', D: p.burD, Dn: p.burDn, Lb: p.burLb, Ls: p.burLs,
@@ -409,7 +425,65 @@ export function buildStack(p: Params3D): Stack {
       break;
     }
   }
-  return { type: p.mill, rolls, contacts, wr: 0, screwRolls, angle1, issues: layoutIssues(rolls, contacts, p.clearance) };
+  return {
+    type: p.mill, rolls, contacts, wr: 0, screwRolls, angle1, issues: layoutIssues(rolls, contacts, p.clearance),
+    lower: lowerHalf(rolls, contacts, 0, screwRolls),
+  };
+}
+
+/**
+ * The lower half of a stack whose rolls are not all centred, or null when
+ * they are and the lower half is the upper one's mirror image.
+ *
+ * A mill whose lower half is its upper half turned half a turn about the
+ * rolling direction - (x, y, z) → (−x, −y, z) - is what a shifted
+ * intermediate roll makes: shifted to −x above, to +x below. Seen from the
+ * strip, with y pointing away from it, the lower half is then the upper one
+ * with every axial feature reversed: the shift, a taper's side, the order of
+ * the saddles. Everything radial - diameters, crowns, the end-view layout,
+ * the contacts, the supports - is the same, and so is the screw: the mirror
+ * model closes the gap by the screw's travel on each side and tilts both
+ * sides alike by the leveling, and the lower half does the same here.
+ *
+ * On a symmetric pass (no leveling) the solved lower half comes out as the
+ * upper one reversed in x, and the strip gap is symmetric although neither
+ * work roll is. With leveling it is not, which is why the lower half is
+ * solved and not taken from the upper one: turning the upper half over
+ * would turn the leveling's wedge over too and cancel it.
+ */
+function lowerHalf(rolls: RollDef[], contacts: ContactDef[], wr: number, screwRolls: number[]): Stack['lower'] {
+  if (rolls.every((r) => Math.abs(r.shift) < 1e-12)) return null;
+  return {
+    rolls: rolls.map((r) => ({
+      ...r,
+      id: `${r.id}'`, label: `下${r.label}`,
+      shift: -r.shift,
+      taper: r.taper ? { ...r.taper, side: (-r.taper.side) as 1 | -1 } : undefined,
+      asu: r.asu ? [...r.asu].reverse() : undefined,
+    })),
+    contacts: contacts.map((c) => ({ ...c })),
+    wr,
+    screwRolls: [...screwRolls],
+  };
+}
+
+/**
+ * The rolls the solver carries: the upper half, then the lower half's when
+ * the stack has one, with its contacts and screw rolls renumbered to follow.
+ */
+export function solvedRolls(st: Stack): {
+  rolls: RollDef[]; contacts: ContactDef[]; screwRolls: number[]; upper: number; wrLower: number;
+} {
+  const upper = st.rolls.length;
+  const lo = st.lower;
+  if (!lo) return { rolls: st.rolls, contacts: st.contacts, screwRolls: st.screwRolls, upper, wrLower: -1 };
+  return {
+    rolls: [...st.rolls, ...lo.rolls],
+    contacts: [...st.contacts, ...lo.contacts.map((c) => ({ ...c, a: c.a + upper, b: c.b + upper }))],
+    screwRolls: [...st.screwRolls, ...lo.screwRolls.map((r) => r + upper)],
+    upper,
+    wrLower: lo.wr + upper,
+  };
 }
 
 /**

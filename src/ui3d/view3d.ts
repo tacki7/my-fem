@@ -98,7 +98,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     return { root: c, canvas };
   };
 
-  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分（モデル化した範囲） ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
+  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分を表示（IR をシフトした 6Hi は下半分も解いている） ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
   // the stack is drawn either in 3D (WebGL, the default) or as the flat
   // front view; the cell holds both canvases and a label layer for the 3D one
   const stage = el('div', 'v3-stage');
@@ -190,7 +190,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const stats = new StatGrid();
   const loadSec = section('荷重・圧下', { open: true });
   const shapeSec = section('板形状', { open: true });
-  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅。' });
+  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
   const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
   const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
   const into = (g: HTMLElement, key: string, label: string, unit?: string) => {
@@ -305,7 +305,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
     if (params.mill === '6hi') {
       actSec.body.append(num('irBender', 'IR ベンダー', 'tonf/chock', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
-      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上下逆向きのシフトを半モデルでは両端対称に扱う。'));
+      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上 IR は +x 側の胴端を +x 側の板端に、下 IR は −x 側の胴端を −x 側の板端に合わせる（上下で逆向き＝点対称のシフト）。上下対称でなくなるので下半分のロールも一緒に解く（表示は上半分）。'));
     }
     if (params.mill === '20hi') {
       actSec.body.append(num('taperShift', '第1中間 テーパ位置', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置（板端基準）。正で板端より外側、負で板端より内側から細り始める。'));
@@ -581,7 +581,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('conv', R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : 'warn');
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
-    stats.set('dof', `${R.dof} / ${R.bandwidth}`);
+    stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
     stats.set('fem', R.fem ? `${params.stripModel === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];

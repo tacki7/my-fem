@@ -10,12 +10,24 @@
  * plane and across the pass line. All rolls share one grid of stations, so
  * a contact between two rolls couples only the two nodes at the same
  * station, and numbering station by station keeps the whole system inside a
- * band a few hundred wide (see `band.ts`).
+ * band a few hundred wide (see `band.ts`). A vertical stack (2Hi, 4Hi, 6Hi)
+ * has no contact that couples the two planes, so its v and w unknowns are
+ * numbered as two separate blocks, each station by station: the band is
+ * then half as wide and the factorisation a quarter of the work.
  *
- * The screw is not an unknown of that system. In gauge or force control it
- * is stepped between Newton iterations by a secant on what the last solve
- * delivered, which converges in a handful of frames and keeps the matrix
- * symmetric positive definite.
+ * In gauge or force control the screw position joins the Newton as one
+ * more unknown, with the control target as its equation, and the bordered
+ * system is solved with the band factorisation (see `iterate`); the band
+ * matrix itself stays symmetric positive definite.
+ *
+ * A symmetric mill is solved as its upper half, the strip's mid-plane
+ * standing in for the lower one: the gap is twice the upper work roll's
+ * surface. A stack with a shifted roll (see `Stack.lower`) has no such
+ * plane, and its lower half is solved too - as more rolls on the same
+ * stations, numbered after the upper ones, so the strip's coupling of the
+ * two work rolls at one station stays inside the band. The gap is then the
+ * sum of the two surfaces, and every place that reads the gap goes through
+ * `gapAt`.
  */
 
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
@@ -27,7 +39,7 @@ import {
   sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
-  buildStack, radiusProfile, onBarrel, saddleXs, type Params3D, type Stack, type RollDef,
+  buildStack, solvedRolls, radiusProfile, onBarrel, saddleXs, type Params3D, type Stack, type RollDef,
 } from './stack';
 
 const DOF = 4;
@@ -246,8 +258,23 @@ export class StackSolver {
   dx = 0;
   ns = 0;
   nr = 0;
+  /** every roll solved: the upper half, then the lower half's when there is one (`upper` of them are the upper half's) */
   rolls: RollState[] = [];
   contacts: ContactState[] = [];
+  /** how many of `rolls` are the upper half; the results show only those */
+  upper = 0;
+  /** the lower work roll in `rolls`, or -1 when the lower half is the upper one's mirror image */
+  wrLower = -1;
+  /** rolls whose supports the screw moves, both halves */
+  private screwRolls: number[] = [];
+  /**
+   * The two planes numbered as separate blocks - every v-DOF, then every
+   * w-DOF - which a stack whose contacts are all vertical allows (nothing
+   * couples v to w): the band is 2·nr+1 wide instead of 4·nr+3. See `idx`.
+   */
+  private planes = false;
+  /** where the w block starts (the number of v-DOFs), or the total when the planes are interleaved */
+  private vEnd = 0;
   slices: Slice[] = [];
   u!: Float64Array;
   private K!: BandMatrix;
@@ -336,7 +363,11 @@ export class StackSolver {
     const previousType = this.stack?.type;
     this.geomKey = geometryKey(p);
     this.stack = buildStack(p);
-    const rolls = this.stack.rolls;
+    const full = solvedRolls(this.stack);
+    const rolls = full.rolls;
+    this.upper = full.upper;
+    this.wrLower = full.wrLower;
+    this.screwRolls = full.screwRolls;
     // the grid spans the longest support span, plus whatever a shift pushes out
     let half = 0;
     for (const r of rolls) half = Math.max(half, r.Ls / 2 + Math.abs(r.shift), r.Lb / 2 + Math.abs(r.shift));
@@ -347,8 +378,10 @@ export class StackSolver {
     this.x = new Float64Array(this.ns);
     for (let s = 0; s < this.ns; s++) this.x[s] = -half + s * this.dx;
     const n = this.ns * this.nr * DOF;
+    this.planes = full.contacts.every((c) => Math.abs(c.nz) < 1e-12);
+    this.vEnd = this.planes ? this.ns * this.nr * 2 : n;
     this.u = new Float64Array(n);
-    this.K = new BandMatrix(n, this.nr * DOF + DOF - 1);
+    this.K = new BandMatrix(n, this.planes ? 2 * this.nr + 1 : this.nr * DOF + DOF - 1);
     this.rhs = new Float64Array(n);
     this.du = new Float64Array(n);
     this.scratch = new Float64Array(n);
@@ -381,7 +414,7 @@ export class StackSolver {
         kv: new Float64Array(this.ns).fill(NaN), kw: new Float64Array(this.ns).fill(NaN), bendMax: 0, hertzMax: 0,
       };
     });
-    this.contacts = this.stack.contacts.map((c) => {
+    this.contacts = full.contacts.map((c) => {
       const A = rolls[c.a], B = rolls[c.b];
       return {
         a: c.a, b: c.b, ny: c.ny, nz: c.nz,
@@ -407,7 +440,12 @@ export class StackSolver {
   private refreshProfiles(): void {
     const p = this.p;
     this.stack = buildStack(p);
-    const rolls = this.stack.rolls;
+    const full = solvedRolls(this.stack);
+    // a lower half appearing or going away is a new set of unknowns (the
+    // inputs that do it are all in the geometry key; this is the backstop)
+    if (full.rolls.length !== this.rolls.length) { this.rebuild(); return; }
+    const rolls = full.rolls;
+    this.screwRolls = full.screwRolls;
     this.rolls.forEach((r, i) => {
       r.def = rolls[i];
       r.def.benderForce = rolls[i].benderForce;
@@ -474,7 +512,48 @@ export class StackSolver {
     this.tensionLive = false;
   }
 
-  private idx(s: number, r: number, d: number): number { return (s * this.nr + r) * DOF + d; }
+  /**
+   * The unknown d (0 v, 1 θv, 2 w, 3 θw) of roll r at station s. Interleaved,
+   * station by station and roll by roll; with `planes`, the same order within
+   * each plane and the w plane after the v plane. Either way a displacement
+   * sits at an even index and a slope at the odd one after it.
+   */
+  private idx(s: number, r: number, d: number): number {
+    if (!this.planes) return (s * this.nr + r) * DOF + d;
+    const k = (s * this.nr + r) * 2;
+    return d < 2 ? k + d : this.vEnd + k + d - 2;
+  }
+
+  /**
+   * The rigid gap between the work-roll surfaces at station s: twice the
+   * upper roll's on a mirror, the upper and lower rolls' together when the
+   * lower half is solved. Positive displacement is away from the strip on
+   * both rolls.
+   */
+  private gapAt(s: number): number {
+    const u = this.u, wr = this.stack.wr;
+    const up = u[this.idx(s, wr, 0)] - this.rolls[wr].prof[s];
+    if (this.wrLower < 0) return this.p.h0 + 2 * up;
+    return this.p.h0 + up + u[this.idx(s, this.wrLower, 0)] - this.rolls[this.wrLower].prof[s];
+  }
+
+  /**
+   * dg/dz, z the work-roll coordinate the strip terms are written in: the
+   * upper roll's v on a mirror (the gap moves twice as far), the sum of the
+   * two rolls' v when the lower half is solved.
+   */
+  private gapGain(): number { return this.wrLower < 0 ? 2 : 1; }
+
+  /** the work-roll v-DOF of each slice, upper and (or -1) lower */
+  private sliceDofs(sl: Slice): [number, number] {
+    return [this.idx(sl.s, this.stack.wr, 0), this.wrLower < 0 ? -1 : this.idx(sl.s, this.wrLower, 0)];
+  }
+
+  /** k·(e_up + e_lo)(e_up + e_lo)ᵀ into the band, the strip's stiffness in the gap; on a mirror, k·gain on the one roll */
+  private addGapStiffness(iv: number, ivL: number, k: number): void {
+    if (ivL < 0) { this.K.add(iv, iv, 2 * k); return; }
+    this.K.add(iv, iv, k); this.K.add(ivL, ivL, k); this.K.add(iv, ivL, k);
+  }
 
   /** the cross-section ring of a roll under the current ring settings, or nothing on the Hertz model */
   ringFor(def: RollDef): RingInfluence | undefined {
@@ -565,7 +644,7 @@ export class StackSolver {
     for (let r = 0; r < nr; r++) {
       const R = rolls[r];
       const d = R.def;
-      const moves = this.stack.screwRolls.includes(r);
+      const moves = this.screwRolls.includes(r);
       R.supports.forEach((s, k) => {
         const iv = this.idx(s, r, 0), iw = this.idx(s, r, 2);
         const xs = this.x[s];
@@ -604,18 +683,20 @@ export class StackSolver {
         const w = c.weight[s];
         if (w <= 0) { c.q[s] = 0; c.delta[s] = 0; continue; }
         const ia = this.idx(s, c.a, 0), ib = this.idx(s, c.b, 0);
-        const gapChange = (u[ib] - u[ia]) * c.ny + (u[ib + 2] - u[ia + 2]) * c.nz;
+        const iaw = this.idx(s, c.a, 2), ibw = this.idx(s, c.b, 2);
+        const gapChange = (u[ib] - u[ia]) * c.ny + (u[ibw] - u[iaw]) * c.nz;
         const delta = A.prof[s] + B.prof[s] - gapChange;
         const [q, kt0] = loadAt(c.law, delta, c.q[s]);
         c.q[s] = q; c.delta[s] = delta;
         c.total += q * w;
         const f = q * w;
-        rhs[ia] -= f * c.ny; rhs[ia + 2] -= f * c.nz;
-        rhs[ib] += f * c.ny; rhs[ib + 2] += f * c.nz;
+        rhs[ia] -= f * c.ny; rhs[iaw] -= f * c.nz;
+        rhs[ib] += f * c.ny; rhs[ibw] += f * c.nz;
         fScale = Math.max(fScale, f);
         if (!withK || delta <= 0) continue;
         const kt = Math.max(kt0, KT_FLOOR) * w;
         const nn = [c.ny, c.nz];
+        const da = [ia, iaw], db = [ib, ibw];
         for (let i = 0; i < 2; i++) {
           for (let j = 0; j < 2; j++) {
             const k = kt * nn[i] * nn[j];
@@ -624,8 +705,8 @@ export class StackSolver {
             // term is one entry, so it is added once; between the nodes the
             // (a, b) and (b, a) blocks are transposes and the band stores
             // only (b, a), so all four entries of the block are needed
-            if (j <= i) { K.add(ia + 2 * i, ia + 2 * j, k); K.add(ib + 2 * i, ib + 2 * j, k); }
-            K.add(ia + 2 * i, ib + 2 * j, -k);
+            if (j <= i) { K.add(da[i], da[j], k); K.add(db[i], db[j], k); }
+            K.add(da[i], db[j], -k);
           }
         }
       }
@@ -636,9 +717,11 @@ export class StackSolver {
     // every assembly; only its results are read here.
     let force = 0, h1w = 0, wsum = 0;
     this.slices.forEach((sl, i) => {
-      const iv = this.idx(sl.s, this.stack.wr, 0);
+      const [iv, ivL] = this.sliceDofs(sl);
       const f = sl.q * sl.weight;
+      // the same load pushes both work rolls away from the strip
       rhs[iv] += f;
+      if (ivL >= 0) rhs[ivL] += f;
       force += f;
       h1w += sl.h1 * sl.weight; wsum += sl.weight;
       fScale = Math.max(fScale, f);
@@ -647,11 +730,15 @@ export class StackSolver {
       // a slice rolled thinner is longer, goes slack, and is loaded harder,
       // through the whole strip's elongation balance - couples every slice
       // to every other and is applied in `iterate` as a Woodbury update.
-      K.add(iv, iv, Math.max(0, -2 * sl.dqdg) * sl.weight);
+      // On a mirror the gap moves 2 dv, so the term is 2 w (−dq/dg) on the
+      // roll; with the lower roll solved it is w (−dq/dg) on each roll and
+      // between them.
+      this.addGapStiffness(iv, ivL, Math.max(0, -sl.dqdg) * sl.weight);
       this.dqds[i] = sl.q > 0 ? sl.dqds : 0;
       if (TENSION_COUPLING === 'diag' && this.tensionLive) {
         const m = this.slices.length;
-        K.add(iv, iv, Math.max(0, -sl.weight * this.dqds[i] * this.T[i * m + i]));
+        const k = Math.max(0, -sl.weight * this.dqds[i] * this.T[i * m + i]);
+        if (ivL < 0) K.add(iv, iv, k); else this.addGapStiffness(iv, ivL, k);
       }
     });
     this.forceTotal = force;
@@ -720,14 +807,17 @@ export class StackSolver {
     plain.set(du);
     if (bordered) {
       const x2 = this.x2;
-      K.solve(this.bScrew, x2);
+      // the screw moves supports in y only: its column is all in the v block
+      x2.set(this.bScrew);
+      K.solveLeading(x2, 0, this.vEnd);
       if (wb) this.applyWoodbury(wb, x2);
       const m = this.slices.length;
       const a = this.targetGradient();
       let ax1 = 0, ax2 = 0;
       for (let j = 0; j < m; j++) {
-        const iv = this.idx(this.slices[j].s, this.stack.wr, 0);
+        const [iv, ivL] = this.sliceDofs(this.slices[j]);
         ax1 += a[j] * du[iv]; ax2 += a[j] * x2[iv];
+        if (ivL >= 0) { ax1 += a[j] * du[ivL]; ax2 += a[j] * x2[ivL]; }
       }
       // closing the screw thins the strip (aᵀx₂ > 0 in gauge) and loads it (aᵀx₂ < 0 in force)
       const usable = p.mode === 'gauge' ? ax2 > 0.02 : ax2 < -1e8;
@@ -790,10 +880,10 @@ export class StackSolver {
   }
 
   /**
-   * ∂c/∂v at each slice's work-roll DOF, through the slice's own gap and
-   * through the tension coupling: a slice's exit thickness and load move
-   * with its own gap (dh₁/dg, dq/dg) and with every slice's tension
-   * (dh₁/dσ, dq/dσ times T = dσ/dv).
+   * ∂c/∂z at each slice's work-roll coordinate z (see `gapGain`), through
+   * the slice's own gap and through the tension coupling: a slice's exit
+   * thickness and load move with its own gap (dh₁/dg, dq/dg) and with every
+   * slice's tension (dh₁/dσ, dq/dσ times T = dσ/dz).
    */
   private targetGradient(): Float64Array {
     const p = this.p;
@@ -802,9 +892,10 @@ export class StackSolver {
     const T = this.T, live = this.tensionLive;
     let W = 0;
     for (const sl of this.slices) W += sl.weight;
+    const gain = this.gapGain();
     for (let j = 0; j < m; j++) {
       const sj = this.slices[j];
-      let v = p.mode === 'gauge' ? 2 * sj.weight * sj.dh1dg : 2 * sj.weight * sj.dqdg;
+      let v = p.mode === 'gauge' ? gain * sj.weight * sj.dh1dg : gain * sj.weight * sj.dqdg;
       if (live) {
         for (let i = 0; i < m; i++) {
           const si = this.slices[i];
@@ -820,21 +911,28 @@ export class StackSolver {
 
   /**
    * The pieces of the Woodbury update for the strip's tension coupling,
-   * K_full = K + U M Uᵀ with U the work-roll v-DOFs of the slices and
-   * M = −diag(w dq/dσ) T:  x_full = x − Y M (I + G M)⁻¹ Uᵀ x,  Y = K⁻¹U,
-   * G = UᵀY. M is not inverted (a clipped slice has a zero row), so this is
-   * the form that only needs I + G M - m×m dense, factorised once here and
-   * applied to as many right-hand sides as the iteration has.
+   * K_full = K + U M Uᵀ with U's column j the work-roll v-DOF of slice j (on
+   * a mirror) or the sum of the upper and lower rolls' (the gap moves with
+   * both) and M = −diag(w dq/dσ) T:  x_full = x − Y M (I + G M)⁻¹ Uᵀ x,
+   * Y = K⁻¹U, G = UᵀY. M is not inverted (a clipped slice has a zero row),
+   * so this is the form that only needs I + G M - m×m dense, factorised once
+   * here and applied to as many right-hand sides as the iteration has.
    */
-  private prepareWoodbury(): { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; n: number; m: number } | null {
+  private prepareWoodbury(): { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; colsL: Int32Array | null; n: number; m: number } | null {
     const K = this.K;
     const n = this.u.length, m = this.slices.length;
     const Y = this.woodburyY(n, m);
     const cols = Int32Array.from(this.slices, (sl) => this.idx(sl.s, this.stack.wr, 0));
+    const colsL = this.wrLower < 0 ? null : Int32Array.from(this.slices, (sl) => this.idx(sl.s, this.wrLower, 0));
     if (this.yAge >= Y_REUSE || this.yAge < 0) {
+      // each column is a unit load on the work roll(s) at one station: zero
+      // before that row, and all in the v block
       const e = this.scratch;
       for (let j = 0; j < m; j++) {
-        K.solveUnit(cols[j], e);
+        e.fill(0);
+        e[cols[j]] = 1;
+        if (colsL) e[colsL[j]] = 1;
+        K.solveLeading(e, colsL ? Math.min(cols[j], colsL[j]) : cols[j], this.vEnd);
         Y.set(e, j * n);
       }
       this.yAge = 0;
@@ -847,28 +945,30 @@ export class StackSolver {
     }
     for (let i = 0; i < m; i++) {
       for (let j = 0; j < m; j++) {
-        // G_ik = Y[k][cols[i]]
+        // G_ik = (Uᵀ Y)_ik = Y[k][cols[i]] (+ Y[k][colsL[i]])
         let sum = 0;
-        for (let k = 0; k < m; k++) sum += Y[k * n + cols[i]] * M[k * m + j];
+        if (colsL) for (let k = 0; k < m; k++) sum += (Y[k * n + cols[i]] + Y[k * n + colsL[i]]) * M[k * m + j];
+        else for (let k = 0; k < m; k++) sum += Y[k * n + cols[i]] * M[k * m + j];
         A[i * m + j] = (i === j ? 1 : 0) + sum;
       }
     }
     const piv = new Int32Array(m);
     if (!luFactor(A, m, piv)) return null;
-    return { Y, M, A, piv, cols, n, m };
+    return { Y, M, A, piv, cols, colsL, n, m };
   }
 
-  private applyWoodbury(wb: { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; n: number; m: number }, v: Float64Array): void {
-    const { Y, M, A, piv, cols, n, m } = wb;
+  private applyWoodbury(wb: { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; colsL: Int32Array | null; n: number; m: number }, v: Float64Array): void {
+    const { Y, M, A, piv, cols, colsL, n, m } = wb;
     const z = new Float64Array(m);
-    for (let i = 0; i < m; i++) z[i] = v[cols[i]];
+    for (let i = 0; i < m; i++) z[i] = colsL ? v[cols[i]] + v[colsL[i]] : v[cols[i]];
     luSolve(A, m, piv, z);
     for (let k = 0; k < m; k++) {
       let mz = 0;
       for (let j = 0; j < m; j++) mz += M[k * m + j] * z[j];
       if (mz === 0) continue;
       const off = k * n;
-      for (let i = 0; i < n; i++) v[i] -= Y[off + i] * mz;
+      // Y is zero past the v block
+      for (let i = 0, e = this.vEnd; i < e; i++) v[i] -= Y[off + i] * mz;
     }
   }
 
@@ -980,8 +1080,6 @@ export class StackSolver {
    */
   private femCorrection(sigma: Float64Array): number {
     const p = this.p;
-    const u = this.u;
-    const wrR = this.rolls[this.stack.wr];
     const law = this.law;
     const n = this.slices.length;
     if (n === 0) return 0;
@@ -990,7 +1088,7 @@ export class StackSolver {
     const L = new Float64Array(n), sB = new Float64Array(n), sF = new Float64Array(n);
     const qSlab = new Float64Array(n), epsSlab = new Float64Array(n);
     this.slices.forEach((sl, i) => {
-      const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
+      const g = this.gapAt(sl.s);
       const slab = this.sliceCore(sl, g, sigma[i], sl.q);
       x[i] = sl.x; w[i] = sl.weight; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
       sB[i] = p.tensionFeedback ? p.backTension : 0; sF[i] = p.tensionFeedback ? sigma[i] : 0;
@@ -1150,8 +1248,6 @@ export class StackSolver {
     const p = this.p;
     const n = this.slices.length;
     if (n === 0) return;
-    const u = this.u;
-    const wrR = this.rolls[this.stack.wr];
     const w = new Float64Array(n);
     let ws = 0;
     this.slices.forEach((sl, i) => { w[i] = sl.weight; ws += w[i]; });
@@ -1207,7 +1303,7 @@ export class StackSolver {
       const ratio = this.femRatio, off = this.femEps;
       this.slices.forEach((sl, i) => {
         if (onlyLive && held[i] !== 0) return;
-        const g = p.h0 + 2 * (u[this.idx(sl.s, this.stack.wr, 0)] - wrR.prof[sl.s]);
+        const g = this.gapAt(sl.s);
         const out = this.solveSlice(sl, g, sigma[i]);
         const k = ratio ? ratio[i] : 1;
         sl.g = g; sl.q = out.q * k; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
@@ -1312,7 +1408,7 @@ export class StackSolver {
       this.manifest[sl.s] = held[i] < 0 ? Math.max(0, (sigma[i] - free[i]) / Eeff) : 0;
     });
     if (!withJacobian) return;
-    // T = dσ/dv = J⁻¹ F_h h_v, h_v = diag(2 dh1/dg)
+    // T = dσ/dz = J⁻¹ F_h h_z, h_z = diag(gain · dh1/dg), z as in `gapGain`
     const wL = buildFh();
     this.tensionLive = wL > 1e-9 * ws;
     const T = this.T;
@@ -1324,8 +1420,9 @@ export class StackSolver {
     const piv = new Int32Array(n);
     if (!luFactor(J, n, piv)) { T.fill(0); this.tensionLive = false; return; }
     const col = new Float64Array(n);
+    const gain = this.gapGain();
     for (let j = 0; j < n; j++) {
-      const hv = 2 * this.slices[j].dh1dg;
+      const hv = gain * this.slices[j].dh1dg;
       let any = false;
       for (let i = 0; i < n; i++) { col[i] = Fh[i * n + j] * hv; if (col[i] !== 0) any = true; }
       if (any) luSolve(J, n, piv, col);
@@ -1418,8 +1515,10 @@ export class StackSolver {
   private emptyResult(): Result3D {
     const ns = this.ns;
     const nan = () => new Float64Array(ns).fill(NaN);
+    // the results show the upper half; a solved lower half stays inside
+    const up = this.upper;
     return {
-      x: this.x, rolls: this.rolls, contacts: this.contacts,
+      x: this.x, rolls: this.rolls.slice(0, up), contacts: this.contacts.filter((c) => c.a < up && c.b < up),
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
@@ -1462,7 +1561,7 @@ export class StackSolver {
         if (!arr) continue;
         for (let s = 0; s < ns; s++) fm = Math.max(fm, arr[s]);
       }
-      if (r === this.stack.wr) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
+      if (r === this.stack.wr || r === this.wrLower) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
       roll.flatMax = fm;
       // curvature of the axis by central differences (the beam's bending
       // stress on the barrel surface is E r κ), smoothed once
@@ -1495,7 +1594,7 @@ export class StackSolver {
     for (let r = 0; r < nr; r++) {
       let hm = 0;
       for (const c of this.contacts) if (c.a === r || c.b === r) for (let s = 0; s < ns; s++) hm = Math.max(hm, c.p0[s]);
-      if (r === this.stack.wr) {
+      if (r === this.stack.wr || r === this.wrLower) {
         for (const sl of this.slices) {
           if (sl.q <= 0) continue;
           const b = Math.max(Math.sqrt(this.wsLaw.bCoef * sl.q), sl.arc / 2, 1e-9);
@@ -1540,14 +1639,14 @@ export class StackSolver {
     }
     R.manifestIU = man * 1e5;
     R.screw = this.screw;
-    // upper and lower work rolls meeting beside the strip: the symmetric
-    // model has nothing there to stop the roll, so it is only reported
+    // upper and lower work rolls meeting beside the strip: the model has
+    // nothing there to stop the rolls, so it is only reported
     {
       const wr = this.rolls[this.stack.wr];
       R.wrGap.fill(NaN);
       for (let s = wr.ia; s <= wr.ib; s++) {
         if (this.sliceW[s] > 0 || !onBarrel(wr.def, this.x[s]) || !Number.isFinite(wr.v[s])) continue;
-        R.wrGap[s] = p_.h0 + 2 * (wr.v[s] - wr.prof[s]);
+        R.wrGap[s] = this.gapAt(s);
       }
     }
     R.warnings = this.diagnose();

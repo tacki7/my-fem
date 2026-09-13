@@ -89,7 +89,8 @@ for (const c of cases) {
     if (!R.converged) problems.push('noconv res=' + R.residual.toExponential(1) + ' step=' + (R.stepMax).toExponential(1));
     if (!Number.isFinite(R.force)) problems.push('force ' + R.force);
     for (const k of ['h1', 'q', 'flat', 'dEps', 'manifest', 'sigmaF']) { const a = R[k]; let n = 0; for (let i = 0; i < a.length; i++) if (Number.isNaN(a[i]) && Number.isFinite(R.h0[i])) n++; if (n) problems.push(`NaN ${k}×${n}`); }
-    for (const r of R.rolls) { let n = 0; for (let s = r.ia; s <= r.ib; s++) if (!Number.isFinite(r.v[s])) n++; if (n) problems.push(`NaN ${r.def.id}.v×${n}`); }
+    // every solved roll, the lower half's too when the stack has one
+    for (const r of sv.rolls) { let n = 0; for (let s = r.ia; s <= r.ib; s++) if (!Number.isFinite(r.v[s])) n++; if (n) problems.push(`NaN ${r.def.id}.v×${n}`); }
     for (const cc of R.contacts) if (hasNaN(cc.q)) problems.push('NaN contact q');
     if (![R.crown, R.wedge, R.edgeDropL, R.latentIU, R.manifestIU, R.screw].every(Number.isFinite)) problems.push('NaN stats');
     if (R.force < 0) problems.push('negative force');

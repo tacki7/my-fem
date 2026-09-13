@@ -104,6 +104,32 @@ export class BandMatrix {
     }
   }
 
+  /**
+   * Solve L·Lᵀ x = b in place, for a b that is zero before row `start` and
+   * lies in a leading block [0, end) the rest of the matrix does not couple
+   * to - so the solution is zero past `end` too, and neither sweep has to go
+   * there. The forward sweep starts at `start` (everything before it stays
+   * zero). Rows past `end` must hold zeros on entry. With start = 0 and
+   * end = n it is `solve`.
+   */
+  solveLeading(x: Float64Array, start: number, end: number): void {
+    const { hb, w, a } = this;
+    for (let i = start; i < end; i++) {
+      const bi = i * w + hb - i;
+      let s = x[i];
+      const k0 = Math.max(start, i - hb);
+      for (let k = k0; k < i; k++) s -= a[bi + k] * x[k];
+      x[i] = s / a[bi + i];
+    }
+    for (let i = end - 1; i >= 0; i--) {
+      const bi = i * w + hb - i;
+      const xi = x[i] / a[bi + i];
+      x[i] = xi;
+      const k0 = Math.max(0, i - hb);
+      for (let k = k0; k < i; k++) x[k] -= a[bi + k] * xi;
+    }
+  }
+
   /** solve L·Lᵀ x = b after `cholesky`; x may alias b */
   solve(b: Float64Array, x: Float64Array): void {
     const { n, hb, w, a } = this;
