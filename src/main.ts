@@ -6,6 +6,7 @@ import {
   type FlatteningModel,
 } from './sim/solver';
 import { Mill, MAX_STANDS, type StandSetup, type LineMode } from './sim/mill';
+import { stoneMinThickness } from './sim/stone';
 import {
   muFromLoad, slabLoad, exitStrain, slabKfProfile, slabPressureProfile, MU_MIN, MU_MAX, SLAB_THEORY_LABEL, FLATTENING_LABEL,
   type SlabCase, type MuInverseResult,
@@ -745,10 +746,10 @@ function millViews(): StandView[] {
     const hIn = p.h0;
     const c = standSetups[k];
     const slabTop = d.loadModel === 'slab' && Number.isFinite(d.kfSlab) && d.kfSlab > 0;
-    // Stone's limit on the theory's own kf: C mu R (kf - sigma_mean)
+    // Stone's limit on the theory's own kf: C mu R (kf - sigma_mean)/0.64761
     const stoneSlab = slabTop
-      ? ((16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll)) * p.mu * p.R
-        * Math.max(d.kfSlab - (getBackTension(k) + c.frontTension) / 2, 0)
+      ? stoneMinThickness(p.Eroll, p.nuRoll, p.mu, p.R,
+        d.kfSlab - (getBackTension(k) + c.frontTension) / 2)
       : d.stoneHMin;
     out.push({
       hIn: hIn * 1000,

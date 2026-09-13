@@ -24,6 +24,7 @@ import {
 } from './sparse';
 import { BandPreconditioner } from './band';
 import { FlowSolver, type FlowInput } from './flow';
+import { stoneMinThickness } from './stone';
 import type { SlabCase, SlabPoint } from './muinv';
 
 /**
@@ -639,8 +640,9 @@ export interface RollingDiagnostics {
   /** Hitchcock deformed radius [m] */
   hitchcockR: number;
   /**
-   * Stone's minimum rollable thickness [m], C*mu*R*(kf - sigma_mean) with the
-   * same roll compliance C the Hitchcock radius uses.
+   * Stone's minimum rollable thickness [m], C*mu*R*(kf - sigma_mean)/0.64761
+   * with the same roll compliance C the Hitchcock radius uses (the constant
+   * and its derivation: `stone.ts`).
    *
    * Below it the barrel flattens faster than the gap closes and the strip
    * stops thinning however hard the screws are driven - which also puts a
@@ -3090,9 +3092,8 @@ export class RollingSim {
       // uniaxial. The integral of L(eps+M)^N is closed form, so no quadrature.
       const e1 = Math.max(d.exitStrain, 0);
       d.meanFlowStressTheory = (Math.sqrt(3) / 2) * meanPlaneStrainLmn(p, e1);
-      const C = (16 * (1 - p.nuRoll * p.nuRoll)) / (Math.PI * p.Eroll);
       const sigMean = (p.backTension + p.frontTension) / 2;
-      d.stoneHMin = C * p.mu * p.R * Math.max(d.meanPlaneStrainStress - sigMean, 0);
+      d.stoneHMin = stoneMinThickness(p.Eroll, p.nuRoll, p.mu, p.R, d.meanPlaneStrainStress - sigMean);
       const Rb = this.hitchcockRadius();
       const aBite = Math.atan(p.mu);
       d.biteLimitH1 = p.h0 - 2 * Rb * (1 - Math.cos(aBite));
