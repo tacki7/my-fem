@@ -3145,7 +3145,10 @@ export class RollingSim {
    * `slab.ts`), with tension, evaluated at the radius the FEM is actually
    * rolling with - so the comparison isolates the friction-hill model from
    * the flattening. Without the hook (no app around the solver) the Siebel
-   * form is written out here.
+   * form is written out here - the same one `slab.ts` `karman` evaluates, pulls
+   * off the resistance and expm1 included. It used to take the bare kf and
+   * exp(a) - 1, so a headless run disagreed with the app by the whole tension
+   * term.
    */
   slabMethod(): { load: number; meanPressure: number; arc: number; torque: number; kf: number } {
     const p = this.params;
@@ -3171,9 +3174,10 @@ export class RollingSim {
     const e0 = Math.max(this.entryStrain, 0);
     const eps = e0 + (2 / Math.sqrt(3)) * Math.log(p.h0 / h1);
     const kf = meanPlaneStrainLmnRange(p, e0, eps);
+    const kEff = Math.max(kf - (p.backTension + p.frontTension) / 2, 0);
     const a = (p.mu * Lc) / hm;
-    const Qp = a > 1e-6 ? (Math.exp(a) - 1) / a : 1;
-    const pm = kf * Qp;
+    const Qp = a > 1e-12 ? Math.expm1(a) / a : 1;
+    const pm = kEff * Qp;
     return { load: pm * Lc, meanPressure: pm, arc: Lc, torque: pm * Lc * Lc * 0.5, kf };
   }
 
