@@ -139,7 +139,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -151,6 +151,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   openContact: '上下のロールが離れている接触がある（端面図の破線）',
   fem: '材料 FEM が反復上限で打ち切り（結果は近似）',
   wrTouch: '板の外で上下のワークロール同士が接触している（対称モデルは考慮しない — 荷重配分が実機と変わる）',
+  stripWide: '板幅が WR 胴長より長い（胴からはみ出した板は圧延されず、計算にも入らない）',
 };
 
 export interface Result3D {
@@ -1552,6 +1553,13 @@ export class StackSolver {
     R.warnings = this.diagnose();
     R.notes = [...this.stack.issues];
     {
+      const over = this.stripOverhang();
+      if (over > 0) {
+        const wr = this.stack.rolls[this.stack.wr];
+        R.notes.push(`板幅 ${(p_.width * 1e3).toFixed(0)} mm > WR 胴長 ${(wr.Lb * 1e3).toFixed(0)} mm: 胴からはみ出した板 ${(over * 1e3).toFixed(0)} mm（両側合計）は圧延されず、荷重・板厚・形状の計算に入らない`);
+      }
+    }
+    {
       let xMin = Infinity, xMax = -Infinity, deepest = 0;
       for (let s = 0; s < ns; s++) {
         const g = R.wrGap[s];
@@ -1572,6 +1580,21 @@ export class StackSolver {
   }
 
   /** the pass's problems, from the slices' own flags and the control state */
+  /**
+   * How much of the strip's width lies off the work roll's barrel [m], both
+   * sides together. The slices are only cut where the barrel is (see
+   * `refreshProfiles`), so that part of the strip is simply not rolled and
+   * not counted - which is right for the rolls and wrong for the reader who
+   * set a width the mill cannot take, hence the warning.
+   */
+  private stripOverhang(): number {
+    const wr = this.stack.rolls[this.stack.wr];
+    const b0 = wr.shift - wr.Lb / 2, b1 = wr.shift + wr.Lb / 2;
+    const w = this.p.width;
+    const over = Math.max(0, b0 - (-w / 2)) + Math.max(0, w / 2 - b1);
+    return over > 1e-9 ? over : 0;
+  }
+
   private diagnose(): Warning3D[] {
     const p = this.p;
     const w: Warning3D[] = [];
@@ -1603,6 +1626,7 @@ export class StackSolver {
     const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
+    if (this.stripOverhang() > 0) w.push('stripWide');
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
     if ((p.stripModel === 'fem' || p.stripModel === 'fem3d') && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the

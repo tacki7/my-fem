@@ -378,7 +378,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     if (params.stripModel === 'fem3d') {
       stripSec.body.append(num('stripNy', '材料 FEM 板厚方向 分割数', '', 1, 6, 1, 1, '板厚の上半分の層数（中央面は対称面）。結果は 1〜3 でほぼ変わらない。計算時間は層数に比例。'));
     }
-    stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3));
+    stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3, 'WR の胴長を超えると警告が出る（胴からはみ出した板は圧延されず、計算にも入らない）。'));
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
     stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差。出側クラウン比が入側と一致すれば平坦。'));
     stripSec.body.append(num('backTension', '後方張力', 'MPa', 0, 300, 5, 1e6));
