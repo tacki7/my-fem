@@ -48,10 +48,30 @@ import { BandMatrix } from './band';
 /** uniaxial flow stress over plane-strain resistance, σ̄ = FLOW · kf (von Mises) */
 export const FLOW = Math.sqrt(3) / 2;
 
+/**
+ * The width each column of nodes stands for on the mesh [m]: half the gap
+ * to each neighbour, half the gap to the only one at an edge. Tractions and
+ * flows per unit width turn into nodal forces and fluxes through this. The
+ * slice widths used to be taken instead, and at an edge they differ - the
+ * edge slice covers its whole cell's overlap with the strip, while the mesh
+ * stops at the slice's centre - so the edge column was pulled by up to half
+ * a cell's worth of tension it has no material for. Its elongation then
+ * swung from −1143 to +2265 to −8516 I-units as the strip width went from
+ * 1000 to 1015 to 1030 mm across one station.
+ */
+export function tributary(x: Float64Array): Float64Array {
+  const n = x.length, out = new Float64Array(n);
+  for (let i = 0; i < n; i++) out[i] = 0.5 * (x[Math.min(n - 1, i + 1)] - x[Math.max(0, i - 1)]);
+  return out;
+}
+
 export interface StripFemInput {
-  /** column positions [m] and their widths [m] */
+  /**
+   * column positions [m]. The mesh runs from the first to the last; what
+   * width a column stands for is what the mesh gives it (see `tributary`),
+   * not the width of the slice it came from.
+   */
   x: Float64Array;
-  w: Float64Array;
   /** entry and exit thickness per column [m] */
   h0: Float64Array;
   h1: Float64Array;
@@ -109,6 +129,7 @@ export class StripFem {
 
   solve(inp: StripFemInput): StripFemResult {
     const nx = inp.x.length, nz = Math.max(2, Math.round(inp.nz));
+    const trib = tributary(inp.x);
     const rows = nz + 1;
     const nn = nx * rows;
     const ndof = 2 * nn;
@@ -330,8 +351,8 @@ export class StripFem {
       const BIG = 1e12 * muRef * hm;
       for (let i = 0; i < nx; i++) {
         const n0 = node(i, 0), n1 = node(i, nz);
-        rhs[2 * n0 + 1] -= inp.sigmaB[i] * inp.h0[i] * inp.w[i];
-        rhs[2 * n1 + 1] += inp.sigmaF[i] * inp.h1[i] * inp.w[i];
+        rhs[2 * n0 + 1] -= inp.sigmaB[i] * inp.h0[i] * trib[i];
+        rhs[2 * n1 + 1] += inp.sigmaF[i] * inp.h1[i] * trib[i];
         K.add(2 * n0, 2 * n0, BIG);
         if (i < nx - 1) {
           const m0 = node(i + 1, 0);
@@ -375,8 +396,8 @@ export class StripFem {
     let flowIn = 0, flowOut = 0;
     for (let i = 0; i < nx; i++) {
       eps[i] = Math.log(Math.max(vExit[i], 1e-9) / Math.max(vIn, 1e-9));
-      flowIn += inp.h0[i] * vIn * inp.w[i];
-      flowOut += inp.h1[i] * vExit[i] * inp.w[i];
+      flowIn += inp.h0[i] * vIn * trib[i];
+      flowOut += inp.h1[i] * vExit[i] * trib[i];
     }
     return {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nx - 1, nrow: nz,

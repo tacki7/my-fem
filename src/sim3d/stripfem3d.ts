@@ -28,7 +28,7 @@
  */
 
 import { BandMatrix } from './band';
-import { FLOW, type StripFemInput, type StripFemResult } from './stripfem';
+import { FLOW, tributary, type StripFemInput, type StripFemResult } from './stripfem';
 
 export interface StripFem3DInput extends StripFemInput {
   /** element layers through the upper half of the thickness */
@@ -77,6 +77,8 @@ export class StripFem3D {
 
   solve(inp: StripFem3DInput): StripFemResult {
     const nx = inp.x.length, nz = Math.max(2, Math.round(inp.nz)), ny = Math.max(1, Math.round(inp.ny));
+    // what width each column of nodes stands for on this mesh (see `tributary`)
+    const trib = tributary(inp.x);
     const rows = nz + 1, lay = ny + 1;
     const nn = nx * rows * lay;
     const ndof = 3 * nn;
@@ -229,8 +231,10 @@ export class StripFem3D {
       sN[3 * m] = nxv; sN[3 * m + 1] = nyv; sN[3 * m + 2] = nzv;
       const tl = Math.hypot(dhdz, 1);
       sVr[3 * m] = 0; sVr[3 * m + 1] = (V * dhdz) / tl; sVr[3 * m + 2] = V / tl;
-      // tributary area: half the column width (a full one inside) times half the row length on each side
-      const wx = (i === 0 || i === nx - 1 ? 0.5 : 1) * inp.w[i];
+      // tributary area: the column's share of the width on the mesh times half the row length on each side.
+      // It was half the slice width at an edge and the whole one inside, which at an edge is not what the
+      // mesh gives the node: the constraint pressure there came out 1.75 (4Hi) and 2.7 (20Hi) times too high.
+      const wx = trib[i];
       const dz = L / nz;
       const wz = (j === 0 || j === nz ? 0.5 : 1) * dz;
       sA[m] = wx * wz * tl;
@@ -348,8 +352,8 @@ export class StripFem3D {
         for (let k = 0; k < lay; k++) {
           const nIn = node(i, 0, k), nOut = node(i, nz, k);
           const share = k === 0 || k === ny ? 0.5 / ny : 1 / ny;
-          rhs[3 * nIn + 2] -= inp.sigmaB[i] * hIn * inp.w[i] * share;
-          rhs[3 * nOut + 2] += inp.sigmaF[i] * hOut * inp.w[i] * share;
+          rhs[3 * nIn + 2] -= inp.sigmaB[i] * hIn * trib[i] * share;
+          rhs[3 * nOut + 2] += inp.sigmaF[i] * hOut * trib[i] * share;
           // the incoming strip is rigid across and along (u = 0, w tied);
           // its thickness velocity is left free - pinning v on the entry
           // face fought the roll-face constraint at the top node, where the
@@ -382,11 +386,10 @@ export class StripFem3D {
     const q = new Float64Array(nx), vExit = new Float64Array(nx), uExit = new Float64Array(nx), eps = new Float64Array(nx);
     const pOut = new Float64Array(nface), uxOut = new Float64Array(nface);
     // the load per unit width of a column: its nodes' vertical normal
-    // forces over the width they stand for (half a column at the edges,
-    // where the mesh ends at the column centre)
+    // forces over the width they stand for on the mesh
     for (let m = 0; m < surf.length; m++) {
       const i = sCol[m];
-      const wx = (i === 0 || i === nx - 1 ? 0.5 : 1) * inp.w[i];
+      const wx = trib[i];
       q[i] += (Math.max(pNode[m], 0) * sA[m] * sN[3 * m + 1]) / wx;
     }
     const pAt = (i: number, j: number) => pNode[i * rows + j];
@@ -412,8 +415,8 @@ export class StripFem3D {
     let flowIn = 0, flowOut = 0;
     for (let i = 0; i < nx; i++) {
       eps[i] = Math.log(Math.max(vExit[i], 1e-9) / Math.max(vIn, 1e-9));
-      flowIn += inp.h0[i] * vIn * inp.w[i];
-      flowOut += inp.h1[i] * vExit[i] * inp.w[i];
+      flowIn += inp.h0[i] * vIn * trib[i];
+      flowOut += inp.h1[i] * vExit[i] * trib[i];
     }
     return {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nx - 1, nrow: nz,

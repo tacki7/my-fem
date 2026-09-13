@@ -1148,7 +1148,7 @@ export class StackSolver {
     const n = this.slices.length;
     if (n === 0) return 0;
     if (!this.femRatio || this.femRatio.length !== n) { this.femRatio = new Float64Array(n).fill(1); this.femEps = new Float64Array(n); }
-    const x = new Float64Array(n), w = new Float64Array(n), h0 = new Float64Array(n), h1 = new Float64Array(n);
+    const x = new Float64Array(n), h0 = new Float64Array(n), h1 = new Float64Array(n);
     const L = new Float64Array(n), sB = new Float64Array(n), sF = new Float64Array(n);
     const qSlab = new Float64Array(n), epsSlab = new Float64Array(n);
     this.slices.forEach((sl, i) => {
@@ -1158,7 +1158,7 @@ export class StackSolver {
       // new ratio is its load over the slab load at the same thickness
       const k = this.femRatio![i];
       const slab = this.sliceCore(sl, g, sigma[i], sl.q, k);
-      x[i] = sl.x; w[i] = sl.weight; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
+      x[i] = sl.x; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
       sB[i] = p.tensionFeedback ? p.backTension : 0; sF[i] = p.tensionFeedback ? sigma[i] : 0;
       qSlab[i] = slab.q / k; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
     });
@@ -1177,7 +1177,7 @@ export class StackSolver {
     // from it (a sliver swapped for the real arc at first contact made two
     // FEM solutions alternate on a 0.06 µm difference in thickness)
     for (let i = 0; i < n; i++) L[i] = Math.max(L[i], 0.05 * Lmax);
-    const femInput = { x, w, h0, h1, L, kf: (_i: number, e: number) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1 };
+    const femInput = { x, h0, h1, L, kf: (_i: number, e: number) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1 };
     const r = p.stripModel === 'fem3d' ? this.fem3d.solve({ ...femInput, ny: p.stripNy }) : this.fem.solve(femInput);
     this.femResult = r;
     let change = 0;
