@@ -19,7 +19,7 @@
  * overshoot. The tangent dq/dδ is what the stack's Jacobian takes.
  */
 
-import { ringCompliance, type RingInfluence } from './ring';
+import { ringCompliance, ringComplianceSlope, type RingInfluence } from './ring';
 
 export interface ContactLaw {
   /** per-body compliance (1-ν²)/(πE) for body 1, 2 - zero for a body left out */
@@ -73,17 +73,14 @@ export function approach(c: ContactLaw, q: number): [number, number] {
   const b = hertz ? bh : c.bFloor;
   // per body: the compliance G(b) [m per N/m] and its slope in b
   let G = 0, dG = 0;
-  const db = 0.05 * b;
   if (c.ring1) {
-    const g0 = ringCompliance(c.ring1, b);
-    G += g0; dG += (ringCompliance(c.ring1, b + db) - g0) / db;
+    G += ringCompliance(c.ring1, b); dG += ringComplianceSlope(c.ring1, b);
   } else {
     G += c.A1 * (2 * Math.log((4 * c.R1) / b) - 1); dG += (-2 * c.A1) / b;
   }
   if (c.A2 > 0) {
     if (c.ring2) {
-      const g0 = ringCompliance(c.ring2, b);
-      G += g0; dG += (ringCompliance(c.ring2, b + db) - g0) / db;
+      G += ringCompliance(c.ring2, b); dG += ringComplianceSlope(c.ring2, b);
     } else {
       G += c.A2 * (2 * Math.log((4 * c.R2) / b) - 1); dG += (-2 * c.A2) / b;
     }

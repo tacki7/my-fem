@@ -163,3 +163,27 @@ export function ringCompliance(inf: RingInfluence, b: number): number {
   }
   return G;
 }
+
+/**
+ * dG/db of `ringCompliance`, analytically: each node's weight is a
+ * difference of F(s/b) at its tributary edges, and F′(u) = (2/π)√(1 − u²)
+ * inside the patch, zero outside. The contact law's tangent needs it; a
+ * forward difference over 5 % of b was 2-3 % off, which is what the outer
+ * Newton then saw of every ring-model contact.
+ */
+export function ringComplianceSlope(inf: RingInfluence, b: number): number {
+  const { g, pitch } = inf;
+  const bb = Math.max(b, 1e-9);
+  const dF = (u: number) => (Math.abs(u) < 1 ? (2 / Math.PI) * Math.sqrt(1 - u * u) : 0);
+  // d/db F(s/b) = −(s/b²) F′(s/b)
+  const dFb = (s0: number) => (-s0 / (bb * bb)) * dF(s0 / bb);
+  let dG = 0;
+  const kmax = Math.min(g.length - 1, Math.ceil(bb / pitch) + 1);
+  for (let k = 0; k <= kmax; k++) {
+    const s0 = (k - 0.5) * pitch, s1 = (k + 0.5) * pitch;
+    let dw = dFb(s1) - dFb(s0);
+    if (k > 0) dw += dFb(-s0) - dFb(-s1);
+    dG += dw * g[k];
+  }
+  return dG;
+}
