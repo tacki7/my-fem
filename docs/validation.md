@@ -1231,6 +1231,8 @@ FEM の R′ 263.2 mm）。`?flat=roberts`。
 実装した Roberts の式: `L = b + √(b² + RΔh)`, `b = √(4(1−ν²)PR/(πE))`（Hertz の接触半幅）,
 `R′ = L²/Δh`。Hitchcock は `R′ = R(1 + 16(1−ν²)P/(πEΔh))` ⇔ `L² = RΔh + 4b²`。圧下ゼロで両式とも
 `L = 2b`。**b の係数は原著の読みで置いており、出典と照合のこと**（`muinv.ts` `flatRadius` の 1 行）。
+両式の整合（`L² = RΔh + 4b²`、圧下ゼロで `2b`、Roberts の弧 ≥ Hitchcock の弧）は Lean で証明済み
+（`docs/proofs/SlabFormulas.lean`）— 残っているのは出典との照合だけ。
 
 ```
  張力 [MPa]     式            Hitchcock: P    R′[mm]     Roberts: P    R′[mm]    比
@@ -1326,6 +1328,60 @@ OFF はロール解析（`solveRoll`）を呼ばなくするだけで、緩和�
 メッシュの入口列の配置（ON で伸びた弧に合わせて配られたまま）の履歴差。
 
 
+
+## 2D の数値計算の点検 — 証明・厳密値・黙って失敗する箇所（2026-09-13）
+
+**測定条件** — ブラウザは使っていない。`tools/sim2d`（`RollingSim` を Node で回す。既定パラメータは
+`src/main.ts` の `params` をそのまま読む）、`tools/exact`（Lean 4 の有理数計算による参照値）、
+`tools/slab`、Node 24。
+
+### 厳密値との照合（`node tools/exact/check.mjs`）
+
+`tools/exact/ExactRef.lean` が ℚ で作った値と比べた。平行四辺形要素ではヤコビアンが一定で、SRI の
+被積分関数が多項式になるので、コードの 2×2 Gauss でも有理点の Simpson でも積分は厳密。
+
+```
+ 照合                                              結果
+ element.ts Q4 SRI 要素剛性 8×8                    max |ΔK|/max|K| 4.3e-16（厳密側: 対称・剛体 3 モードが核・ランク 5）
+ sparse.ts CSR 組立（4×2 要素のせん断した帯）      max |ΔK|/max|K| 1.5e-16、パターン外の非零 0
+ band.ts LDLᵀ（継ぎ目の無い帯 = 直接解法）         max |Δu|/max|u| 1.5e-13
+ pcgFiltered + 帯前処理（tol 1e-10）               1 反復、4.1e-14
+ pcgFiltered + Jacobi（tol 1e-14）                 27 反復、7.0e-15
+ （ハーネス校正）ν を 1% ずらした要素剛性           7.4e-3 で不一致を検出
+```
+
+ランク 5 は `element.ts` の冒頭にある「アワーグラス安定化なしでフルランク」の裏付け。同じ冒頭の
+「solver.ts の co-rotational 更新」は存在しないコードを指していたので直した（ロールは架台の座標系で
+解いており、回っても同じリング。回転は表面の模様にしか効かない）。
+
+### 式の検算（Lean、`docs/proofs/SlabFormulas.lean`）
+
+- Hitchcock の `R′ = R(1 + CP/Δh)` ⇔ `L² = RΔh + 4b²`（`b² = CRP/4`）。圧下ゼロで Hitchcock・Roberts とも
+  `L = 2b`。Roberts の弧 `b + √(b² + RΔh)` はどの圧下でも Hitchcock の弧以上（b > 0・Δh > 0 で真に長い）
+  — 上の「Roberts は既定運転点で弧 12.1 mm（Hitchcock 10.5）」の向きはどの条件でも成り立つ。
+  **b の係数が原著どおりかは依然として未照合**（式どうしの整合までしか示せない）
+- Bland & Ford: 出側枝と入側枝の比は `(h₀/h₁)(f_f/f_b)·e^{μ(2H−H₀)}` で kf にも h にもよらず H に狭義増加
+  なので、交点はただ 1 つで `H_n = H₀/2 + ln[(h₁/h₀)(f_b/f_f)]/(2μ)` そのもの
+- ひずみ平均 kf `L[(e₁+M)^{N+1} − (e₀+M)^{N+1}]/((N+1)(e₁−e₀))` は `(1/(e₁−e₀))∫L(e+M)^N de` に等しい（N > −1）
+
+### 黙って失敗し得た箇所
+
+- **ロールの弾性 PCG の結果を捨てていた**（`solveRoll`）。帯分解はリングの継ぎ目を落とすので本物の
+  反復で、上限 200 回がある。反復数と残差を `diag.rollCgIterations / rollCgResidual`（`__lab` にも）に
+  出すようにして測った: 既定・箔圧延・圧下率 45%・μ 0.2・ロール E 70 GPa・荷重一定 AGC で最大 11 回、
+  メッシュ「最高」で 15 回（900 フレーム）。今のところ無害だったが、見えていなかった。
+  `node tools/sim2d/solves.mjs` が上限到達を FAIL にする
+- **`MILL_SETTLED` の待ちは一度も効いていなかった**。700c5a2 でハウジング伸びが毎フレーム P/M そのものに
+  なり `millResidual` が恒等的に 0 になったため。待ちを外した（フィールドはトレース互換で残す）。
+  荷重一定・板厚一定・圧下率一定の AGC を 900 フレーム回した軌跡のハッシュは前後で一致
+- **ヘッドレスの `slabMethod` が張力を無視していた**。アプリはフックで `slab.ts` を呼ぶが、フックの無い
+  ソルバ（Node で直接回すとき）は素の kf と `exp(a)−1` の Siebel 式で、張力 200/100 MPa で 26% 高かった。
+  `slab.ts` `karman` と同じ式に（`node tools/slab/consistency.mjs`）
+- **Orowan の中立点の「交差なし」の分岐が到達不能だった**（`cross` の初期値が N）。入側に向かって両枝の差が
+  必ず縮むので補間が 1 に張り付き、結果は入側平面で正しかった — 偶然に頼っていたのを明示の分岐に。
+  交差なしの 37 パスで前後同じ値
+- `pcgFiltered` の説明が停止判定の残差を「真の残差」としていたが、漸化式で更新した残差（b − Az の
+  再計算ではない）。説明を直した
 
 ## スタンド間張力の動特性と張力制御（2026-09-12）
 
