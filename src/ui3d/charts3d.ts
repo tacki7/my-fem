@@ -7,6 +7,7 @@
 
 import type { Result3D, RollState } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
+import { onBearing } from '../sim3d/stack';
 import type { RingInfluence } from '../sim3d/ring';
 
 const FONT = '11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -406,6 +407,8 @@ export class FrontView {
         for (let s = s0; s < s1; s++) {
           const xa2 = Math.max(x0, R.x[s]), xb2 = Math.min(x1, R.x[s + 1]);
           if (xb2 <= xa2) continue;
+          // a segmented shaft shows bare between its bearing rings
+          if (d.bearingGap > 0 && !onBearing(d, 0.5 * (xa2 + xb2))) continue;
           const ya = cy - vAt(s) * mag * pxPerM, yb = cy - vAt(s + 1) * mag * pxPerM;
           const share = (0.5 * (loads[ri][s] + loads[ri][s + 1])) / qmax;
           ctx.fillStyle = share > 0.005 ? heat(share) : 'rgba(110,130,160,0.55)';

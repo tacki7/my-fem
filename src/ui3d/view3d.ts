@@ -12,7 +12,7 @@ import { StackSolver, WARNING_TEXT, type Warning3D } from '../sim3d/solver';
 import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
-import { el, section, slider, select, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
+import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
 import { LineChart, FrontView, EndView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
@@ -389,6 +389,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
       geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3));
       geoSec.body.append(num('bbLb', 'バッキング軸 支持長', 'mm', 500, 2500, 10, 1e-3));
+      geoSec.body.append(toggle('バッキング軸受を分割', params.bbSegmented, (v) => { params.bbSegmented = v; apply(); },
+        'ON: 軸受はサドル間ごとの独立したリング（サドル幅の隙間では接触しない）。OFF: 一本の連続胴として扱う。').root);
+      geoSec.body.append(num('bbGap', 'サドル幅（軸受間の隙間）', 'mm', 5, 120, 5, 1e-3, '隣り合う軸受リングの間で軸がむき出しになる幅。ここでは第 2 中間ロールと接触しない。'));
       geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 60, 1, Math.PI / 180, '鉛直からの角度。左右の中間ロールが触れ合わない最小角より小さければ、その最小角に引き上げられる（端面図に実際の角を表示）。'));
       geoSec.body.append(num('clearance', '隣接ロールのクリアランス', 'mm', 0.5, 20, 0.5, 1e-3, '同じ段に並ぶロール同士（第1中間の左右、第2中間、バッキング）に空ける隙間。'));
     }

@@ -21,7 +21,7 @@
 
 import type { Result3D } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
-import { onBarrel } from '../sim3d/stack';
+import { onBarrel, onBearing, saddleXs } from '../sim3d/stack';
 
 const HDR = '#version 300 es\nprecision highp float;\n';
 
@@ -358,9 +358,29 @@ export class StackView3D {
       const rings: Ring[] = [];
       const barrelRad = (s: number) => d.D / 2 + r.prof[s] * profMag;
       const chamfer = Math.min(0.012, d.D * 0.03);
+      // a segmented shaft: each gap edge gets a step ring pair (bearing
+      // radius down to the shaft and back), like the barrel ends
+      const gapEdges: { x: number; enter: boolean }[] = [];
+      if (d.bearingGap > 0) {
+        for (const xs of saddleXs(d)) {
+          const g0 = xs - d.bearingGap / 2, g1 = xs + d.bearingGap / 2;
+          if (g0 > x0 && g0 < x1) gapEdges.push({ x: g0, enter: true });
+          if (g1 > x0 && g1 < x1) gapEdges.push({ x: g1, enter: false });
+        }
+      }
       for (let s = r.ia; s <= r.ib; s++) {
         const x = R.x[s];
         const share = loads[ri][s] / qmax;
+        for (const ge of gapEdges) {
+          if (!(s > r.ia && ge.x > R.x[s - 1] && ge.x <= x)) continue;
+          if (ge.enter) {
+            rings.push({ x: ge.x, rad: barrelRad(s), s, col: heat(share), nx: 0 });
+            rings.push({ x: ge.x, rad: d.Dn / 2, s, col: NECK, nx: 0 });
+          } else {
+            rings.push({ x: ge.x, rad: d.Dn / 2, s, col: NECK, nx: 0 });
+            rings.push({ x: ge.x, rad: barrelRad(s), s, col: heat(share), nx: 0 });
+          }
+        }
         if (s > r.ia && x0 > R.x[s - 1] && x0 <= x) {
           rings.push({ x: x0, rad: d.Dn / 2, s, col: NECK, nx: 0 });
           rings.push({ x: x0, rad: barrelRad(s) - chamfer, s, col: STEEL, nx: -1 });
@@ -371,7 +391,7 @@ export class StackView3D {
           rings.push({ x: x1, rad: barrelRad(s) - chamfer, s, col: STEEL, nx: 1 });
           rings.push({ x: x1, rad: d.Dn / 2, s, col: NECK, nx: 0 });
         }
-        const onB = onBarrel(d, x);
+        const onB = onBearing(d, x);
         rings.push({ x, rad: onB ? barrelRad(s) : d.Dn / 2, s, col: onB ? heat(share) : NECK, nx: 0 });
       }
       const centre = (rg: Ring) => {
@@ -386,7 +406,7 @@ export class StackView3D {
       for (const rg of rings) {
         const c = centre(rg);
         const ids: number[] = [];
-        const onB = onBarrel(d, rg.x);
+        const onB = onBearing(d, rg.x);
         const kv = Number.isFinite(r.kv[rg.s]) ? r.kv[rg.s] : 0, kw = Number.isFinite(r.kw[rg.s]) ? r.kw[rg.s] : 0;
         const p0 = onB ? p0At(ri, rg.s) : 0;
         for (let k = 0; k < SEG; k++) {

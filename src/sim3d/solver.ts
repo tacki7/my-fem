@@ -26,7 +26,7 @@ import {
   sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
-  buildStack, radiusProfile, onBarrel, type Params3D, type Stack, type RollDef,
+  buildStack, radiusProfile, onBarrel, saddleXs, type Params3D, type Stack, type RollDef,
 } from './stack';
 
 const DOF = 4;
@@ -330,10 +330,7 @@ export class StackSolver {
       const ia = st(def.shift - def.Ls / 2), ib = st(def.shift + def.Ls / 2);
       const supports: number[] = [];
       if (def.support === 'saddle') {
-        for (let k = 0; k < def.saddles; k++) {
-          const t = def.saddles === 1 ? 0 : -1 + (2 * k) / (def.saddles - 1);
-          supports.push(st(def.shift + (t * def.Ls) / 2 * 0.92));
-        }
+        for (const xs of saddleXs(def)) supports.push(st(xs));
       } else {
         supports.push(ia, ib);
       }
@@ -389,8 +386,18 @@ export class StackSolver {
       const bb: [number, number] = [B.shift - B.Lb / 2, B.shift + B.Lb / 2];
       for (let s = 0; s < this.ns; s++) {
         const [c0, c1] = cell(s);
-        const lo = Math.max(c0, ba[0], bb[0]), hi = Math.min(c1, ba[1], bb[1]);
-        c.weight[s] = Math.max(0, hi - lo);
+        let lo = Math.max(c0, ba[0], bb[0]), hi = Math.min(c1, ba[1], bb[1]);
+        // a segmented backing shaft carries no contact in the gap at each
+        // saddle: the cell's overlap with the gaps is taken out
+        let w = Math.max(0, hi - lo);
+        for (const r of [A, B]) {
+          if (r.bearingGap <= 0 || w <= 0) continue;
+          for (const xs of saddleXs(r)) {
+            const g0 = xs - r.bearingGap / 2, g1 = xs + r.bearingGap / 2;
+            w -= Math.max(0, Math.min(hi, g1) - Math.max(lo, g0));
+          }
+        }
+        c.weight[s] = Math.max(0, w);
       }
     }
     for (const c of this.contacts) {

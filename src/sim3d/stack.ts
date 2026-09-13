@@ -63,6 +63,8 @@ export interface RollDef {
   asu?: number[];
   /** the beam section is the shaft, not the barrel (backing bearings on a shaft) */
   shaftBeam: boolean;
+  /** a shaft's barrel is a row of separate bearing rings: the axial gaps (saddle width) between them [m], 0 = one continuous barrel */
+  bearingGap: number;
   E: number;
   nu: number;
 }
@@ -122,8 +124,12 @@ export interface Params3D {
   irD: number; irLb: number; irLs: number; irDn: number;
   ir2D: number; ir2Lb: number;
   burD: number; burLb: number; burLs: number; burDn: number;
-  /** cluster: backing bearing diameter and shaft diameter */
+  /** cluster: backing bearing diameter, shaft diameter, shaft support length */
   bbD: number; bbShaft: number; bbLb: number;
+  /** the backing bearings as separate rings between the saddles (true) or one continuous barrel (false) */
+  bbSegmented: boolean;
+  /** saddle width, i.e. the axial gap between neighbouring bearing rings [m] */
+  bbGap: number;
   /** profiles [m], diameter crown */
   wrCrown: number; wrThermal: number; irCrown: number; burCrown: number;
   /** actuators */
@@ -176,6 +182,7 @@ export function defaultParams(mill: MillType): Params3D {
     ir2D: 0.175, ir2Lb: 1.5,
     burD: 1.3, burLb: 1.6, burLs: 2.35, burDn: 0.8,
     bbD: 0.3, bbShaft: 0.16, bbLb: 1.6,
+    bbSegmented: true, bbGap: 0.04,
     wrCrown: 0, wrThermal: 20e-6, irCrown: 0, burCrown: 0,
     wrBender: 0, irBender: 0, irShift: 0,
     taperShift: 0, taperLen: 0.3, taperDepth: 0.4e-3,
@@ -248,7 +255,7 @@ export function buildStack(p: Params3D): Stack {
   const roll = (o: Partial<RollDef> & { id: string; label: string; D: number; Lb: number; Ls: number }): RollDef => {
     const r: RollDef = {
       Dn: o.D * 0.6, cy: 0, cz: 0, shift: 0, crown: 0, thermal: 0, support: 'free',
-      benderForce: 0, saddles: ASU_RACKS, shaftBeam: false, E, nu, ...o,
+      benderForce: 0, saddles: ASU_RACKS, shaftBeam: false, bearingGap: 0, E, nu, ...o,
     };
     r.Dn = Math.min(r.Dn, r.D);
     return r;
@@ -322,7 +329,7 @@ export function buildStack(p: Params3D): Stack {
       const cC: Pt = [cA[0], -cA[1]];
       const bb = (id: string, label: string, c: Pt, asu?: number[]) => roll({
         id, label, D: p.bbD, Dn: p.bbShaft, Lb: p.bbLb, Ls: p.bbLb, cy: c[0], cz: c[1],
-        support: 'saddle', shaftBeam: true, asu,
+        support: 'saddle', shaftBeam: true, asu, bearingGap: p.bbSegmented ? p.bbGap : 0,
       });
       rolls.push(bb('BB-A', 'バッキング A', cA), bb('BB-B', 'バッキング B (AS-U)', cB, p.asu), bb('BB-C', 'バッキング C', cC));
       screwRolls.push(3, 4, 5);
@@ -378,7 +385,7 @@ export function buildStack(p: Params3D): Stack {
       const cD: Pt = [cA[0], -cA[1]];
       const bb = (id: string, label: string, c: Pt, asu?: number[]) => roll({
         id, label, D: p.bbD, Dn: p.bbShaft, Lb: p.bbLb, Ls: p.bbLb, cy: c[0], cz: c[1],
-        support: 'saddle', shaftBeam: true, asu,
+        support: 'saddle', shaftBeam: true, asu, bearingGap: p.bbSegmented ? p.bbGap : 0,
       });
       rolls.push(
         // double AS-U: one rack setting on the A-B pair, another on C-D
@@ -440,4 +447,26 @@ export function radiusProfile(r: RollDef, x: number): number {
 /** whether x (mill coordinates) is on the barrel of r */
 export function onBarrel(r: RollDef, x: number): boolean {
   return Math.abs(x - r.shift) <= r.Lb / 2;
+}
+
+/** the saddle positions of a shaft (mill coordinates), as the solver places them */
+export function saddleXs(r: RollDef): number[] {
+  const out: number[] = [];
+  for (let k = 0; k < r.saddles; k++) {
+    const t = r.saddles === 1 ? 0 : -1 + (2 * k) / (r.saddles - 1);
+    out.push(r.shift + ((t * r.Ls) / 2) * 0.92);
+  }
+  return out;
+}
+
+/**
+ * Whether x is on a bearing ring of r: on the barrel, and not inside the
+ * gap around a saddle where the shaft is bare. A roll with no gap is one
+ * continuous barrel.
+ */
+export function onBearing(r: RollDef, x: number): boolean {
+  if (!onBarrel(r, x)) return false;
+  if (r.bearingGap <= 0) return true;
+  for (const xs of saddleXs(r)) if (Math.abs(x - xs) < r.bearingGap / 2) return false;
+  return true;
 }
