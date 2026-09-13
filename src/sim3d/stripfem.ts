@@ -173,7 +173,14 @@ export class StripFem {
     const muRef = kfm / Math.max(epsRef, 1e-9);
     const KPEN = 60 * muRef;
     const vReg = 0.03 * V;
-    const KTIE = 1e3 * muRef * hm;
+    // The incoming strip is rigid: its entry nodes share one longitudinal
+    // speed. The tie that says so was 1e3 times the reference stiffness and
+    // let the entry speed spread across the width by 50-190 I-units in the
+    // plane FEM and by up to 2 % in the 3D one, which went straight into the
+    // elongation profile (185 I and 1250 I). At 1e6 the spread is gone and
+    // the profile matches a tie a hundred times stiffer; the Picard count
+    // does not change.
+    const KTIE = 1e6 * muRef * hm;
 
     const hb = 2 * rows + 3;
     const K = new BandMatrix(ndof, hb);
