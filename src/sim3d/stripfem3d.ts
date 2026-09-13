@@ -149,11 +149,13 @@ export class StripFem3D {
     const muRef = kfm / epsRef;
     // The incompressibility penalty. At 60 times the reference viscosity the
     // results were still moving with it like 1/K: the elongation profile sat
-    // 270-330 I-units and the load 0.4-0.9 % from the incompressible limit.
-    // At 6000 both are within 3 I-units and 0.01 %, and the Picard, PCG and
-    // factorisation counts are the same (the volumetric term is integrated
-    // at the element centre, so a stiff penalty does not lock).
-    const KPEN = 6000 * muRef;
+    // 270-330 I-units and the load 0.4-0.9 % from the incompressible limit,
+    // and on an extreme pass (12Hi, screw at 8 mm) the mass balance fell to
+    // 0.82. At 2000 they are within 10 I-units and 0.03 % with the same
+    // Picard, PCG and factorisation counts (the volumetric term is integrated
+    // at the element centre, so it does not lock). 6000 was 3 I-units closer
+    // but left that extreme pass's Picard unconverged at its cap.
+    const KPEN = 2000 * muRef;
     const hEl = (0.5 * hm) / ny;
     const KN = (200 * muRef) / Math.max(hEl, 1e-6);
     const vReg = 0.03 * V;
