@@ -248,11 +248,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const buildLeft = () => {
     left.replaceChildren();
     // presets
-    const preSec = section('プリセット', { open: true, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
+    const preSec = section('プリセット', { open: false, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
     preSec.body.append(buttonRow(PRESETS.map((pr) => ({ text: pr.name, title: pr.note, onClick: () => applyPreset(pr) }))));
     left.append(preSec.root);
     // mill type
-    const millSec = section('ミル形式', { open: true, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えるとロール寸法と圧延条件はその形式の既定値に戻る。' });
+    const millSec = section('ミル形式', { open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えるとロール寸法と圧延条件はその形式の既定値に戻る。' });
     const millRow = buttonRow(MILLS.map((m) => ({
       text: MILL_LABEL[m],
       onClick: () => { params = defaultParams(m); solver.setParams(params); dirty = true; running = true; buildLeft(); },
