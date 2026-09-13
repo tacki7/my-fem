@@ -327,6 +327,66 @@ function inhomogeneity(a: number): number {
   return 0.5 * (Math.sqrt(Math.max(0, 1 - aa * aa)) + Math.asin(aa) / aa);
 }
 
+/** w(1) = pi/4: the factor once the friction has reached the shear yield. */
+const W_STICK = inhomogeneity(1);
+
+/**
+ * The pressure p from Orowan's yield relation, held at zero or above:
+ *
+ *     p = max(q + w(a) kf, 0),    a = min(2 mu p / kf, 1)
+ *
+ * Sticking first: with a = 1 the relation is explicit, p = q + w(1) kf, and it
+ * is the answer whenever the friction that pressure would ask for reaches the
+ * shear yield.
+ *
+ * Otherwise the slipping root is bracketed and solved for, not iterated onto.
+ * w falls from 1 to pi/4 across [0, 1], so g(p) = p - max(q + w(a(p)) kf, 0)
+ * rises strictly, and it has exactly one root, between the sticking pressure
+ * and max(q + kf, 0) - for every mu >= 0 and kf > 0. That is proved, not
+ * sampled: `docs/proofs/Orowan.lean`, `pressure_existsUnique` and
+ * `residual_strictMonoOn`.
+ *
+ * This used to be the plain iteration p <- max(q + w(a(p)) kf, 0), started at
+ * the top of that bracket, 30 rounds, no flag. Its contraction factor is
+ * 2 mu |w'(a)|, and |w'| climbs to pi/4 as a -> 1 - so it contracts only for
+ * mu < 2/pi. The sticking test was said to exclude the corner where it fails;
+ * it excludes a = 1 at the sticking pressure, not a near 1 at the slipping
+ * root. Measured over q in [-kf, kf/2]: at mu 0.9 it fell into a two-cycle
+ * (0.535 / 0.558 kf against a root of 0.546), pressure off by up to 1.2e-2 kf
+ * at mu 0.8 and 3.6e-2 kf at mu 1.0, while under mu 0.5 it stayed within
+ * 1.4e-7 kf. The UI and `muFromLoad` both go up to MU_MAX = 1.
+ *
+ * The step is Newton's, since g' = 1 - 2 mu w'(a) sits in [1, 1 + mu pi/2]
+ * wherever the relation is live, with a bisection whenever it would leave the
+ * bracket. The slope only sets the speed: the bracket alone is what makes
+ * this converge, so an error in it could cost rounds but not the answer.
+ */
+export function orowanPressure(q: number, kf: number, mu: number): number {
+  // with no resistance the relation is p = q; the bracket below would be empty
+  if (!(kf > 0)) return Math.max(q, 0);
+  const stick = Math.max(q + W_STICK * kf, 0);
+  if (2 * mu * stick >= kf) return stick;
+  let lo = stick, hi = Math.max(q + kf, 0);
+  let p = hi;
+  for (let i = 0; i < 100 && hi - lo > 1e-12 * kf; i++) {
+    const a = Math.min(1, (2 * mu * p) / kf);
+    const w = inhomogeneity(a);
+    const t = q + w * kf;
+    const g = p - Math.max(t, 0);
+    if (g === 0) return p;
+    if (g > 0) hi = p; else lo = p;
+    // w' = (sqrt(1 - a^2) - w) / a, from (a w)' = sqrt(1 - a^2); 1 where the
+    // relation is clamped (t <= 0) or saturated (a = 1) and T does not move
+    const live = t > 0 && a < 1 && a >= 1e-6;
+    const dg = live ? 1 - (2 * mu * (Math.sqrt(1 - a * a) - w)) / a : 1;
+    let next = p - g / dg;
+    if (!(next > lo && next < hi)) next = 0.5 * (lo + hi);
+    if (Math.abs(next - p) <= 1e-12 * kf) return next;
+    p = next;
+  }
+  return 0.5 * (lo + hi);
+}
+
 /**
  * Orowan.
  *
@@ -372,29 +432,7 @@ function orowanBranches(p: RollingParams, c: SlabCase, mu: number, Rp: number) {
     hG[j] = hAt((j * dphi) / 2);
     kfG[j] = planeStrain(p, strainAt(c, hG[j]));
   }
-  const kStick = inhomogeneity(1);
-  /**
-   * p from q = p - w(a(p)) kf, a = min(2 mu p / kf, 1).
-   *
-   * Sticking first: with a = 1 the relation is explicit, p = q + w(1) kf,
-   * and it is the answer whenever the friction that pressure would ask for
-   * exceeds the shear yield. Otherwise the slipping relation is contracted
-   * onto: its factor is 2 mu |w'(a)|, small everywhere but at a -> 1, and
-   * that corner is exactly the one the sticking test has just excluded.
-   */
-  const pressureOf = (q: number, kfHere: number): number => {
-    const stick = Math.max(q + kStick * kfHere, 0);
-    if (2 * mu * stick >= kfHere) return stick;
-    let pp = Math.max(q + kfHere, 0);
-    for (let i = 0; i < 30; i++) {
-      const aa = Math.min(1, (2 * mu * pp) / kfHere);
-      const next = Math.max(q + inhomogeneity(aa) * kfHere, 0);
-      const done = Math.abs(next - pp) <= 1e-10 * kfHere;
-      pp = next;
-      if (done) break;
-    }
-    return pp;
-  };
+  const pressureOf = (q: number, kfHere: number): number => orowanPressure(q, kfHere, mu);
   // j indexes the half-step grid: phi = j dphi / 2
   const slope = (j: number, F: number, s: number): number => {
     const kfHere = kfG[j];
