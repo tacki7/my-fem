@@ -1654,23 +1654,24 @@ export class StackSolver {
       }
       if (r === this.stack.wr || r === this.wrLower) for (const sl of this.slices) fm = Math.max(fm, sl.flat);
       roll.flatMax = fm;
-      // curvature of the axis by central differences (the beam's bending
-      // stress on the barrel surface is E r κ), smoothed once
-      const dx2 = this.dx * this.dx;
-      const ww = (s: number) => (Number.isFinite(roll.w[s]) ? roll.w[s] : 0);
-      const kvRaw = new Float64Array(ns), kwRaw = new Float64Array(ns);
-      for (let s = roll.ia + 1; s < roll.ib; s++) {
-        kvRaw[s] = (vv(s + 1) - 2 * vv(s) + vv(s - 1)) / dx2;
-        kwRaw[s] = (ww(s + 1) - 2 * ww(s) + ww(s - 1)) / dx2;
-      }
+      // Bending curvature, for the fibre stress E r κ: the derivative of the
+      // section rotation, which is the beam element's rotational unknown. It
+      // used to be v'' by central differences, smoothed once - but v carries
+      // the shear deflection too, whose slope jumps at every concentrated
+      // force (a screw support, a saddle, a bender chock), and that jump read
+      // as a curvature spike: 247 MPa at a 4Hi backup roll's neck, where the
+      // moment from the support reaction gives about 54.
       roll.kv.fill(NaN); roll.kw.fill(NaN);
       let bm = 0;
       for (let s = roll.ia; s <= roll.ib; s++) {
-        const a = Math.max(roll.ia + 1, s - 1), b2 = Math.min(roll.ib - 1, s + 1);
-        let sv = 0, sw = 0, n = 0;
-        for (let k = a; k <= b2; k++) { sv += kvRaw[k]; sw += kwRaw[k]; n++; }
-        roll.kv[s] = n ? sv / n : 0; roll.kw[s] = n ? sw / n : 0;
-        const rad = onBarrel(d, this.x[s]) ? d.D / 2 : d.Dn / 2;
+        const a = Math.max(roll.ia, s - 1), b2 = Math.min(roll.ib, s + 1);
+        const span = (b2 - a) * this.dx;
+        roll.kv[s] = span > 0 ? (u[this.idx(b2, r, 1)] - u[this.idx(a, r, 1)]) / span : 0;
+        roll.kw[s] = span > 0 ? (u[this.idx(b2, r, 3)] - u[this.idx(a, r, 3)]) / span : 0;
+        // the fibre of the section that bends: a backing shaft bends as the
+        // shaft under its bearing rings (the rings carry none of it), so its
+        // stress is the shaft's - the ring radius overstated it by D/Dn
+        const rad = d.shaftBeam || !onBarrel(d, this.x[s]) ? d.Dn / 2 : d.D / 2;
         bm = Math.max(bm, d.E * rad * Math.hypot(roll.kv[s], roll.kw[s]));
       }
       roll.bendMax = bm;

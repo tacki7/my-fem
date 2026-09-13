@@ -422,7 +422,9 @@ export class StackView3D {
             // bending fibre stress on the surface: σ = −E r (κ_v cos θ + κ_w sin θ),
             // tension on the convex side; a contact line shows as a bright band
             // whose strength is the Hertz peak pressure there
-            const sig = -d.E * rg.rad * (kv * sign * ny + kw * nz);
+            // (a backing shaft's bearing rings carry no bending: the stress shown on them is the shaft's)
+            const fibre = d.shaftBeam ? d.Dn / 2 : rg.rad;
+            const sig = -d.E * fibre * (kv * sign * ny + kw * nz);
             col = diverge(sig / bendScale);
             if (p0 > 0) {
               // where the roll touches: the direction to each contact partner
