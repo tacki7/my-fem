@@ -580,18 +580,13 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
     {
       const f = R.fem;
-      const xs = R.x, arcs = R.arc;
-      // the FEM's grid: its columns are between the loaded stations; hand
-      // the heat map those stations' x and arcs
+      // the FEM's own grid: a column per slice, its node columns on the slices' edges
       if (f) {
-        const idx: number[] = [];
-        for (let s = 0; s < xs.length; s++) if (Number.isFinite(R.h1[s])) idx.push(s);
-        const fx = idx.map((s) => xs[s]), fa = idx.map((s) => arcs[s]);
-        charts.press.draw(f.p, f.ncol, f.nrow, fx, fa, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05 });
-        charts.flow.draw(f.ux, f.ncol, f.nrow, fx, fa, { unit: '%', scale: 100, halfWidth: strip * 1.05, symmetric: true });
+        charts.press.draw(f.p, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05 });
+        charts.flow.draw(f.ux, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: '%', scale: 100, halfWidth: strip * 1.05, symmetric: true });
       } else {
-        charts.press.draw(null, 0, 0, xs, arcs, { unit: 'MPa', scale: 1, halfWidth: strip });
-        charts.flow.draw(null, 0, 0, xs, arcs, { unit: '%', scale: 1, halfWidth: strip });
+        charts.press.draw(null, 0, 0, R.x, R.arc, { unit: 'MPa', scale: 1, halfWidth: strip });
+        charts.flow.draw(null, 0, 0, R.x, R.arc, { unit: '%', scale: 1, halfWidth: strip });
       }
     }
 

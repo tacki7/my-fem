@@ -4,10 +4,10 @@ import { sliceLoad, kfAt } from './build/strip.js';
 const law = { lmnL: 1200e6, lmnM: 0.01, lmnN: 0.255, E: 206e9, nu: 0.3, entryStrain: 0, mu: 0.06, tensionFeedback: true, R: 0.25, Eroll: 206e9, nuRoll: 0.3 };
 const nx = +(process.argv[2] ?? 35), nz = +(process.argv[3] ?? 8), ny = +(process.argv[4] ?? 2), mu = +(process.argv[5] ?? 0.06);
 const W = 1.0, h0 = 2e-3, h1 = 1.5e-3;
-const mk = () => ({ x: new Float64Array(nx), w: new Float64Array(nx), h0: new Float64Array(nx), h1: new Float64Array(nx), L: new Float64Array(nx), sigmaB: new Float64Array(nx), sigmaF: new Float64Array(nx) });
+const mk = () => ({ edges: Float64Array.from({ length: nx + 1 }, (_, i) => -W / 2 + (W * i) / nx), h0: new Float64Array(nx), h1: new Float64Array(nx), L: new Float64Array(nx), sigmaB: new Float64Array(nx), sigmaF: new Float64Array(nx) });
 const slab = sliceLoad({ ...law, mu }, h0, h1, 50e6, 80e6);
 const a = mk();
-for (let i = 0; i < nx; i++) { a.x[i] = -W / 2 + (W * (i + 0.5)) / nx; a.w[i] = W / nx; a.h0[i] = h0; a.h1[i] = h1; a.L[i] = slab.arc; a.sigmaB[i] = 50e6; a.sigmaF[i] = 80e6; }
+for (let i = 0; i < nx; i++) { a.h0[i] = h0; a.h1[i] = h1; a.L[i] = slab.arc; a.sigmaB[i] = 50e6; a.sigmaF[i] = 80e6; }
 const inp = { ...a, kf: (i, e) => kfAt(law, e), mu, nz, vRoll: 1 };
 const f2 = new StripFem(); const t0 = performance.now(); const r2 = f2.solve(inp); const ms2 = performance.now() - t0;
 const f3 = new StripFem3D(); const t1 = performance.now(); const r3 = f3.solve({ ...inp, ny }); const ms3 = performance.now() - t1;

@@ -33,7 +33,7 @@
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
-import { StripFem, type StripFemResult } from './stripfem';
+import { StripFem, atNodes, type StripFemResult } from './stripfem';
 import { StripFem3D } from './stripfem3d';
 import {
   sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
@@ -1158,9 +1158,27 @@ export class StackSolver {
     const n = this.slices.length;
     if (n === 0) return 0;
     if (!this.femRatio || this.femRatio.length !== n) { this.femRatio = new Float64Array(n).fill(1); this.femEps = new Float64Array(n); }
-    const x = new Float64Array(n), h0 = new Float64Array(n), h1 = new Float64Array(n);
+    const h0 = new Float64Array(n), h1 = new Float64Array(n);
     const L = new Float64Array(n), sB = new Float64Array(n), sF = new Float64Array(n);
     const qSlab = new Float64Array(n), epsSlab = new Float64Array(n);
+    // The FEM's columns are the slices, edge to edge: each slice's cell
+    // clipped to the strip. Its node columns used to sit at the slices'
+    // stations, so the mesh stopped at the edge stations and up to half a
+    // cell of the strip at each edge was not in it until the strip had
+    // widened far enough for the next station to take a slice; at that
+    // width a 4Hi's crown jumped by 11 µm and its latent flatness by 30 %.
+    // A sliver of an edge cell (the strip edge just past a cell boundary)
+    // is kept to a thousandth of a cell, so no element is degenerate.
+    const edges = new Float64Array(n + 1);
+    {
+      const half = p.width / 2;
+      edges[0] = Math.max(this.x[this.slices[0].s] - this.dx / 2, -half);
+      for (let i = 0; i < n; i++) edges[i + 1] = Math.min(this.x[this.slices[i].s] + this.dx / 2, half);
+      if (n > 1) {
+        edges[1] = Math.max(edges[1], edges[0] + 1e-3 * this.dx);
+        edges[n - 1] = Math.min(edges[n - 1], edges[n] - 1e-3 * this.dx);
+      }
+    }
     this.slices.forEach((sl, i) => {
       const g = this.gapAt(sl.s);
       // the slice as the coupled solve has it, flattened under the corrected
@@ -1168,9 +1186,9 @@ export class StackSolver {
       // new ratio is its load over the slab load at the same thickness
       const k = this.femRatio![i];
       const slab = this.sliceCore(sl, g, sigma[i], sl.q, k);
-      x[i] = sl.x; h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
+      h0[i] = sl.h0; h1[i] = slab.h1; L[i] = slab.arc;
       sB[i] = p.tensionFeedback ? p.backTension : 0; sF[i] = p.tensionFeedback ? sigma[i] : 0;
-      qSlab[i] = slab.q / k; epsSlab[i] = slab.q > 0 ? Math.log(sl.h0 / Math.max(slab.h1, 1e-9)) : 0;
+      qSlab[i] = slab.q / k; // a start for the slab load at the FEM column's state, below
     });
     let Lmax = 0, dhMax = 0;
     for (let i = 0; i < n; i++) { Lmax = Math.max(Lmax, L[i]); dhMax = Math.max(dhMax, h0[i] - h1[i]); }
@@ -1187,9 +1205,42 @@ export class StackSolver {
     // from it (a sliver swapped for the real arc at first contact made two
     // FEM solutions alternate on a 0.06 µm difference in thickness)
     for (let i = 0; i < n; i++) L[i] = Math.max(L[i], 0.05 * Lmax);
-    const femInput = { x, h0, h1, L, kf: (_i: number, e: number) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1 };
+    const femInput = { edges, h0, h1, L, kf: (_i: number, e: number) => kfAt(law, e0 + e), mu: p.mu, sigmaB: sB, sigmaF: sF, nz: p.stripNz, vRoll: 1 };
     const r = p.stripModel === 'fem3d' ? this.fem3d.solve({ ...femInput, ny: p.stripNy }) : this.fem.solve(femInput);
     this.femResult = r;
+    // The FEM is compared with the slab at the state its columns have: the
+    // slices' thicknesses read at the node columns and averaged over each
+    // column (see `atNodes`). Compared at each slice's own thickness, a
+    // slice thicker than its neighbours met a FEM column thinned by them,
+    // took a higher ratio, flattened more and came out thicker still - the
+    // ratio cancelled the slab's own stiffness against a zigzag, and next
+    // to a 4Hi's edge the exit thickness zigzagged by 20-30 µm from slice
+    // to slice.
+    const h0N = atNodes(edges, h0), h1N = atNodes(edges, h1);
+    const colDraft = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const h0c = 0.5 * (h0N[i] + h0N[i + 1]), h1c = 0.5 * (h1N[i] + h1N[i + 1]);
+      colDraft[i] = h0c - h1c;
+      qSlab[i] = h1c < h0c ? sliceLoad(law, h0c, h1c, p.backTension, sigma[i], qSlab[i]).q : 0;
+      epsSlab[i] = qSlab[i] > 0 ? Math.log(h0c / h1c) : 0;
+    }
+    // The load ratio is taken over a window a cell wide centred on the
+    // slice: inside the strip that is the slice's own column, and an edge
+    // slice narrower than a cell reaches into its neighbour. The FEM's load
+    // falls off at the free edge, and a sliver of an edge column averages
+    // only the fall: on a 4Hi its ratio was 0.58 at 0.9 mm wide against 1.08
+    // at a whole cell, and the flattening, local to each slice, left its
+    // exit thickness 170 µm under the whole cell's.
+    const kWin = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = 0.5 * (edges[i] + edges[i + 1]);
+      let a = 0, b = 0;
+      for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) {
+        const o = Math.min(c + 0.5 * this.dx, edges[j + 1]) - Math.max(c - 0.5 * this.dx, edges[j]);
+        if (o > 0 && r.q[j] > 0 && qSlab[j] > 0) { a += o * r.q[j]; b += o * qSlab[j]; }
+      }
+      kWin[i] = b > 0 ? a / b : 1;
+    }
     let change = 0;
     const target = new Float64Array(2 * n);
     for (let i = 0; i < n; i++) {
@@ -1207,8 +1258,8 @@ export class StackSolver {
       const sl = this.slices[i];
       const dhEl = (sl.h0 * kfMean(law, e0, e0 + 0.1) * (1 - law.nu * law.nu)) / law.E;
       const thr = Math.max(4 * dhEl, 0.005 * sl.h0);
-      const t = qSlab[i] > 0 ? Math.max(0, Math.min(1, (sl.h0 - h1[i] - thr) / thr)) : 0;
-      const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(FEM_RATIO_MIN, Math.min(FEM_RATIO_MAX, r.q[i] / qSlab[i])) : 1;
+      const t = qSlab[i] > 0 ? Math.max(0, Math.min(1, (colDraft[i] - thr) / thr)) : 0;
+      const kRaw = r.q[i] > 0 && qSlab[i] > 0 ? Math.max(FEM_RATIO_MIN, Math.min(FEM_RATIO_MAX, kWin[i])) : 1;
       const k = 1 + t * (kRaw - 1);
       const de = t * (r.eps[i] - epsSlab[i]);
       change = Math.max(change, Math.abs(k - this.femRatio[i]), Math.abs(de - this.femEps![i]) * AA_EPS_SCALE);

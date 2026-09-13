@@ -22,13 +22,13 @@
  * field on the roll face - so the coupling to the roll stack is the same
  * defect correction (see `femCorrection` in the solver).
  *
- * Cost: on the default 35 columns × 8 rows × 2 layers the system has ~2800
+ * Cost: on the default 35 columns × 8 rows × 2 layers the system has ~2900
  * unknowns in a band of ~90, one Cholesky a few milliseconds and a warm
  * solve a few Picard rounds; several times the plane FEM, still live.
  */
 
 import { BandMatrix } from './band';
-import { FLOW, tributary, type StripFemInput, type StripFemResult } from './stripfem';
+import { FLOW, atNodes, tributary, type StripFemInput, type StripFemResult } from './stripfem';
 
 export interface StripFem3DInput extends StripFemInput {
   /** element layers through the upper half of the thickness */
@@ -76,16 +76,19 @@ export class StripFem3D {
   stats = { picard: 0, factorizations: 0, pcgIterations: 0 };
 
   solve(inp: StripFem3DInput): StripFemResult {
-    const nx = inp.x.length, nz = Math.max(2, Math.round(inp.nz)), ny = Math.max(1, Math.round(inp.ny));
-    // what width each column of nodes stands for on this mesh (see `tributary`)
-    const trib = tributary(inp.x);
+    // nc columns of elements, nx node columns on their edges; the column
+    // values read at the nodes (see `atNodes`), and the width each node
+    // column stands for (see `tributary`)
+    const nc = inp.h0.length, nx = nc + 1, nz = Math.max(2, Math.round(inp.nz)), ny = Math.max(1, Math.round(inp.ny));
+    const xN = inp.edges, h0N = atNodes(xN, inp.h0), h1N = atNodes(xN, inp.h1), LN = atNodes(xN, inp.L);
+    const trib = tributary(xN);
     const rows = nz + 1, lay = ny + 1;
     const nn = nx * rows * lay;
     const ndof = 3 * nn;
     const node = (i: number, j: number, k: number) => (i * rows + j) * lay + k;
     const V = inp.vRoll;
-    const ne = (nx - 1) * nz * ny;
-    const nface = (nx - 1) * nz;
+    const ne = nc * nz * ny;
+    const nface = nc * nz;
     if (!this.u || this.nx !== nx || this.nz !== nz || this.ny !== ny) {
       this.u = new Float64Array(ndof);
       for (let n = 0; n < nn; n++) this.u[3 * n + 2] = V;
@@ -100,15 +103,15 @@ export class StripFem3D {
     // node coordinates: x at the columns, z along the arc, y up through the
     // upper half of the gap
     const X = new Float64Array(nn), Y = new Float64Array(nn), Z = new Float64Array(nn);
-    const hAt = (i: number, j: number) => { const t = 1 - j / nz; return inp.h1[i] + (inp.h0[i] - inp.h1[i]) * t * t; };
+    const hAt = (i: number, j: number) => { const t = 1 - j / nz; return h1N[i] + (h0N[i] - h1N[i]) * t * t; };
     for (let i = 0; i < nx; i++) {
       for (let j = 0; j < rows; j++) {
         const t = 1 - j / nz;
         const h = hAt(i, j);
         for (let k = 0; k < lay; k++) {
           const n = node(i, j, k);
-          X[n] = inp.x[i];
-          Z[n] = -t * inp.L[i];
+          X[n] = xN[i];
+          Z[n] = -t * LN[i];
           Y[n] = (0.5 * h * k) / ny;
         }
       }
@@ -135,15 +138,15 @@ export class StripFem3D {
     for (let e = 0; e < ne; e++) {
       const i = elCol[e], j = elRow[e];
       const h = 0.25 * (hAt(i, j) + hAt(i, j + 1) + hAt(i + 1, j) + hAt(i + 1, j + 1));
-      const h0 = 0.5 * (inp.h0[i] + inp.h0[i + 1]);
+      const h0 = 0.5 * (h0N[i] + h0N[i + 1]);
       const eps = (2 / Math.sqrt(3)) * Math.log(h0 / Math.max(h, 1e-9));
-      kfEl[e] = 0.5 * (inp.kf(i, eps) + inp.kf(Math.min(i + 1, nx - 1), eps));
+      kfEl[e] = inp.kf(i, eps);
     }
     // scales
     let Lm = 0, dhm = 0, hm = 0, kfm = 0;
-    for (let i = 0; i < nx; i++) { Lm += inp.L[i]; dhm += inp.h0[i] - inp.h1[i]; hm += inp.h1[i]; }
+    for (let i = 0; i < nc; i++) { Lm += inp.L[i]; dhm += inp.h0[i] - inp.h1[i]; hm += inp.h1[i]; }
     for (let e = 0; e < ne; e++) kfm += kfEl[e];
-    Lm /= nx; dhm /= nx; hm /= nx; kfm /= Math.max(ne, 1);
+    Lm /= nc; dhm /= nc; hm /= nc; kfm /= Math.max(ne, 1);
     const epsRef = Math.max((V * dhm) / (hm * Math.max(Lm, 1e-6)), 1e-3);
     const epsReg = 0.02 * epsRef;
     const muRef = kfm / epsRef;
@@ -233,18 +236,18 @@ export class StripFem3D {
       const i = Math.floor(m / rows), j = m % rows;
       sCol[m] = i; sRow[m] = j;
       const t = 1 - j / nz;
-      const L = inp.L[i];
+      const L = LN[i];
       // d(h/2)/dz on the parabola h = h1 + (h0 − h1) (z/L)², z = −tL
-      const dhdz = L > 0 ? (0.5 * 2 * (inp.h0[i] - inp.h1[i]) * (-t * L)) / (L * L) : 0;
+      const dhdz = L > 0 ? (0.5 * 2 * (h0N[i] - h1N[i]) * (-t * L)) / (L * L) : 0;
       const ia = Math.max(0, i - 1), ib = Math.min(nx - 1, i + 1);
-      const dhdx = ib > ia ? (0.5 * (hAt(ib, j) - hAt(ia, j))) / (inp.x[ib] - inp.x[ia]) : 0;
+      const dhdx = ib > ia ? (0.5 * (hAt(ib, j) - hAt(ia, j))) / (xN[ib] - xN[ia]) : 0;
       let nxv = -dhdx, nyv = 1, nzv = -dhdz;
       const nl = Math.hypot(nxv, nyv, nzv);
       nxv /= nl; nyv /= nl; nzv /= nl;
       sN[3 * m] = nxv; sN[3 * m + 1] = nyv; sN[3 * m + 2] = nzv;
       const tl = Math.hypot(dhdz, 1);
       sVr[3 * m] = 0; sVr[3 * m + 1] = (V * dhdz) / tl; sVr[3 * m + 2] = V / tl;
-      // tributary area: the column's share of the width on the mesh times half the row length on each side.
+      // tributary area: the node column's share of the width on the mesh times half the row length on each side.
       // It was half the slice width at an edge and the whole one inside, which at an edge is not what the
       // mesh gives the node: the constraint pressure there came out 1.75 (4Hi) and 2.7 (20Hi) times too high.
       const wx = trib[i];
@@ -361,12 +364,18 @@ export class StripFem3D {
           const n0 = node(i, j, 0);
           K.add(3 * n0 + 1, 3 * n0 + 1, BIG);
         }
-        const hIn = inp.h0[i] / 2, hOut = inp.h1[i] / 2;
+        // the tension force of each column on its half thickness, half to each of its edges
+        let fIn = 0, fOut = 0;
+        for (let c = Math.max(0, i - 1); c <= Math.min(nc - 1, i); c++) {
+          const w = 0.5 * (xN[c + 1] - xN[c]);
+          fIn += inp.sigmaB[c] * (inp.h0[c] / 2) * w;
+          fOut += inp.sigmaF[c] * (inp.h1[c] / 2) * w;
+        }
         for (let k = 0; k < lay; k++) {
           const nIn = node(i, 0, k), nOut = node(i, nz, k);
           const share = k === 0 || k === ny ? 0.5 / ny : 1 / ny;
-          rhs[3 * nIn + 2] -= inp.sigmaB[i] * hIn * trib[i] * share;
-          rhs[3 * nOut + 2] += inp.sigmaF[i] * hOut * trib[i] * share;
+          rhs[3 * nIn + 2] -= fIn * share;
+          rhs[3 * nOut + 2] += fOut * share;
           // the incoming strip is rigid across and along (u = 0, w tied);
           // its thickness velocity is left free - pinning v on the entry
           // face fought the roll-face constraint at the top node, where the
@@ -396,14 +405,17 @@ export class StripFem3D {
     // outputs per column: the load from the nodal normal forces, the face
     // pressure map from the node means, exit and entry velocities
     for (let m = 0; m < surf.length; m++) pFace[Math.min(pFace.length - 1, m)] = pNode[m];
-    const q = new Float64Array(nx), vExit = new Float64Array(nx), uExit = new Float64Array(nx), eps = new Float64Array(nx);
+    const q = new Float64Array(nc), vExit = new Float64Array(nc), uExit = new Float64Array(nc), eps = new Float64Array(nc);
     const pOut = new Float64Array(nface), uxOut = new Float64Array(nface);
-    // the load per unit width of a column: its nodes' vertical normal
-    // forces over the width they stand for on the mesh
+    // the load per unit width of a column: the vertical normal forces of the
+    // nodes on its two edges, each by the half column of its area that lies
+    // in this column, over the column's width - half of each node's force
+    // per unit of the width the node stands for
     for (let m = 0; m < surf.length; m++) {
       const i = sCol[m];
-      const wx = trib[i];
-      q[i] += (Math.max(pNode[m], 0) * sA[m] * sN[3 * m + 1]) / wx;
+      const f = (0.5 * Math.max(pNode[m], 0) * sA[m] * sN[3 * m + 1]) / trib[i];
+      if (i > 0) q[i - 1] += f;
+      if (i < nc) q[i] += f;
     }
     const pAt = (i: number, j: number) => pNode[i * rows + j];
     for (let i = 0; i < nx - 1; i++) {
@@ -414,25 +426,29 @@ export class StripFem3D {
         uxOut[i * nz + j] = ux;
       }
     }
+    // exit velocity at a node column: the mean of w through the thickness at
+    // the exit face (trapezoid); a column's, the mean of its two edges'
+    const wN = new Float64Array(nx), uN = new Float64Array(nx);
     for (let i = 0; i < nx; i++) {
-      // exit velocity: the mean of w through the thickness at the exit face (trapezoid)
       let s = 0, sx = 0, wsum = 0;
       for (let k = 0; k < lay; k++) {
         const m = node(i, nz, k);
         const wk = k === 0 || k === ny ? 0.5 : 1;
         s += wk * u[3 * m + 2]; sx += wk * u[3 * m]; wsum += wk;
       }
-      vExit[i] = s / wsum; uExit[i] = sx / wsum;
+      wN[i] = s / wsum; uN[i] = sx / wsum;
     }
     const vIn = u[3 * node(0, 0, 0) + 2];
     let flowIn = 0, flowOut = 0;
-    for (let i = 0; i < nx; i++) {
-      eps[i] = Math.log(Math.max(vExit[i], 1e-9) / Math.max(vIn, 1e-9));
-      flowIn += inp.h0[i] * vIn * trib[i];
-      flowOut += inp.h1[i] * vExit[i] * trib[i];
+    for (let c = 0; c < nc; c++) {
+      vExit[c] = 0.5 * (wN[c] + wN[c + 1]); uExit[c] = 0.5 * (uN[c] + uN[c + 1]);
+      eps[c] = Math.log(Math.max(vExit[c], 1e-9) / Math.max(vIn, 1e-9));
+      const w = xN[c + 1] - xN[c];
+      flowIn += 0.5 * w * (h0N[c] + h0N[c + 1]) * vIn;
+      flowOut += 0.5 * w * (h1N[c] * wN[c] + h1N[c + 1] * wN[c + 1]);
     }
     return {
-      q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nx - 1, nrow: nz,
+      q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
       massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged,
       debug: { sy: new Float64Array(0), sz: new Float64Array(0), sm: new Float64Array(0), div: new Float64Array(0), eq: new Float64Array(0) },
     };

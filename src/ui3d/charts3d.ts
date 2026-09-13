@@ -739,7 +739,7 @@ export class HeatChart {
       const r = 30 + 225 * Math.min(1, c * 1.5), g = 40 + 170 * (c < 0.6 ? c / 0.6 : 1) - 120 * Math.max(0, c - 0.6) / 0.4, b = 110 - 100 * c;
       return `rgb(${r | 0},${g | 0},${b | 0})`;
     };
-    // columns sit between strip stations; each row is a slice of the arc
+    // column c runs from x[c] to x[c + 1]; each row is a slice of the arc
     // from entry (top) to exit (bottom), the arc length its own per column
     let arcMax = 1e-9;
     for (let i = 0; i < x.length; i++) if (Number.isFinite(arc[i])) arcMax = Math.max(arcMax, arc[i]);

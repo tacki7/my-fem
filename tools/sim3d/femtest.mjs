@@ -3,14 +3,14 @@ import { sliceLoad, kfMean, kfAt } from './build/strip.js';
 const law = { lmnL: 1200e6, lmnM: 0.01, lmnN: 0.255, E: 206e9, nu: 0.3, entryStrain: 0, mu: 0.06, R: 0.25, Eroll: 206e9, nuRoll: 0.3 };
 const nx = +(process.argv[2] ?? 35), nz = +(process.argv[3] ?? 8), mu = +(process.argv[4] ?? 0.06);
 const W = 1.0, h0 = 2e-3, h1 = 1.5e-3;
-const x = new Float64Array(nx), w = new Float64Array(nx), H0 = new Float64Array(nx), H1 = new Float64Array(nx), L = new Float64Array(nx), sB = new Float64Array(nx), sF = new Float64Array(nx);
+const edges = Float64Array.from({ length: nx + 1 }, (_, i) => -W / 2 + (W * i) / nx), H0 = new Float64Array(nx), H1 = new Float64Array(nx), L = new Float64Array(nx), sB = new Float64Array(nx), sF = new Float64Array(nx);
 const slab = sliceLoad({ ...law, mu }, h0, h1, 50e6, 80e6);
-for (let i = 0; i < nx; i++) { x[i] = -W / 2 + (W * (i + 0.5)) / nx; w[i] = W / nx; H0[i] = h0; H1[i] = h1; L[i] = slab.arc; sB[i] = 50e6; sF[i] = 80e6; }
+for (let i = 0; i < nx; i++) { H0[i] = h0; H1[i] = h1; L[i] = slab.arc; sB[i] = 50e6; sF[i] = 80e6; }
 const fem = new StripFem();
 const t0 = performance.now();
-const r = fem.solve({ x, w, h0: H0, h1: H1, L, kf: (i, e) => kfAt(law, e), mu, sigmaB: sB, sigmaF: sF, nz, vRoll: 1 });
+const r = fem.solve({ edges, h0: H0, h1: H1, L, kf: (i, e) => kfAt(law, e), mu, sigmaB: sB, sigmaF: sF, nz, vRoll: 1 });
 const ms = performance.now() - t0;
-const t1 = performance.now(); const r2 = fem.solve({ x, w, h0: H0, h1: H1, L, kf: (i, e) => kfAt(law, e), mu, sigmaB: sB, sigmaF: sF, nz, vRoll: 1 }); const ms2 = performance.now() - t1;
+const t1 = performance.now(); const r2 = fem.solve({ edges, h0: H0, h1: H1, L, kf: (i, e) => kfAt(law, e), mu, sigmaB: sB, sigmaF: sF, nz, vRoll: 1 }); const ms2 = performance.now() - t1;
 const mid = Math.floor(nx / 2);
 console.log(`nx ${nx} nz ${nz} mu ${mu}: its ${r.iterations} conv ${r.converged} ${ms.toFixed(1)} ms (warm ${r2.iterations} its ${ms2.toFixed(1)} ms)`);
 console.log(`  slab q ${(slab.q / 1e6).toFixed(2)} kN/mm arc ${(slab.arc * 1e3).toFixed(1)} mm kfmean ${(slab.kf / 1e6).toFixed(0)} MPa`);

@@ -1,9 +1,10 @@
 /**
  * The strip in the bite as a thin-strip rigid-plastic FEM in plan view.
  *
- * The material between the rolls is meshed across the width (one column per
- * strip station of the roll model) and along the rolling direction (nz rows
- * from entry to exit), and solved for the steady velocity field u = (u_x,
+ * The material between the rolls is meshed across the width (one column of
+ * elements per strip slice of the roll model, from strip edge to strip edge,
+ * see `StripFemInput.edges`) and along the rolling direction (nz rows from
+ * entry to exit), and solved for the steady velocity field u = (u_x,
  * u_z) - the classical flow formulation the 2D tab uses, in the plane of
  * the strip rather than in its section. Through the thickness the velocity
  * is taken uniform (the strip is thin), and the thickness itself is not an
@@ -48,30 +49,49 @@ import { BandMatrix } from './band';
 /** uniaxial flow stress over plane-strain resistance, σ̄ = FLOW · kf (von Mises) */
 export const FLOW = Math.sqrt(3) / 2;
 
-/**
- * The width each column of nodes stands for on the mesh [m]: half the gap
- * to each neighbour, half the gap to the only one at an edge. Tractions and
- * flows per unit width turn into nodal forces and fluxes through this. The
- * slice widths used to be taken instead, and at an edge they differ - the
- * edge slice covers its whole cell's overlap with the strip, while the mesh
- * stops at the slice's centre - so the edge column was pulled by up to half
- * a cell's worth of tension it has no material for. Its elongation then
- * swung from −1143 to +2265 to −8516 I-units as the strip width went from
- * 1000 to 1015 to 1030 mm across one station.
- */
+/** the width each node column stands for [m], given the node columns' positions: half of each column of elements beside it */
 export function tributary(x: Float64Array): Float64Array {
   const n = x.length, out = new Float64Array(n);
   for (let i = 0; i < n; i++) out[i] = 0.5 * (x[Math.min(n - 1, i + 1)] - x[Math.max(0, i - 1)]);
   return out;
 }
 
+/**
+ * A per-column quantity (a thickness, an arc) at the node columns, which sit
+ * on the columns' edges: its mean over a window one column wide centred on
+ * the node, clipped to the mesh. Between two whole columns that is the mean
+ * of the two; at the strip edge it is the edge column's own value until that
+ * column is narrower than half a column, and then the window takes in the
+ * next one in proportion - so a sliver of a column coming onto the strip
+ * (its thickness read at a station half a column outside) moves the nodes
+ * only as much as its width.
+ */
+export function atNodes(edges: Float64Array, v: Float64Array): Float64Array {
+  const n = v.length, out = new Float64Array(n + 1);
+  let r = 0;
+  for (let i = 0; i < n; i++) r = Math.max(r, edges[i + 1] - edges[i]);
+  r *= 0.5;
+  for (let j = 0; j <= n; j++) {
+    const lo = edges[j] - r, hi = edges[j] + r;
+    let s = 0, w = 0;
+    for (let i = 0; i < n; i++) {
+      const o = Math.min(hi, edges[i + 1]) - Math.max(lo, edges[i]);
+      if (o > 0) { s += o * v[i]; w += o; }
+    }
+    out[j] = w > 0 ? s / w : v[Math.min(j, n - 1)];
+  }
+  return out;
+}
+
 export interface StripFemInput {
   /**
-   * column positions [m]. The mesh runs from the first to the last; what
-   * width a column stands for is what the mesh gives it (see `tributary`),
-   * not the width of the slice it came from.
+   * the columns' edges across the width [m], one more than there are
+   * columns: column i is the strip between edges[i] and edges[i + 1]. The
+   * mesh's node columns sit on the edges, so it spans the strip from edge to
+   * edge, and what it hands back for a column is that column's mean. The
+   * values per column below are read at the nodes by `atNodes`.
    */
-  x: Float64Array;
+  edges: Float64Array;
   /** entry and exit thickness per column [m] */
   h0: Float64Array;
   h1: Float64Array;
@@ -93,21 +113,24 @@ export interface StripFemInput {
 export interface StripFemResult {
   /** load per unit width per column [N/m] */
   q: Float64Array;
-  /** exit longitudinal velocity per column [m/s] */
+  /** exit longitudinal velocity per column, the column's mean [m/s] */
   vExit: Float64Array;
-  /** exit lateral velocity per column [m/s] (+ towards +x) */
+  /** exit lateral velocity per column, the column's mean [m/s] (+ towards +x) */
   uExit: Float64Array;
   /** entry velocity [m/s] */
   vIn: number;
   /** elongation per column, ln(vExit / vIn) */
   eps: Float64Array;
-  /** contact pressure at the element centres, row-major [column-1][row] [Pa] */
+  /** contact pressure at the element centres, row-major [column][row] [Pa] */
   p: Float64Array;
   /** lateral velocity at the element centres [m/s] */
   ux: Float64Array;
   /** element grid size */
   ncol: number;
   nrow: number;
+  /** the node columns' positions and arcs of contact [m], ncol + 1 of each */
+  xNode: Float64Array;
+  arcNode: Float64Array;
   /** mass-flow closure: exit / entry */
   massRatio: number;
   iterations: number;
@@ -128,8 +151,9 @@ export class StripFem {
   private nz = 0;
 
   solve(inp: StripFemInput): StripFemResult {
-    const nx = inp.x.length, nz = Math.max(2, Math.round(inp.nz));
-    const trib = tributary(inp.x);
+    // nc columns of elements, nx node columns on their edges
+    const nc = inp.h0.length, nx = nc + 1, nz = Math.max(2, Math.round(inp.nz));
+    const xN = inp.edges, h0N = atNodes(xN, inp.h0), h1N = atNodes(xN, inp.h1), LN = atNodes(xN, inp.L);
     const rows = nz + 1;
     const nn = nx * rows;
     const ndof = 2 * nn;
@@ -153,9 +177,9 @@ export class StripFem {
       for (let j = 0; j < rows; j++) {
         const t = 1 - j / nz; // 1 at entry, 0 at exit
         const n = node(i, j);
-        X[n] = inp.x[i];
-        Z[n] = -t * inp.L[i];
-        H[n] = inp.h1[i] + (inp.h0[i] - inp.h1[i]) * t * t;
+        X[n] = xN[i];
+        Z[n] = -t * LN[i];
+        H[n] = h1N[i] + (h0N[i] - h1N[i]) * t * t;
       }
     }
     // element connectivity, counter-clockwise in (x, z)
@@ -175,9 +199,9 @@ export class StripFem {
     for (let el = 0; el < ne; el++) {
       const i = Math.floor(el / nz);
       let h = 0, h0 = 0;
-      for (let k = 0; k < 4; k++) { const n = conn[4 * el + k]; h += H[n] / 4; h0 += inp.h0[Math.floor(n / rows)] / 4; }
+      for (let k = 0; k < 4; k++) { const n = conn[4 * el + k]; h += H[n] / 4; h0 += h0N[Math.floor(n / rows)] / 4; }
       eps0[el] = (2 / Math.sqrt(3)) * Math.log(h0 / Math.max(h, 1e-9));
-      kfEl[el] = 0.5 * (inp.kf(i, eps0[el]) + inp.kf(Math.min(i + 1, nx - 1), eps0[el]));
+      kfEl[el] = inp.kf(i, eps0[el]);
     }
     // the first iterate's friction needs a pressure to act on: the flow
     // stress is the right order, and a cold start from zero never moves
@@ -186,9 +210,9 @@ export class StripFem {
     // scales: a nominal strain rate and the viscosity it implies, off which
     // the regularisers and the penalty are set
     let Lm = 0, dhm = 0, hm = 0, kfm = 0;
-    for (let i = 0; i < nx; i++) { Lm += inp.L[i]; dhm += inp.h0[i] - inp.h1[i]; hm += inp.h1[i]; }
+    for (let i = 0; i < nc; i++) { Lm += inp.L[i]; dhm += inp.h0[i] - inp.h1[i]; hm += inp.h1[i]; }
     for (let el = 0; el < ne; el++) kfm += kfEl[el];
-    Lm /= nx; dhm /= nx; hm /= nx; kfm /= Math.max(ne, 1);
+    Lm /= nc; dhm /= nc; hm /= nc; kfm /= Math.max(ne, 1);
     const epsRef = Math.max((V * dhm) / (hm * Math.max(Lm, 1e-6)), 1e-3);
     const epsReg = 0.02 * epsRef;
     const muRef = kfm / Math.max(epsRef, 1e-9);
@@ -354,13 +378,18 @@ export class StripFem {
           }
         }
       }
-      // tensions as tractions on the entry and exit rows; the incoming strip
-      // rigid (u_x pinned, u_z tied between neighbours)
+      // tensions as tractions on the entry and exit rows, each column's force
+      // half to each of its edges; the incoming strip rigid (u_x pinned, u_z
+      // tied between neighbours)
       const BIG = 1e12 * muRef * hm;
+      for (let c = 0; c < nc; c++) {
+        const w = xN[c + 1] - xN[c];
+        const fB = 0.5 * inp.sigmaB[c] * inp.h0[c] * w, fF = 0.5 * inp.sigmaF[c] * inp.h1[c] * w;
+        rhs[2 * node(c, 0) + 1] -= fB; rhs[2 * node(c + 1, 0) + 1] -= fB;
+        rhs[2 * node(c, nz) + 1] += fF; rhs[2 * node(c + 1, nz) + 1] += fF;
+      }
       for (let i = 0; i < nx; i++) {
-        const n0 = node(i, 0), n1 = node(i, nz);
-        rhs[2 * n0 + 1] -= inp.sigmaB[i] * inp.h0[i] * trib[i];
-        rhs[2 * n1 + 1] += inp.sigmaF[i] * inp.h1[i] * trib[i];
+        const n0 = node(i, 0);
         K.add(2 * n0, 2 * n0, BIG);
         if (i < nx - 1) {
           const m0 = node(i + 1, 0);
@@ -377,8 +406,9 @@ export class StripFem {
       if (du < 1e-5 * Math.max(un, V)) { converged = true; break; }
     }
 
-    // outputs per column: load from the pressure, exit and entry velocities
-    const q = new Float64Array(nx), vExit = new Float64Array(nx), uExit = new Float64Array(nx), eps = new Float64Array(nx);
+    // outputs per column: the load from its elements' pressures, the exit
+    // velocity its two edges' mean, the entry velocity
+    const q = new Float64Array(nc), vExit = new Float64Array(nc), uExit = new Float64Array(nc), eps = new Float64Array(nc);
     const pOut = new Float64Array(ne), uxOut = new Float64Array(ne);
     for (let el = 0; el < ne; el++) {
       pOut[el] = pEl[el];
@@ -386,29 +416,25 @@ export class StripFem {
       for (let k = 0; k < 4; k++) ux += 0.25 * u[2 * conn[4 * el + k]];
       uxOut[el] = ux;
     }
-    for (let i = 0; i < nx; i++) {
-      // a column's load: the mean of the pressures of the elements on each
-      // side of it, over the rows, times the row length
-      let acc = 0;
-      for (let j = 0; j < nz; j++) {
-        let p = 0, cnt = 0;
-        if (i > 0) { p += pEl[(i - 1) * nz + j]; cnt++; }
-        if (i < nx - 1) { p += pEl[i * nz + j]; cnt++; }
-        acc += (cnt ? p / cnt : 0) * (inp.L[i] / nz);
-      }
-      q[i] = Math.max(acc, 0);
-      vExit[i] = u[2 * node(i, nz) + 1];
-      uExit[i] = u[2 * node(i, nz)];
-    }
     const vIn = u[2 * node(0, 0) + 1];
     let flowIn = 0, flowOut = 0;
-    for (let i = 0; i < nx; i++) {
-      eps[i] = Math.log(Math.max(vExit[i], 1e-9) / Math.max(vIn, 1e-9));
-      flowIn += inp.h0[i] * vIn * trib[i];
-      flowOut += inp.h1[i] * vExit[i] * trib[i];
+    for (let c = 0; c < nc; c++) {
+      // a column's load: its elements' pressures times their length along the arc
+      const dz = (0.5 * (LN[c] + LN[c + 1])) / nz;
+      let acc = 0;
+      for (let j = 0; j < nz; j++) acc += pEl[c * nz + j] * dz;
+      q[c] = Math.max(acc, 0);
+      const a = node(c, nz), b = node(c + 1, nz);
+      vExit[c] = 0.5 * (u[2 * a + 1] + u[2 * b + 1]);
+      uExit[c] = 0.5 * (u[2 * a] + u[2 * b]);
+      eps[c] = Math.log(Math.max(vExit[c], 1e-9) / Math.max(vIn, 1e-9));
+      // the flows through the mesh's own entry and exit edges
+      const w = xN[c + 1] - xN[c];
+      flowIn += 0.5 * w * (h0N[c] + h0N[c + 1]) * vIn;
+      flowOut += 0.5 * w * (h1N[c] * u[2 * a + 1] + h1N[c + 1] * u[2 * b + 1]);
     }
     return {
-      q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nx - 1, nrow: nz,
+      q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
       massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, debug: this.dbg,
     };
   }
