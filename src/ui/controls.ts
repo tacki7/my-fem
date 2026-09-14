@@ -1,5 +1,7 @@
 /** Small declarative widget kit for the parameter panels. */
 
+import { parseTyped, typedValue } from './typed';
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, cls?: string, text?: string,
 ): HTMLElementTagNameMap[K] {
@@ -218,36 +220,15 @@ export function slider(o: SliderOpts): SliderHandle {
   });
 
   /**
-   * Turn a number as the readout shows it back into the value behind it.
-   *
-   * The two are not the same number. A slider's range is in solver units -
-   * metres, pascals - while the readout is in the unit an operator uses, and
-   * `format` is what converts: the strip width dial runs 0.05..3 and prints
-   * 50..3000 mm. Typing 1450 into it has to mean 1.45 m, not a clamp to the
-   * 3 m rail.
-   *
-   * Rather than have every caller pass an inverse to keep in step with its
-   * formatter, the inverse is found by bisection on the formatter itself. That
-   * needs only monotonicity - it holds for a unit scale, a log axis, and any
-   * rounding a formatter applies - so a dial cannot end up with a conversion
-   * that disagrees with the one printing its own value.
+   * What a typed readout means for this dial. The readout is in the unit an
+   * operator uses and the range in solver units - the strip width dial runs
+   * 0.05..3 and prints 50..3000 mm, and typing 1450 into it has to mean
+   * 1.45 m - so the formatter is inverted rather than the text taken as the
+   * value. See `valueFromShown`.
    */
-  const unformat = (shown: number): number | null => {
-    const fLo = Number(fmt(o.min)), fHi = Number(fmt(o.max));
-    if (!Number.isFinite(fLo) || !Number.isFinite(fHi) || fLo === fHi) return null;
-    const up = fHi > fLo;
-    // Past either rail: take the rail. The repaint then shows what was taken.
-    if (up ? shown <= fLo : shown >= fLo) return o.min;
-    if (up ? shown >= fHi : shown <= fHi) return o.max;
-    let lo = o.min, hi = o.max;
-    for (let i = 0; i < 60; i++) {
-      const mid = (lo + hi) / 2;
-      const f = Number(fmt(mid));
-      if (!Number.isFinite(f)) return null;
-      if ((f < shown) === up) lo = mid; else hi = mid;
-    }
-    return (lo + hi) / 2;
-  };
+  const dial = { min: o.min, max: o.max, step: o.step, format: fmt };
+  /** the readout has been typed into since it was last painted or taken */
+  let edited = false;
 
   /**
    * Type a value instead of dragging for it.
@@ -258,12 +239,17 @@ export function slider(o: SliderOpts): SliderHandle {
    * showing the number, so it becomes the field that sets it.
    *
    * The unit is stripped, so the text the box itself printed is valid input.
+   * Nothing is taken from a box that was not typed into - the number it was
+   * handed on focus is the value rounded for display, and taking that back
+   * would move the value by up to half a rounding step - or from one that was
+   * emptied, which is not a zero.
    */
   const commit = () => {
-    const shown = Number(out.value.replace(/[^0-9eE+\-.]/g, ''));
-    const v = Number.isFinite(shown) ? unformat(shown) : null;
+    const shown = edited ? parseTyped(out.value) : null;
+    edited = false;
+    const v = shown === null ? null : typedValue(dial, shown);
     if (v === null) { paint(value); return; }
-    value = Math.max(o.min, Math.min(o.max, o.step ? Math.round(v / o.step) * o.step : v));
+    value = v;
     input.value = String(toPos(value));
     input.style.setProperty('--fill', `${(toPos(value) / N) * 100}%`);
     o.onInput(value);
@@ -304,11 +290,9 @@ export function slider(o: SliderOpts): SliderHandle {
     // Snapped to the step grid, so repeated presses land on round numbers
     // instead of drifting off whatever the dial happened to be sitting on.
     const next = Math.round(shown / st) * st + dir * st;
-    const v = unformat(Number(next.toPrecision(12)));
-    if (v === null) return;
-    const clamped = Math.max(o.min, Math.min(o.max, o.step ? Math.round(v / o.step) * o.step : v));
-    if (clamped === value) return;
-    value = clamped;
+    const v = typedValue(dial, Number(next.toPrecision(12)));
+    if (v === null || v === value) return;
+    value = v;
     input.value = String(toPos(value));
     paint(value);
     o.onInput(value);
@@ -316,16 +300,20 @@ export function slider(o: SliderOpts): SliderHandle {
   spinUp.addEventListener('click', () => nudge(1));
   spinDown.addEventListener('click', () => nudge(-1));
 
+  out.addEventListener('input', () => { edited = true; });
   out.addEventListener('change', commit);
   out.addEventListener('keydown', (e) => {
     const ev = e as KeyboardEvent;
     if (ev.key === 'Enter') { commit(); out.blur(); }
-    else if (ev.key === 'Escape') { paint(value); out.blur(); }
+    else if (ev.key === 'Escape') { edited = false; paint(value); out.blur(); }
     // The arrows work from the keyboard too, as they do on a number input.
+    // A typed number is taken first, so the step is from what was typed;
+    // an untouched box steps from the value itself (`commit` leaves it be).
     else if (ev.key === 'ArrowUp') { ev.preventDefault(); commit(); nudge(1); }
     else if (ev.key === 'ArrowDown') { ev.preventDefault(); commit(); nudge(-1); }
   });
   out.addEventListener('focus', () => {
+    edited = false;
     // Hand over the bare number: the unit is ours to add back.
     out.value = String(Number(fmt(value)));
     out.select();
@@ -458,12 +446,18 @@ export function numField(o: NumFieldOpts): NumFieldHandle {
   input.step = String(o.step ?? 1);
   const digits = o.digits ?? 1;
   const paint = (v: number) => { input.value = v.toFixed(digits); };
-  paint(o.value);
+  /** what the cell holds, so a rejected entry can put it back */
+  let current = o.value;
+  paint(current);
   const commit = () => {
-    let v = Number(input.value);
-    if (!Number.isFinite(v)) { paint(o.value); return; }
+    // An emptied cell is not a zero: `Number('')` is 0, which the clamp then
+    // turned into the minimum. A number input also reads '' for text it
+    // cannot parse.
+    let v = input.value.trim() === '' ? NaN : Number(input.value);
+    if (!Number.isFinite(v)) { paint(current); return; }
     if (o.min !== undefined) v = Math.max(o.min, v);
     if (o.max !== undefined) v = Math.min(o.max, v);
+    current = v;
     paint(v);
     o.onChange(v);
   };
@@ -473,6 +467,6 @@ export function numField(o: NumFieldOpts): NumFieldHandle {
   });
   return {
     root: input,
-    set(v: number) { if (document.activeElement !== input) paint(v); },
+    set(v: number) { current = v; if (document.activeElement !== input) paint(v); },
   };
 }
