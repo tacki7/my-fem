@@ -49,7 +49,10 @@ try {
   // --- 3D ---------------------------------------------------------------------
   const before = c.errors.length;
   await c.navigate(`${base}/?tab=3d`);
-  await c.waitFor('window.__v3 && window.__v3.solver', 60000);
+  // a boolean, not the solver: returned by value the solver is 0.9 MB at 81 stations and 8.5 MB at
+  // 301 (4Hi), and at 301 the DevTools socket closed (1006) before it arrived - the run then ended on
+  // the unsettled await with no FAIL line
+  await c.waitFor('!!(window.__v3 && window.__v3.solver)', 60000);
   const r3 = await c.evaluate(`(() => {
     const s = window.__v3.solver, t0 = performance.now();
     let calls = 0;
