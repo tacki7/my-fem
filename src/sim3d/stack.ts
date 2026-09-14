@@ -200,8 +200,10 @@ export interface Params3D {
   /** roll material */
   Eroll: number;
   nuRoll: number;
-  /** stations across the widest roll */
+  /** stations across the widest roll: the count of an even grid, and the spacing off the strip when the strip has its own (see `grid.ts`) */
   stations: number;
+  /** stations on the strip: 0 spaces them with the rest, N > 0 tiles the strip with N cells of its own (odd, 3 or more; see `grid.ts`) */
+  stripStations: number;
   /** how the strip is solved: slab passes per slice, the plan-view rigid-plastic FEM (stripfem.ts), or the three-dimensional one (stripfem3d.ts) */
   stripModel: 'slab' | 'fem' | 'fem3d';
   /** rows along the rolling direction of the strip FEMs */
@@ -254,7 +256,7 @@ export function defaultParams(mill: MillType): Params3D {
     angle1: (24 * Math.PI) / 180,
     clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
-    stations: 81,
+    stations: 81, stripStations: 0,
     stripModel: 'fem', stripNz: 8, stripNy: 2,
     flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
   };

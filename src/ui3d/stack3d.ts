@@ -22,6 +22,7 @@
 import type { Result3D } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
 import { onBarrel, onBearing, saddleXs } from '../sim3d/stack';
+import { nearestStation } from '../sim3d/grid';
 
 const HDR = '#version 300 es\nprecision highp float;\n';
 
@@ -298,7 +299,7 @@ export class StackView3D {
     const b = new Builder();
     const rolls = R.rolls;
     const mag = o.magnify;
-    const dx = R.x[1] - R.x[0];
+    const ns = R.x.length;
 
     const loadOn = (ri: number): Float64Array => {
       const acc = new Float64Array(R.x.length);
@@ -395,10 +396,12 @@ export class StackView3D {
         rings.push({ x, rad: onB ? barrelRad(s) : d.Dn / 2, s, col: onB ? heat(share) : NECK, nx: 0 });
       }
       const centre = (rg: Ring) => {
-        const t = (rg.x - R.x[rg.s]) / dx;
-        const s2 = Math.max(r.ia, Math.min(r.ib, rg.s + (t < 0 ? -1 : 1)));
-        const v = vAt(rg.s) + Math.abs(t) * (vAt(s2) - vAt(rg.s));
-        const w = wAt(rg.s) + Math.abs(t) * (wAt(s2) - wAt(rg.s));
+        // linear between the ring's station and the neighbour on its side (the stations need not be evenly spaced)
+        const s2 = Math.max(r.ia, Math.min(r.ib, rg.s + (rg.x < R.x[rg.s] ? -1 : 1)));
+        const gap = Math.abs(R.x[s2] - R.x[rg.s]);
+        const t = gap > 0 ? Math.abs(rg.x - R.x[rg.s]) / gap : 0;
+        const v = vAt(rg.s) + t * (vAt(s2) - vAt(rg.s));
+        const w = wAt(rg.s) + t * (wAt(s2) - wAt(rg.s));
         return [rg.x, sign * (d.cy + v * mag), d.cz + w * mag];
       };
       let prev: number[] | null = null;
@@ -463,7 +466,7 @@ export class StackView3D {
           const oy = sign * d.cy, oz = d.cz;
           const on = Math.hypot(oy, oz) || 1;
           const uy = oy / on, uz = oz / on;
-          const r0 = d.D / 2 * 0.98, r1 = d.D / 2 * 1.12, hw = Math.max(0.01, dx * 0.5), t = d.D * 0.16;
+          const r0 = d.D / 2 * 0.98, r1 = d.D / 2 * 1.12, hw = Math.max(0.01, 0.25 * (R.x[Math.min(s + 1, ns - 1)] - R.x[Math.max(s - 1, 0)])), t = d.D * 0.16;
           const p0 = [c[0], c[1] + uy * r0, c[2] + uz * r0], p1 = [c[0], c[1] + uy * r1, c[2] + uz * r1];
           // an axis-aligned block spanning the two points, thin across
           box(b, [p0[0] - hw, Math.min(p0[1], p1[1]) - t * Math.abs(uz), Math.min(p0[2], p1[2]) - t * Math.abs(uy)],
@@ -578,7 +581,7 @@ export class StackView3D {
     for (const r of rolls) {
       const d = r.def;
       const { v: vAt, w: wAt } = rel(r);
-      const dash = 3 * dx;
+      const dash = (3 * (R.x[ns - 1] - R.x[0])) / (ns - 1);
       let pen = false, x0 = 0, y0 = 0, z0 = 0, run = 0;
       for (let s = r.ia; s <= r.ib; s++) {
         const x = R.x[s], y = d.cy + vAt(s) * mag, z = d.cz + wAt(s) * mag;
@@ -611,7 +614,7 @@ export class StackView3D {
       const d = r.def;
       const side = ri % 2 === 0 ? 1 : -1;
       const x = d.shift + side * (d.Lb / 2 - 0.08 * d.Lb);
-      const s = Math.max(r.ia, Math.min(r.ib, Math.round((x - R.x[0]) / dx)));
+      const s = Math.max(r.ia, Math.min(r.ib, nearestStation(R.x, x)));
       const { v, w } = rel(r);
       return { x, y: d.cy + v(s) * mag + d.D / 2 * 0.3, z: d.cz + w(s) * mag + d.D / 2, text: o.labels[ri] ?? d.id };
     });

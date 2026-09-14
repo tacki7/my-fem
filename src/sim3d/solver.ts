@@ -7,10 +7,11 @@
  * and the picture is live; a change to any input just makes the next
  * iterations move. Unknowns are the nodal displacements of every roll,
  * (v, θ_v, w, θ_w) at each station - deflection and slope in the vertical
- * plane and across the pass line. All rolls share one grid of stations, so
- * a contact between two rolls couples only the two nodes at the same
- * station, and numbering station by station keeps the whole system inside a
- * band a few hundred wide (see `band.ts`). A vertical stack (2Hi, 4Hi, 6Hi)
+ * plane and across the pass line. All rolls share one grid of stations - even,
+ * or finer on the strip (see `grid.ts`) - so a contact between two rolls
+ * couples only the two nodes at the same station, and numbering station by
+ * station keeps the whole system inside a band a few hundred wide (see
+ * `band.ts`). A vertical stack (2Hi, 4Hi, 6Hi)
  * has no contact that couples the two planes, so its v and w unknowns are
  * numbered as two separate blocks, each station by station: the band is
  * then half as wide and the factorisation a quarter of the work.
@@ -31,6 +32,7 @@
  */
 
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
+import { stationGrid, nearestStation, type StationGrid } from './grid';
 import { housingCompliance, halfStiffness, sideStiffness, housingPlan } from './housing';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
@@ -337,7 +339,12 @@ export class StackSolver {
   p: Params3D;
   stack!: Stack;
   x!: Float64Array;
+  /** the station spacing: off the strip, when the strip has its own (see `grid.ts`) */
   dx = 0;
+  /** the stations' cells and element lengths (see `grid.ts`) */
+  grid!: StationGrid;
+  /** per unknown: the length a slope is scaled by in the step clip, its station's cell width (see `iterate`) */
+  private slopeLen!: Float64Array;
   ns = 0;
   nr = 0;
   /** every roll solved: the upper half, then the lower half's when there is one (`upper` of them are the upper half's) */
@@ -464,11 +471,11 @@ export class StackSolver {
     let half = 0;
     for (const r of rolls) half = Math.max(half, r.Ls / 2 + Math.abs(r.shift), r.Lb / 2 + Math.abs(r.shift));
     half = Math.max(half, p.width / 2 * 1.05);
-    this.ns = Math.max(11, Math.round(p.stations) | 1);
+    this.grid = stationGrid(half, p.stations, p.width, p.stripStations);
+    this.x = this.grid.x;
+    this.ns = this.x.length;
     this.nr = rolls.length;
-    this.dx = (2 * half) / (this.ns - 1);
-    this.x = new Float64Array(this.ns);
-    for (let s = 0; s < this.ns; s++) this.x[s] = -half + s * this.dx;
+    this.dx = this.grid.dx;
     const n = this.ns * this.nr * DOF;
     this.planes = full.contacts.every((c) => Math.abs(c.nz) < 1e-12);
     this.vEnd = this.planes ? this.ns * this.nr * 2 : n;
@@ -481,6 +488,13 @@ export class StackSolver {
     this.bScrew = new Float64Array(n);
     this.x2 = new Float64Array(n);
     this.duPlain = new Float64Array(n);
+    this.slopeLen = new Float64Array(n);
+    for (let s = 0; s < this.ns; s++) {
+      for (let r = 0; r < this.nr; r++) {
+        this.slopeLen[this.idx(s, r, 1)] = this.grid.cellW[s];
+        this.slopeLen[this.idx(s, r, 3)] = this.grid.cellW[s];
+      }
+    }
     // The screw carries over as a warm start for a changed dimension, but
     // not to another mill type: a 4Hi's 2.5 mm closure driven into a 20Hi
     // stack starts the search deep in a closed gap.
@@ -525,8 +539,9 @@ export class StackSolver {
     this.result = this.emptyResult();
   }
 
-  private stationOf = (x: number): number =>
-    Math.max(0, Math.min(this.ns - 1, Math.round((x - this.x[0]) / this.dx)));
+  private stationOf = (x: number): number => (this.grid.uniform
+    ? Math.max(0, Math.min(this.ns - 1, Math.round((x - this.x[0]) / this.dx)))
+    : nearestStation(this.x, x));
 
   /** things that change without changing the mesh: profiles, strip width, laws */
   private refreshProfiles(): void {
@@ -546,7 +561,7 @@ export class StackSolver {
         r.barrel[s] = onBarrel(r.def, this.x[s]) ? 1 : 0;
       }
     });
-    const cell = (s: number): [number, number] => [this.x[s] - this.dx / 2, this.x[s] + this.dx / 2];
+    const cell = (s: number): [number, number] => [this.grid.cellL[s], this.grid.cellR[s]];
     const overlap = (a: [number, number], b: [number, number]) =>
       Math.max(0, Math.min(a[1], b[1]) - Math.max(a[0], b[0]));
     for (const c of this.contacts) {
@@ -692,7 +707,7 @@ export class StackSolver {
       const R = rolls[r];
       const E = R.def.E, G = E / (2 * (1 + R.def.nu));
       for (let s = R.ia; s < R.ib; s++) {
-        const L = this.dx;
+        const L = this.grid.elemL[s];
         const D = this.beamDiameter(R, 0.5 * (this.x[s] + this.x[s + 1]));
         const I = (Math.PI * D ** 4) / 64, A = (Math.PI * D * D) / 4;
         const phi = (12 * E * I) / (KAPPA * G * A * L * L);
@@ -724,7 +739,7 @@ export class StackSolver {
         for (let d = 0; d < DOF; d++) {
           const i = this.idx(s, r, d);
           if (!inside) { addK(i, i, 1); rhs[i] = -u[i]; continue; }
-          const k = d === 0 || d === 2 ? K_REG : K_REG * this.dx * this.dx;
+          const k = d === 0 || d === 2 ? K_REG : K_REG * this.grid.cellW[s] * this.grid.cellW[s];
           addK(i, i, k); rhs[i] -= k * u[i];
         }
       }
@@ -937,8 +952,8 @@ export class StackSolver {
     const search = (step: Float64Array, ds: number) => {
       let mx = Math.abs(ds);
       for (let i = 0; i < step.length; i++) {
-        // slopes are scaled by dx so the clip means the same thing for them
-        const d = i % 2 === 0 ? step[i] : step[i] * this.dx;
+        // slopes are scaled by their station's cell so the clip means the same thing for them
+        const d = i % 2 === 0 ? step[i] : step[i] * this.slopeLen[i];
         mx = Math.max(mx, Math.abs(d));
       }
       const clip = mx > STEP_CLIP ? STEP_CLIP / mx : 1;
@@ -1210,11 +1225,12 @@ export class StackSolver {
     const edges = new Float64Array(n + 1);
     {
       const half = p.width / 2;
-      edges[0] = Math.max(this.x[this.slices[0].s] - this.dx / 2, -half);
-      for (let i = 0; i < n; i++) edges[i + 1] = Math.min(this.x[this.slices[i].s] + this.dx / 2, half);
+      const { cellL, cellR, cellW } = this.grid;
+      edges[0] = Math.max(cellL[this.slices[0].s], -half);
+      for (let i = 0; i < n; i++) edges[i + 1] = Math.min(cellR[this.slices[i].s], half);
       if (n > 1) {
-        edges[1] = Math.max(edges[1], edges[0] + 1e-3 * this.dx);
-        edges[n - 1] = Math.min(edges[n - 1], edges[n] - 1e-3 * this.dx);
+        edges[1] = Math.max(edges[1], edges[0] + 1e-3 * cellW[this.slices[0].s]);
+        edges[n - 1] = Math.min(edges[n - 1], edges[n] - 1e-3 * cellW[this.slices[n - 1].s]);
       }
     }
     this.slices.forEach((sl, i) => {
@@ -1271,10 +1287,10 @@ export class StackSolver {
     // exit thickness 170 µm under the whole cell's.
     const kWin = new Float64Array(n);
     for (let i = 0; i < n; i++) {
-      const c = 0.5 * (edges[i] + edges[i + 1]);
+      const c = 0.5 * (edges[i] + edges[i + 1]), hw = 0.5 * this.grid.cellW[this.slices[i].s];
       let a = 0, b = 0;
       for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) {
-        const o = Math.min(c + 0.5 * this.dx, edges[j + 1]) - Math.max(c - 0.5 * this.dx, edges[j]);
+        const o = Math.min(c + hw, edges[j + 1]) - Math.max(c - hw, edges[j]);
         if (o > 0 && r.q[j] > 0 && qSlab[j] > 0) { a += o * r.q[j]; b += o * qSlab[j]; }
       }
       kWin[i] = b > 0 ? a / b : 1;
@@ -1420,14 +1436,14 @@ export class StackSolver {
     this.slices.forEach((sl, i) => { w[i] = sl.weight; ws += w[i]; });
     // lateral flow: a slice cannot be much longer than its neighbours over a
     // distance of a few thicknesses - smooth the differential over lateralLen
-    // The smoothing never falls under one station spacing: slices coupled
+    // The smoothing never falls under the strip's station spacing: slices coupled
     // only through the mean tension can settle into a checkerboard (thin
     // and tense, thick and slack, alternating) that the model has no
     // lateral stiffness to resist, and a kernel narrower than the spacing
     // couples no neighbours at all.
     const S = new Float64Array(n * n);
-    const sig = Math.max(p.lateralLen, this.dx);
-    const rad = sig > 0 ? Math.ceil((3 * sig) / this.dx) : 0;
+    const sig = Math.max(p.lateralLen, this.grid.dxStrip);
+    const rad = sig > 0 ? Math.ceil((3 * sig) / this.grid.dxStrip) : 0;
     for (let i = 0; i < n; i++) {
       let norm = 0;
       for (let j = Math.max(0, i - rad); j <= Math.min(n - 1, i + rad); j++) {
@@ -1896,7 +1912,7 @@ export class StackSolver {
       let bm = 0;
       for (let s = roll.ia; s <= roll.ib; s++) {
         const a = Math.max(roll.ia, s - 1), b2 = Math.min(roll.ib, s + 1);
-        const span = (b2 - a) * this.dx;
+        const span = this.grid.uniform ? (b2 - a) * this.dx : this.x[b2] - this.x[a];
         roll.kv[s] = span > 0 ? (u[this.idx(b2, r, 1)] - u[this.idx(a, r, 1)]) / span : 0;
         roll.kw[s] = span > 0 ? (u[this.idx(b2, r, 3)] - u[this.idx(a, r, 3)]) / span : 0;
         // the fibre of the section that bends: a backing shaft bends as the
@@ -2117,7 +2133,7 @@ export class StackSolver {
 /** the inputs whose change means a new mesh */
 function geometryKey(p: Params3D): string {
   return [
-    p.mill, p.stations, p.wrLb, p.wrLs, p.irLb, p.irLs, p.ir2Lb, p.burLb, p.burLs, p.bbLb,
+    p.mill, p.stations, p.stripStations, p.wrLb, p.wrLs, p.irLb, p.irLs, p.ir2Lb, p.burLb, p.burLs, p.bbLb,
     p.width, p.irShift, p.wrD, p.irD, p.ir2D, p.burD, p.bbD, p.angle1, p.mode,
   ].join('|');
 }
