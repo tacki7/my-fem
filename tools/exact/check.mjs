@@ -5,6 +5,9 @@
 // reference.json is written by ExactRef.lean (Lean 4, all arithmetic in ℚ):
 //   cd <lean project> && lake env lean ExactRef.lean > <my-fem>/tools/exact/reference.json
 // See README.md for what it computes and why the numbers are exact.
+//
+// @check
+// @check-build sim2d
 import { readFileSync } from 'node:fs';
 import { precomputeElements, assembleStiffness } from '../sim2d/build/sim/element.js';
 import { buildCsrPattern, pcgFiltered, makePcgWorkspace } from '../sim2d/build/sim/sparse.js';

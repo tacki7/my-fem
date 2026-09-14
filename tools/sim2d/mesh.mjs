@@ -4,6 +4,9 @@
 //   node tools/sim2d/mesh.mjs [older build dir]     (exit 1 on FAIL)
 //
 // With an older build it also lists, per case, how far the radii moved.
+//
+// @check
+// @check-build sim2d
 import { defaultParams } from './params.mjs';
 import { radialStations } from './build/sim/mesh.js';
 

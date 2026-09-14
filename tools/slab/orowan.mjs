@@ -3,6 +3,9 @@
 //
 //   node tools/slab/orowan.mjs                 checks only (exit 1 on FAIL)
 //   node tools/slab/orowan.mjs <before-build>  also the load table against an older build
+//
+// @check
+// @check-build slab
 import { orowanPressure } from './build/sim/slab.js';
 import { slabLoad, muFromLoad, MU_MIN, MU_MAX } from './build/sim/muinv.js';
 

@@ -9,6 +9,9 @@
 //    combination of a set of values per key, the two agree except where the old
 //    one was wrong (a prototype key accepted as a mesh preset).
 // 3. The tab rule and the gauge schedule `?h1=` seeds.
+//
+// @check
+// @check-build --out tools/app/build src/app/query.ts
 import { parseQuery, startIn3d, gaugeSchedule } from './build/app/query.js';
 
 let failed = 0;

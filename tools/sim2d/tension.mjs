@@ -5,6 +5,9 @@
 // dΔv/dT is rebuilt here from slab.ts (same construction as speedSensitivity) with its
 // sign, over a grid of pairs of passes, and compared with what the library returns:
 // the library's value must be −dΔv/dT where that is positive, NaN where it is not.
+//
+// @check
+// @check-build sim2d
 import { defaultParams } from './params.mjs';
 import { slabPointAt } from './build/sim/slab.js';
 import { speedSensitivity } from './build/sim/tension.js';

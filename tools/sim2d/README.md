@@ -3,8 +3,9 @@
 ブラウザ無しで `RollingSim`（と 3 スタンドの `Mill`）を回す。既定パラメータは `src/main.ts` の `params` を
 そのまま読み出す（`params.mjs`）ので、アプリと同じ条件になる。
 
-2D の回帰関門は `npm run check` 1 つにまとめてある（型検査・下のビルド・ここの 3 本・`tools/exact`・
-`tools/slab` を直列に実行し、どれか FAIL で非 0）。個別に回すときは:
+2D の回帰関門は `npm run check` 1 つにまとめてある（型検査・下のビルド・`// @check` の印が付いたスクリプトを
+直列に実行し、どれか FAIL で非 0。一覧は `node tools/check.mjs --list`）。チェックを足すときは import の上に
+`// @check` と `// @check-build <build-esm.mjs の引数>` を書く。個別に回すときは:
 
 ```bash
 tools/sim2d/build.sh            # src/sim → tools/sim2d/build（git 管理外）。中身は node tools/build-esm.mjs sim2d [出力先]
