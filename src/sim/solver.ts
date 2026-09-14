@@ -127,6 +127,40 @@ const ENTRY_CATCH_UP = 0.1;
 const ENTRY_CATCH_BAND = 0.05;
 const ENTRY_MIN = 0.005;
 const ENTRY_HOLDOFF = 60;
+/**
+ * Floor of the share of the residual a quiet entry correction moves by.
+ *
+ * The -0.13 above is a hard roll's. On a soft one the barrel near the entry
+ * is flattened nearly level with the strip, and the crossing can come back
+ * past where the entry was: at a roll E of 70 GPa each correction returned
+ * as a larger one of the other sign (+0.036, -0.041, +0.046 of a column),
+ * then the pair sat at +-0.050 - the catch band - for good, and the strip's
+ * Picard update never settled (1e-5 to 4e-4 on every one of frames 600-900,
+ * the feed loop knocked out of its band by each move). At 75 GPa it was
+ * +-0.018 every 60 frames; on the default three-stand line, stand 3 hunted
+ * the same way (load spread 8.7 % over frames 1500-1800). With the entry
+ * held still every one of these settled to the last digit.
+ *
+ * So a correction that reverses the one before it is halved, down to this
+ * floor, and any other grows the share back by 1.25 - but only a reversal
+ * of more than ENTRY_HUNT counts. A reversal inside that is the size of the
+ * residuals a stand that has all but settled wanders by, not a loop gain
+ * past -1: under tension control, halving on those pinned stand 2 of the
+ * tension-controlled line in tools/sim2d/chain.mjs at an eighth of its
+ * residual. This is the self-running feed loop's rejected rule (a step
+ * halved on every reversal, which slowed the transients after it) held to
+ * reversals that are hunting; with the events shifted five ways the
+ * settles of that line and the single stand's reduction and target steps
+ * kept their medians (docs/validation.md). At 70 GPa the Picard update is
+ * then under 1e-9 on all of frames 600-900 (0 on 222), 0 on 243 at 75 GPa
+ * and 292 at 50 GPa against none, and stand 3 of the default three-stand
+ * line holds to 2e-6. Without the size test, growing back by 2 left 70 GPa
+ * at 42 of 300, and not growing back at all made 85 GPa slower (197
+ * against 244). A stand with no such reversal - the default one - keeps a
+ * share of 1 and moves exactly as before.
+ */
+const ENTRY_GAIN_MIN = 0.125;
+const ENTRY_HUNT = 2 * ENTRY_MIN;
 
 /**
  * What FEM load control can resolve, relative to the target.
@@ -1001,6 +1035,10 @@ export class RollingSim {
   private entrySnap = true;
   /** frames until the mesh entry may be corrected again - see ENTRY_HOLDOFF */
   private entryHoldOff = 0;
+  /** share of the residual a quiet entry correction moves by - see ENTRY_GAIN_MIN */
+  private entryGain = 1;
+  /** the residual the last quiet entry correction answered [m]; 0 = none on this layout */
+  private lastEntryFix = 0;
   /**
    * Divergence recovery. A solve that has gone to NaN never comes back on
    * its own - every later frame is NaN of NaN - and used to sit there as a
@@ -1495,6 +1533,8 @@ export class RollingSim {
     this.xEntryFit = -Math.min(arc, -0.8 * this.winIn);
     this.entrySnap = true;
     this.entryHoldOff = 0;
+    this.entryGain = 1;
+    this.lastEntryFix = 0;
     this.xEntryLaid = NaN;
     // A fresh layout means fresh stations, and a low-passed barrel height
     // carried over from the old ones would put the bite where it used to be.
@@ -1689,7 +1729,11 @@ export class RollingSim {
           const quiet = (p.feedSpeed > 0 || this.feedHeld)
             && (p.agcMode === 'off' || this.agcHeld || this.diag.agcIdle);
           if (quiet) {
-            this.xEntryFit = xNew;
+            if (res * this.lastEntryFix < 0 && Math.abs(res) > ENTRY_HUNT * dx0) this.entryGain = Math.max(ENTRY_GAIN_MIN, this.entryGain * 0.5);
+            else this.entryGain = Math.min(1, this.entryGain * 1.25);
+            // xNew itself at a share of 1, not fit + res, which rounds differently
+            this.xEntryFit = this.entryGain === 1 ? xNew : this.xEntryFit + this.entryGain * res;
+            this.lastEntryFix = res;
             this.entryHoldOff = ENTRY_HOLDOFF;
           }
         }
