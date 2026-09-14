@@ -1126,7 +1126,12 @@ Newton の未知数にし、制御目標（平均出側板厚、または総荷�
 npm install
 npm run dev          # http://localhost:5173
 npm run build        # 型チェック + dist/ へビルド
+npm run check        # 型チェック + 2D の回帰チェック一式（node だけで直列、約 1〜2 分。どれか FAIL で非 0）
 ```
+
+`npm run check` が回すのは、`tools/` 以下で `// @check` の印が付いたスクリプト（厳密値との照合、
+PCG の反復上限、スラブ法の根・単調性・μ逆算の往復など。一覧は `node tools/check.mjs --list`）。
+コードを変えたらコミットの前にこれと `npm run build` を通す。
 
 Docker（ホストを汚さない場合）:
 
