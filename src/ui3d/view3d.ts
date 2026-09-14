@@ -17,7 +17,7 @@ import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, hel
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
-import { housingCompliance, halfStiffness } from '../sim3d/housing';
+import { housingCompliance, halfStiffness, housingPlan } from '../sim3d/housing';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
@@ -434,6 +434,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
       hSec.body.append(num('housingPostCount', 'ポスト 本数（片側）', '本', 1, 4, 1, 1, '片側のハウジングの窓を作るポストの数。ふつうは 2 本（入側・出側）。'));
       hSec.body.append(num('housingPostLength', 'ポスト 長さ', 'm', 1, 8, 0.1, 1, '上下のクロスヘッドの間のポストの長さ。既定 4.5 m（仮定）。'));
+      hSec.body.append(num('housingPostWidth', 'ポスト 幅（ロール軸方向）', 'm', 0.1, 1.5, 0.01, 1, '操作側・駆動側それぞれのポストの、ロール軸方向の幅。ポストは圧下ロールのチョックを中心に立つので、板が通るポスト内面の間隔 = チョック間隔 − この幅。側面図の描画と、板幅がこの間隔を超えたときの警告だけに使い、剛性には使わない（剛性は断面積から）。既定 0.7 m（500 × 700 mm の 700 側を仮定）。'));
       hSec.body.append(num('housingCrossSpan', 'クロスヘッド スパン', 'm', 0.5, 4, 0.05, 1, 'ポスト中心の間隔（クロスヘッドはこの 2 点で支えられ、中央にチョック荷重を受ける梁）。既定 1.8 m（仮定）。'));
       hSec.body.append(num('housingCrossI', 'クロスヘッド 断面二次モーメント', 'm⁴', 1e-4, 5e-2, 1e-4, 1, '曲げのたわみ F S³ / (48 E I)。既定 4.5×10⁻³ m⁴（700 × 420 mm の断面を仮定）。', true, (v) => v.toExponential(2)));
       hSec.body.append(num('housingCrossShearArea', 'クロスヘッド せん断断面積', 'm²', 0.05, 1.5, 0.01, 1, 'せん断のたわみ F S / (4 G A_s)。既定 0.3 m²（仮定）。'));
@@ -442,9 +443,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       refreshHousingHint = () => {
         const c = housingCompliance(params);
         const k = halfStiffness(c);
+        const screwRoll = solver.stack.rolls.find((r) => r.support === 'screw');
+        const plan = screwRoll ? housingPlan(params, screwRoll) : null;
         derived.textContent = `片側の鉛直剛性（上下対称なときの 1 チョック）: ${(k / 1e9).toFixed(2)} MN/mm ／ `
           + `ポスト ${(c.post * 1e12).toFixed(2)} µm/MN・クロスヘッド ${(c.crosshead * 1e12).toFixed(2)} µm/MN（荷重あたりの伸び・たわみ）。`
-          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。';
+          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。'
+          + (plan ? ` ポスト内面の間隔 ${((plan.inner[1] - plan.inner[0]) * 1e3).toFixed(0)} mm（板幅 ${(params.width * 1e3).toFixed(0)} mm${plan.stripOverlap > 0 ? '、⚠ 板がポストに当たる' : ''}）。` : '');
       };
       refreshHousingHint();
       hSec.body.append(derived);
@@ -559,7 +563,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // the housing frame's dimensions only mean something with the mode on, and
     // with it on the screw roll no longer sits on the per-support stiffness
     const housingOn = params.housingMode && (params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi');
-    for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
+    for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingPostWidth', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
     on('irSeatK', params.housingMode && params.irSeat);
     on('housingK', !housingOn);
   };
@@ -599,7 +603,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
-    sideView.draw(st, params.width, R.housing);
+    sideCanvas.classList.toggle('with-housing', R.housing !== null);
+    sideView.draw(st, params, R.housing);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
     charts.defl.draw(R.rolls.map((r, i): XYSeries => ({

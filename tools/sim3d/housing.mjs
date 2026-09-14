@@ -14,6 +14,10 @@
 //    (|v_upper(x) − v_lower(−x)| as small as with the mode off).
 // 4. Out of scope: a 12Hi and a 20Hi with the mode on warn `housingScope` and solve
 //    to the same bits as with it off.
+// 5. The strip clearance: each side's posts stand on the screw roll's chock, so the
+//    span between their inner faces is the chock span less a post width. On a 4Hi and
+//    a 2Hi, a post just too narrow to reach the strip edge leaves no warning, one just
+//    wide enough warns `housingStrip`, and the warning is all it does (same bits).
 //
 // @check
 // @check-build sim3d
@@ -99,6 +103,19 @@ for (const mill of ['12hi', '20hi']) {
   const off = solve(p), on = solve({ ...p, housingMode: true });
   report(on.R.warnings.includes('housingScope') && sameBits(off.sv.u, on.sv.u) && on.R.housing === null,
     `${mill}: the mode warns and leaves the solve alone`, `warnings [${on.R.warnings.join(',')}], unknowns bit-identical ${sameBits(off.sv.u, on.sv.u)}`);
+}
+
+// ── 5. the strip clearance ───────────────────────────────────────────────────
+for (const [mill, Ls] of [['4hi', 'burLs'], ['2hi', 'wrLs']]) {
+  const p = { ...defaultParams(mill), housingMode: true };
+  // the post width at which the inner faces reach the strip edges
+  const reach = p[Ls] - p.width;
+  const clear = solve({ ...p, housingPostWidth: reach - 0.01 }), hit = solve({ ...p, housingPostWidth: reach + 0.01 });
+  const dflt = solve(p);
+  report(!clear.R.warnings.includes('housingStrip') && hit.R.warnings.includes('housingStrip') && !dflt.R.warnings.includes('housingStrip')
+    && sameBits(clear.sv.u, hit.sv.u) && sameBits(dflt.sv.u, hit.sv.u),
+    `${mill}: a strip wider than the posts' clear span warns, and only warns`,
+    `clear span ${((p[Ls] - p.housingPostWidth) * 1e3).toFixed(0)} mm at the default ${p.housingPostWidth} m posts; posts ${(reach - 0.01).toFixed(2)} m [${clear.R.warnings.join(',')}] / ${(reach + 0.01).toFixed(2)} m [${hit.R.warnings.join(',')}], unknowns bit-identical ${sameBits(clear.sv.u, hit.sv.u) && sameBits(dflt.sv.u, hit.sv.u)}`);
 }
 
 if (failed) { console.log(`\n${failed} FAIL`); process.exit(1); }
