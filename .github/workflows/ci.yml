@@ -1,0 +1,34 @@
+# The 2D regression gate on every pull request and on main.
+#
+# `npm run check` is the type check, the node builds and every script under tools/
+# marked `// @check` (tools/check.mjs); it exits non-zero if any of them FAILs, and
+# that exit code is what fails this job. Browser checks (tools/browser) and the heavy
+# 3D scripts (tools/sim3d/stress.mjs, bench.mjs) are not run here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build

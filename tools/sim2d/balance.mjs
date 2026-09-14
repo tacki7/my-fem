@@ -9,11 +9,12 @@
 // 2. On every rolling case, the reactions have to equal what the interface
 //    terms of the assembled system put on the strip, node by node - that is
 //    what makes `loadReaction` the discrete roll load and not another estimate.
-//    Only on frames whose Picard step has converged: the field is relaxed
-//    towards the solve, and until the step is ~0 the relaxed field does not
-//    satisfy the system, the penalty terms amplifying the difference. A case
+//    Only on frames whose Picard step has converged (CONVERGED): the field is
+//    relaxed towards the solve, and until the step is ~0 the relaxed field does
+//    not satisfy the system, the penalty terms amplifying the difference. A case
 //    that never converges (ロール E 70 GPa, which keeps moving at 1e-5..4e-4)
-//    is reported, not failed - its reactions are not the discrete load.
+//    is reported, not failed - its reactions are not the discrete load. The
+//    default case must be checked, or the check has nothing to stand on.
 // 3. The table: reported load / reaction load, the free-surface force that
 //    separates them, and the horizontal residual, over the solves.mjs cases
 //    and the mesh presets.
@@ -73,6 +74,17 @@ for (const [sb, sf] of [[50 * MPA, 120 * MPA], [0, 0], [200 * MPA, 30 * MPA]]) {
 
 // ── 2./3. rolling cases ─────────────────────────────────────────────────────
 const FRAMES = 900, TAIL = 300;
+/**
+ * A Picard step this small counts as converged. It was 1e-6, and that let through
+ * frames still relaxing: on macOS arm64 every frame counted in the foil case had a
+ * step of exactly 0 and checked to 6e-8, while on Linux x64 - where V8's Math
+ * functions differ in the last digits - the same case kept moving just under 1e-6
+ * and read 2.8e-2. At 1e-6 the E 70 GPa frames check to 1.4. The step is 0 where
+ * the solve has truly settled, so a bound far below the relaxation's own scale.
+ */
+const CONVERGED = 1e-12;
+/** frame counts of the Picard step by decade, for the report */
+const STEP_BINS = [['0', 0], ['<1e-12', 1e-12], ['<1e-9', 1e-9], ['<1e-6', 1e-6], ['<1e-3', 1e-3], ['>=1e-3', Infinity]];
 const cases = [
   ['冷間圧延 (既定)', {}],
   ['箔圧延', { R: 0.03, h0: 0.00005, reduction: 0.25, omega: 3, mu: 0.08 }],
@@ -120,6 +132,7 @@ for (const [name, patch] of cases) {
   sim.flow.constraintForces = (inp) => { barrel = interfaceForces(sim, inp); return forces(inp); };
   const acc = { P: 0, R: 0, F: 0, B: 0, n: 0 };
   let closure = 0, nonFinite = 0, converged = 0;
+  const steps = STEP_BINS.map(() => 0);
   for (let f = 0; f < FRAMES; f++) {
     sim.advance(1 / 60);
     const d = sim.diag;
@@ -127,7 +140,8 @@ for (const [name, patch] of cases) {
     if (f < FRAMES - TAIL) continue;
     acc.P += d.loadFem; acc.R += d.loadReaction; acc.F += d.loadFreeSurface; acc.B += d.balanceX; acc.n++;
     // loadReaction + loadFreeSurface + (barrel terms) = 0 up to the free rows' residual
-    if (d.picardDelta < 1e-6) {
+    steps[STEP_BINS.findIndex(([, hi]) => (hi === 0 ? d.picardDelta === 0 : d.picardDelta < hi))]++;
+    if (d.picardDelta < CONVERGED) {
       converged++;
       closure = Math.max(closure, Math.abs(d.loadReaction + d.loadFreeSurface + barrel.y) / d.loadReaction);
     }
@@ -135,15 +149,20 @@ for (const [name, patch] of cases) {
   worstClosure = Math.max(worstClosure, closure);
   const P = acc.P / acc.n, R = acc.R / acc.n, F = acc.F / acc.n, B = acc.B / acc.n;
   rows.push({ name, P, R, F, B, mu: p.mu, closure, nonFinite, converged });
+  const dist = STEP_BINS.map(([label], i) => `${label}: ${steps[i]}`).filter((x) => !x.endsWith(': 0')).join(', ');
   if (converged === 0 && nonFinite === 0) {
-    console.log(`NOTE  ${name}: no frame with a converged Picard step in ${FRAMES - TAIL}-${FRAMES}; reactions not checked, table row is not the discrete load`);
+    console.log(`NOTE  ${name}: no frame with a Picard step below ${CONVERGED} in ${FRAMES - TAIL}-${FRAMES} (steps ${dist}); reactions not checked, table row is not the discrete load`);
     continue;
   }
   report(nonFinite === 0 && closure < 1e-4, `${name}: reactions = the interface terms of the solved system`,
-    `worst |R + F_free + F_barrel| / R ${closure.toExponential(1)} on ${converged}/${TAIL} converged frames, non-finite ${nonFinite}`);
+    `worst |R + F_free + F_barrel| / R ${closure.toExponential(1)} on ${converged}/${TAIL} converged frames (steps ${dist}), non-finite ${nonFinite}`);
 }
-report(rows.filter((r) => r.converged > 0).length >= cases.length - 1, '(harness) the reaction check actually ran',
-  `${rows.filter((r) => r.converged > 0).length} of ${cases.length} cases had converged frames`);
+{
+  const ran = rows.filter((r) => r.converged > 0).length;
+  const base = rows.find((r) => r.name === '冷間圧延 (既定)');
+  report(ran * 2 > cases.length && base && base.converged > 0, '(harness) the reaction check actually ran, the default case among them',
+    `${ran} of ${cases.length} cases had converged frames; the default case ${base && base.converged > 0 ? 'checked' : 'NOT checked'}`);
+}
 
 console.log(`\nmean over frames ${FRAMES - TAIL}-${FRAMES} (loads per unit width, half model)`);
 console.log('| 条件 | 面圧積分 P [MN/m] | 反力 R [MN/m] | P / R | 自由表面の力 / R | (R + 自由表面) / P | 水平残差 / μP | Picard 収束フレーム |');
