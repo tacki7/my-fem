@@ -680,8 +680,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       return Float64Array.from(a, (v) => (v - m) * 1e5);
     };
     charts.eps.draw([
-      { label: '潜在 Δε', color: '#7fe4ff', x: R.x, y: iuFromMin(R.dEps) },
-      { label: '顕在（波）', color: '#ff6b81', x: R.x, y: iuFromMin(R.manifest), fill: true },
+      { label: '潜在 Δε', color: '#7fe4ff', x: R.profile.x, y: iuFromMin(R.profile.latent) },
+      { label: '顕在（波）', color: '#ff6b81', x: R.profile.x, y: iuFromMin(R.profile.wave), fill: true },
     ], { unit: 'I-unit', halfWidth: strip * 1.05, strip, zero: true, symmetric: false });
 
     charts.sig.draw([
