@@ -10,6 +10,7 @@ import type { Params3D, Stack } from '../sim3d/stack';
 import { onBearing, saddleXs } from '../sim3d/stack';
 import { housingPlan } from '../sim3d/housing';
 import type { RingInfluence } from '../sim3d/ring';
+import { nearestStation, stationAbove, stationBelow } from '../sim3d/grid';
 
 const FONT = '11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 const BG = '#070a12';
@@ -339,7 +340,6 @@ export class FrontView {
     const padL = 48, padR = 52, padT = 12, padB = 18;
     const pw = W - padL - padR, ph = H - padT - padB;
     const sx = (x: number) => padL + ((x + xr) / (2 * xr)) * pw;
-    const dx = R.x[1] - R.x[0];
 
     // layers: rolls at (nearly) the same height share a band
     const order = rolls.map((_, i) => i).sort((a, b) => rolls[a].def.cy - rolls[b].def.cy);
@@ -412,7 +412,7 @@ export class FrontView {
         const color = ROLL_COLORS[ri % ROLL_COLORS.length];
         const xa = sx(d.shift - d.Ls / 2), xb = sx(d.shift + d.Ls / 2);
         const x0 = d.shift - d.Lb / 2, x1 = d.shift + d.Lb / 2;
-        const s0 = Math.max(r.ia, Math.floor((x0 - R.x[0]) / dx)), s1 = Math.min(r.ib, Math.ceil((x1 - R.x[0]) / dx));
+        const s0 = Math.max(r.ia, stationBelow(R.x, x0)), s1 = Math.min(r.ib, stationAbove(R.x, x1));
         const vAt = (s: number) => (Number.isFinite(r.v[s]) ? r.v[s] : 0);
         // necks / shaft, each end at the deflected axis there
         ctx.fillStyle = 'rgba(140,170,210,0.16)';
@@ -476,7 +476,7 @@ export class FrontView {
         {
           const frac = L.length > 1 ? (k === 0 ? 0.34 : 0.66) : 0.5;
           const xm = x0 + (x1 - x0) * frac;
-          const sMid = Math.max(r.ia, Math.min(r.ib, Math.round((xm - R.x[0]) / dx)));
+          const sMid = Math.max(r.ia, Math.min(r.ib, nearestStation(R.x, xm)));
           labels.push({ x: sx(xm), y: cy - vAt(sMid) * mag * pxPerM, text: `${d.id}  撓み ${um(r.bow)}  扁平 ${um(r.flatMax)}` });
         }
         for (const s of r.supports) {
