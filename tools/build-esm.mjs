@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const PRESETS = {
-  sim2d: { out: 'tools/sim2d/build', entries: ['src/sim/solver.ts', 'src/sim/muinv.ts', 'src/sim/mill.ts'] },
+  sim2d: { out: 'tools/sim2d/build', entries: ['src/sim/solver.ts', 'src/sim/muinv.ts', 'src/sim/mill.ts', 'src/app/defaults.ts'] },
   slab: { out: 'tools/slab/build', entries: ['src/sim/slab.ts', 'src/sim/muinv.ts'] },
 };
 
