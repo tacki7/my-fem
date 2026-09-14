@@ -169,8 +169,8 @@ const params: RollingParams = {
   h0: 0.002, reduction: 0.25, stripNx: 100, stripNy: 8,
   windowIn: -0.040, windowOut: 0.025, autoFit: true,
   lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255,
-  // On by default. Every figure in docs/validation.md was measured isothermal,
-  // so switch this off to reproduce them as a clean A/B.
+  // On by default since 2026-09-12. The undated sections of docs/validation.md
+  // were measured isothermal - switch this off to reproduce them as a clean A/B.
   heatOn: true, tempEntry: 20, taylorQuinney: 0.9,
   rhoStrip: 7850, cpStrip: 470, tempMelt: 1500, softenExp: 1.0,
   Estrip: 2.1e11, nuStrip: 0.30, elasticZones: true,
@@ -229,9 +229,9 @@ const params: RollingParams = {
   slabTheory: 'karman',
   flattening: 'hitchcock',
   agcMethod: 'secant',
-  // on by default. With a rigid stand the only spring is the roll flattening,
-  // which is what every number in docs/validation.md was measured against -
-  // switch this off to reproduce them.
+  // on by default since 2026-09-12. With a rigid stand the only spring is the
+  // roll flattening, which is what the undated sections of docs/validation.md
+  // were measured against - switch this off to reproduce them.
   millSpringOn: true, millModulus: (5.8 * MN_PER_MM) / 1.0,
   // 2 %, not the 30 % this used to be. The 30 % was a validity guard - the
   // mass balance was said to break past 70 % reduction - and it stopped
