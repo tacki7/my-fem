@@ -163,6 +163,12 @@ if (WRITE) {
 }
 
 const ms = performance.now() - t0;
+// how close the baseline comparison came, on this machine - the number the tolerance above is set against
+{
+  let worst = null;
+  for (const m of margins) if (m.name.endsWith('against the baseline') && (!worst || m.value / m.limit > worst.value / worst.limit)) worst = m;
+  if (worst) console.log(`baseline: closest ${(worst.value / worst.limit).toExponential(2)} of its limit (${worst.value.toExponential(2)} / ${worst.limit.toExponential(2)}, ${worst.name})`);
+}
 if (MEASURE) {
   // the tightest margin per kind of check: how close each held quantity came to its limit
   const byKind = new Map();
