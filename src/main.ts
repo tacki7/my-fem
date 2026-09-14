@@ -3649,6 +3649,13 @@ let fieldDirty = true;
 let rangeFresh = true;
 let statMs = 0;
 let lastRange = { min: 0, max: 1 };
+/**
+ * Model time per solve under `?fixeddt` [s], or null to follow the wall clock.
+ * 1/60 s is the step tools/sim2d takes, so a URL and a node run step alike.
+ */
+const FIXED_DT = Q.fixeddt ? 1 / 60 : null;
+/** times the line has been solved since the page loaded; `?stopafter` counts these */
+let solveCount = 0;
 
 refreshGeom();
 refreshMeshHint();
@@ -3673,6 +3680,8 @@ fitView();
 if (DEBUG_TITLE) {
   (window as unknown as Record<string, unknown>).__lab = {
     get running() { return view.running; },
+    /** times the line has been solved; a frame that skipped the solve does not count */
+    get solves() { return solveCount; },
     stands: () => mill.stands.map((st, k) => {
       const p = st.params, d = st.diag;
       return {
@@ -4022,6 +4031,10 @@ function frameBody(now: number): void {
   frameEma += (wall - frameEma) * 0.1;
   fpsEma += (1000 / Math.max(wall, 1e-3) - fpsEma) * 0.08;
   if (!stageHidden()) renderer.resize(Math.min(window.devicePixelRatio || 1, 2));
+  // Model time: the frame's own by default, so the line runs in real time.
+  // Under `?fixeddt` a fixed step, so the same URL solves the same sequence
+  // however busy the machine is - the wall time still drives the readouts.
+  const dt = FIXED_DT ?? wall / 1000;
 
   let solved = false;
   if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
@@ -4029,13 +4042,15 @@ function frameBody(now: number): void {
     // select asks for: that rebuild is still waiting on `scheduleRebuild`, and
     // until it runs a shorter slice leaves the last stands without a setup.
     mill.sync(params, standSetups.slice(0, mill.count));
-    mill.advance(wall / 1000);
+    mill.advance(dt);
     announceRestarts();
     pushAgcSample();
     pushTensionSample();
     solved = true;
+    solveCount++;
   }
-  if (view.running && view.showTracers) tracers.update(wall / 1000);
+  if (view.running && view.showTracers) tracers.update(dt);
+  if (solved && solveCount === Q.stopafter) setRunning(false);
 
   if (solved || fieldDirty) {
     lastRange = sim.computeField(view.field);

@@ -31,6 +31,10 @@ export interface QueryOverrides {
   nomirror: boolean;
   nosolve: boolean;
   nogrid: boolean;
+  /** `?fixeddt`: every solve advances the line by 1/60 s instead of the frame's wall time */
+  fixeddt: boolean;
+  /** `?stopafter=N`: pause once the line has been solved N times (rounded, ≥ 1) */
+  stopafter?: number;
   field?: string;
   cmap?: string;
   mesh?: string;
@@ -75,8 +79,11 @@ export function parseQuery(
     nomirror: qs.has('nomirror'),
     nosolve: qs.has('nosolve'),
     nogrid: qs.has('nogrid'),
+    fixeddt: qs.has('fixeddt'),
     tab: qs.get('tab'),
   };
+  const stopafter = num('stopafter');
+  if (Number.isFinite(stopafter) && stopafter >= 1) out.stopafter = Math.round(stopafter);
   const field = oneOf(qs.get('field'), vocab.fields);
   if (field) out.field = field;
   const cmap = oneOf(qs.get('cmap'), vocab.colormaps);

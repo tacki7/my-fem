@@ -103,6 +103,12 @@ npm run dev -- --port 5177 --strictPort &
 （#2 以降は各段の圧下率で下る）。不正な値は黙って無視される — 効いたかは `__lab.stands()` で確かめる。
 一覧と意味は README「計測用クエリパラメータ」。
 
+**数値を比べる計測は `&fixeddt&stopafter=N` を付ける。** 既定のモデル時間は壁時計なので、同じ URL でも
+CPU の混み具合で値が変わる（600 回解いて #3 の荷重が 1136.3 / 1138.1 tonf）。`fixeddt` で 1 回 1/60 s 固定、
+`stopafter=N` で N 回解いたら一時停止 → `__lab.solves >= N && !__lab.running` を待って読む。これで読み込み直しても
+`__lab.stands()` がビット単位で一致する（`stepMs` など処理時間は除く）。node の `tools/sim2d` とは刻みが同じでも
+ビット一致はしない（V8 の版で `Math.exp` などの丸めが違う。README 参照）。
+
 ## Git 運用
 
 **`main` に直接コミットしない。** 作業はブランチを切ってから。

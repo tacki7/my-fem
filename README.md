@@ -1588,6 +1588,23 @@ WebGL の描画も止まるので、フレームが軽くなる（3 スタンド
 `c`=描画コール数）。`&nowire` `&notrace` `&nomirror` `&nogrid` `&nosolve` で個別に切って
 ボトルネックを切り分けられる。
 
+`?fixeddt` で 1 回解くごとに進めるモデル時間を 1/60 s に固定する（既定は前のフレームからの壁時計で、上限 100 ms。
+「ソルバ更新間隔」を 2 以上にしても 1 回あたり 1/60 s）。`?stopafter=N`（1 以上、小数は四捨五入）で N 回解いたら
+一時停止する（▶ 再生で続きから回る）。解いた回数は `?debug` の `__lab.solves`。
+
+- 壁時計のままだと、同じ URL でも CPU の混み具合で解の列が変わる。`?debug&stopafter=600&stands=3` を 2 回読み込むと
+  #3 の荷重が 1136.3 / 1138.1 tonf とずれた
+- `?debug&fixeddt&stopafter=600&stands=3` なら、2 回読み込んで `__lab.stands()` と `__lab.tension()` が
+  ビット単位で一致する（`stepMs`・`tensionMs`・`frameMs` など処理時間の項目を除く）。待つ信号は
+  `__lab.solves >= 600 && !__lab.running`
+- 刻みは `tools/sim2d` の `advance(1/60)` と同じだが、node の結果とは**ビット一致しない**。1 回目は全項目一致し、
+  2 回目から 1e-14 程度で離れ、600 回で相対 1e-3 程度になる（反復解法と制御ループが丸め差を広げる）。
+  ブラウザと node の V8 で `Math.exp`・`Math.sin`・`Math.log`・`Math.cbrt` の最後の 1 ulp の丸めが入力の数 % で違うため
+  で、node 用ビルドをページ内で回すとブラウザ側と同じ値になる（`main.ts` 側の処理が原因ではない）。node と比べるときは
+  許容差を置く
+
+測定条件（2026-09-14）: HeadlessChrome 153、Node.js 24.14.1、既定パラメータの 3 スタンド（制御なし・張力モデル off）。
+
 > フレーム時間が 33.3 ms に張り付く場合は macOS の低電力モードを疑うこと。表示リフレッシュが
 > 30 Hz に落ちるので、アプリ側の処理時間に関係なく 30 fps 上限になる（`pmset -g | grep lowpowermode`）。
 
