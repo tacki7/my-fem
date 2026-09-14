@@ -2000,6 +2000,9 @@ const sSkinThick = slider({
   label: '　表層厚さ (手動)', unit: 'mm', min: 0.002, max: 60, log: true,
   value: params.rollSkinThickness,
   format: (v) => (v * 1000).toFixed(v < 0.001 ? 3 : 2),
+  hint: '「表層メッシュを接触弧から自動」が OFF のときの表層の厚さ。これを「ロール表層 分割数」で等分した要素をバレル表面に並べる'
+    + '（自動では 分割数 × 接触弧 ÷ 上の値）。ロール肉厚 R × (1 − 芯金半径比) の半分で頭打ちになり、分割数 0 では使わない。'
+    + '実際の厚さと要素寸法は下の説明文に出る。既定 2 mm。',
   onInput: (v) => { params.rollSkinThickness = v; scheduleRebuild(); },
 });
 const skinHint = el('div', 'ctrl-hint');
@@ -2019,11 +2022,16 @@ const sWinIn = slider({
   label: '解析窓 入側端', unit: 'mm', min: -0.20, max: -0.0005, log: false, step: 0.0005,
   value: params.windowIn,
   format: (v) => (v * 1000).toFixed(2),
+  hint: '板メッシュの上流端（ロール中心の真下を 0、入側が負）。この面で板は速度一様・板厚方向の速度 0 で送り込まれ、後方張力もここに掛かる。'
+    + '噛み込み入口はこの値の 0.8 倍より上流に置けず、はみ出すとミルライン図の見出しに「解析窓が噛み込み弧に足りない」と出る'
+    + '（その段の荷重は過小）。nx はこの窓を分けるので、広げると列が粗くなる。自動では −(接触弧 + max(3h₀, 2 × 接触弧))。',
   onInput: (v) => { params.windowIn = v; scheduleRebuild(); },
 });
 const sWinOut = slider({
   label: '解析窓 出側端', unit: 'mm', min: 0.0005, max: 0.12, step: 0.0005, value: params.windowOut,
   format: (v) => (v * 1000).toFixed(2),
+  hint: '板メッシュの下流端（ロール中心の真下を 0、出側が正）。この面は拘束されず、前方張力がここに掛かる。'
+    + '出口面の後ろには弾性回復の区間として最低 2 列を残す。出側の速度分布がそろうだけの長さが要る。自動では max(2h₀, 1.5 × 接触弧)。',
   onInput: (v) => { params.windowOut = v; scheduleRebuild(); },
 });
 const sBite = slider({
@@ -2053,11 +2061,19 @@ sNum.body.append(
   }).root,
   slider({
     label: '緩和係数', min: 0.1, max: 1, step: 0.05, value: params.relax,
-    format: (v) => v.toFixed(2), onInput: (v) => { params.relax = v; },
+    format: (v) => v.toFixed(2),
+    hint: 'Picard 反復 1 回ごとの板の速度場の不足緩和: v ← v_前 + (この値) × (線形解 − v_前)。1 で線形解をそのまま採る。'
+      + '小さいほど 1 回の歩みが小さく、剛体域の粘度が定まるまで反復を縮小的に保つ。'
+      + 'ロール扁平の「連成の緩和係数」（ミル弾性）とは別。既定 0.6。',
+    onInput: (v) => { params.relax = v; },
   }).root,
   slider({
     label: '非圧縮ペナルティ', min: 1e3, max: 1e6, log: true, value: params.incompPenalty,
-    format: (v) => v.toExponential(0), onInput: (v) => { params.incompPenalty = v; },
+    format: (v) => v.toExponential(0),
+    hint: '板の体積項 p = −K div v の K を基準粘度の何倍にするか。「入出側の弾性変形を考慮」が OFF のときだけ使う — '
+      + 'ON（既定）では K は板の体積弾性率 × 噛み込み通過時間になり、この値は効かない。'
+      + 'OFF で既定の 10 倍・100 倍にすると発散した（docs/validation.md）。既定 1e4。',
+    onInput: (v) => { params.incompPenalty = v; },
   }).root,
   slider({
     label: '法線ペナルティ', min: 1e3, max: 1e7, log: true, value: params.normalPenalty,
@@ -2090,7 +2106,11 @@ sNum.body.append(
   }).root,
   slider({
     label: '自走制御 ゲイン', min: 0.02, max: 0.6, step: 0.01, value: params.feedGain,
-    format: (v) => v.toFixed(2), onInput: (v) => { params.feedGain = v; },
+    format: (v) => v.toFixed(2),
+    hint: '送り速度（入側速度）ループの比例ゲイン。改訂のたびに 送り速度 × (1 − この値 × 入側反力 / (μ·P))'
+      + '（反力は低域通過後、比は ±1 で打ち切り、1 回の変化は ±0.5% まで — 既定なら比 3.3% 超で上限に当たる）。'
+      + '「送り速度を自動 (自走)」が OFF のときと、タンデムで張力モデル ON の #2 以降では使わない。既定 0.15。',
+    onInput: (v) => { params.feedGain = v; },
   }).root,
   slider({
     // The floor was 5e-4 while the default is 3e-4, so the slider could not
