@@ -3659,6 +3659,7 @@ if (DEBUG_TITLE) {
         agcSettled: d.agcSettled,
         agcStalled: d.agcStalled,
         agcSaturated: d.agcSaturated,
+        windowShortfall: d.windowShortfall * 1000,
         agcError: d.agcError,
         holdGap: st.holdGap,
         contactNodes: d.contactNodes,
@@ -4541,15 +4542,26 @@ function updateStats(): void {
   const massTag = broken.length
     ? ` ／ ⚠ 質量収支 ${broken.map(([k, t]) => `${standTag(k)} ${t === 'bad' ? '崩れ' : '注意'}`).join('・')}`
     : '';
+  // A bite that has outgrown the analysis window is named the same way: its
+  // load is short by the pressure the window cannot hold, and nothing else on
+  // screen says so - the mesh reads settled because its columns sit exactly
+  // where the window's limit put them.
+  const clipped = mill.stands.slice(0, standCount)
+    .map((st, k) => [k, st.diag.windowShortfall] as const)
+    .filter(([, s]) => s > 0);
+  const windowTag = clipped.length
+    ? ` ／ ⚠ 解析窓が噛み込み弧に足りない ${clipped.map(([k, s]) => `${standTag(k)} ${(s * 1000).toFixed(2)} mm`).join('・')}`
+      + '（窓の外の弧が面圧を持たないので、その段の荷重は過小）'
+    : '';
   millSub.textContent = mill.count > 1
-    ? `${mill.count} ${w}${modelTag}${massTag} ／ 合計圧下率 ${(md.totalReduction * 100).toFixed(2)}%`
+    ? `${mill.count} ${w}${modelTag}${massTag}${windowTag} ／ 合計圧下率 ${(md.totalReduction * 100).toFixed(2)}%`
       + ` ／ 出側 ${(md.h1[mill.count - 1] * 1000).toFixed(4)} mm`
       + totals
       // Consecutive passes do not share a flow, so there is nothing to be off by.
       + (Number.isFinite(md.flowError)
         ? ` ／ 流量ずれ ${(md.flowError * 100).toFixed(2)}%` : '')
       + ` ／ ${md.settled ? `全${w}収束` : '調整中'}${tensionTag}`
-    : `単スタンド${modelTag}${massTag}${totals}`
+    : `単スタンド${modelTag}${massTag}${windowTag}${totals}`
       + ` ／ 「ライン構成」で${view.lineMode === 'reverse' ? 'パス' : 'スタンド'}数を増やせる`;
 
   // Gauge axis from the schedule as typed: the first stand's target exit
