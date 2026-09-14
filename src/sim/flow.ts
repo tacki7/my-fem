@@ -26,7 +26,7 @@
 
 import {
   buildCsrPattern, spmv, makePcgWorkspace, pcgFiltered, patternBytes, workspaceBytes,
-  type CsrPattern, type PcgWorkspace,
+  type CsrPattern, type PcgWorkspace, type PcgResult,
 } from './sparse';
 import { BandPreconditioner } from './band';
 
@@ -203,6 +203,8 @@ export class FlowSolver {
   lastAssembleMs = 0;
   lastSolveMs = 0;
   lastFactorMs = 0;
+  /** band factorisations since construction; `solve` skips the frames with nothing to solve */
+  factorCount = 0;
 
   // scratch
   private dxi = new Float64Array(4);
@@ -391,14 +393,37 @@ export class FlowSolver {
     // warm start from the previous field, with the constrained part removed
     for (let i = 0; i < n; i++) this.dv[i] = this.free[i] ? this.v[i] : 0;
 
-    const tF = performance.now();
-    this.pre.factor(this.pattern, this.vals, this.free);
-    this.lastFactorMs = performance.now() - tF;
-
+    // Nothing to solve, nothing to factor. The strip's band factor is exact, so
+    // the PCG after it takes one step when it has a step to take - but from
+    // one frame to the next the matrix barely moves, and once a run settles
+    // most warm starts are already inside the tolerance and come back from the
+    // PCG untouched. The factor was being rebuilt for those as well. The warm
+    // residual is taken here the way `pcgFiltered` takes it, so a frame the PCG
+    // would not have iterated is skipped whole and every other frame is solved
+    // exactly as before - the answer does not move by a bit.
+    //
+    // Reusing an old factor as the preconditioner on the frames that do iterate
+    // (what the 3D FEM does) was tried and not kept. Stopped at `tol` the PCG
+    // lands where the direct step does not, and the feed and flattening loops
+    // carried that to 3.4e-6 in the load after 900 frames (70×6 mesh); carried
+    // on to tol/100 the load held to 1e-8, but on the foil case of
+    // tools/sim2d/balance.mjs the reactions no longer matched the interface
+    // terms (6.1e-8 -> 4.9e-5), and asked for tighter still the foil's Picard
+    // stopped converging (161 of the last 300 frames). That case settles only
+    // because its warm starts sit just inside `tol` (9e-9) and are left alone.
     const tS = performance.now();
-    const r = pcgFiltered(this.pattern, this.vals, this.b, this.free, this.dv,
-      this.ws, inp.maxIter, inp.tol, true, this.pre);
+    let r = this.warmStartInside(inp.tol);
     this.lastSolveMs = performance.now() - tS;
+    this.lastFactorMs = 0;
+    if (!r) {
+      const tF = performance.now();
+      this.factor();
+      this.lastFactorMs = performance.now() - tF;
+      const tS2 = performance.now();
+      r = pcgFiltered(this.pattern, this.vals, this.b, this.free, this.dv,
+        this.ws, inp.maxIter, inp.tol, true, this.pre);
+      this.lastSolveMs += performance.now() - tS2;
+    }
 
     let delta = 0, scale = 0;
     for (let i = 0; i < n; i++) {
@@ -415,6 +440,34 @@ export class FlowSolver {
       residual: r.residual,
       picardDelta: Math.sqrt(delta / Math.max(scale, 1e-30)),
     };
+  }
+
+  private factor(): void {
+    this.pre.factor(this.pattern, this.vals, this.free);
+    this.factorCount++;
+  }
+
+  /**
+   * The PCG's own answer for a warm start it would not iterate, or null.
+   *
+   * The same sums in the same order as `pcgFiltered` with a warm start: the
+   * product with the constrained rows of `dv` already zero, ||b||² and ||r||²
+   * over the free rows, and its stopping test. When that test holds the PCG
+   * returns `dv` as it is, zero iterations, and this residual.
+   */
+  private warmStartInside(tol: number): PcgResult | null {
+    const n = this.pattern.n;
+    const { b, free, tmp } = this;
+    let bb = 0;
+    for (let i = 0; i < n; i++) if (free[i]) bb += b[i] * b[i];
+    if (!(bb > 0)) return null;
+    spmv(this.pattern, this.vals, this.dv, tmp);
+    let rr = 0;
+    for (let i = 0; i < n; i++) {
+      const ri = free[i] ? b[i] - tmp[i] : 0;
+      rr += ri * ri;
+    }
+    return rr > tol * tol * bb ? null : { iterations: 0, residual: Math.sqrt(rr / bb) };
   }
 
   /** Effective strain rate and viscosity at every Gauss point. */
