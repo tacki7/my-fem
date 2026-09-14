@@ -3495,8 +3495,24 @@ canvas.addEventListener('wheel', (e) => {
   cam.cy = wy - my / cam.zoom;
 }, { passive: false });
 
+/**
+ * Whether the focused element does something with a key press of its own: a
+ * field takes the characters, and a button or a select takes Space (press,
+ * open) - taking the key from them here would pause the solve instead.
+ */
+function ownsKeys(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false;
+  return t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(t.tagName);
+}
+
 window.addEventListener('keydown', (e) => {
-  if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+  // The listener is on the window, and so is the 3D tab's: while that tab is
+  // showing, Space, R and the digits are its keys, and the hidden 2D line must
+  // not pause, reset or switch stands underneath it.
+  if (view3dRef?.active) return;
+  // Cmd+R, Ctrl+1 and the like belong to the browser.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (ownsKeys(e.target)) return;
   if (e.code === 'Space') { e.preventDefault(); setRunning(!view.running); }
   else if (e.key === 'r' || e.key === 'R') { mill.resetAll(); tracers.reset(); }
   else if (e.key === 'f' || e.key === 'F') fitView();
