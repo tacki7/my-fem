@@ -537,7 +537,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
     // numerics / display
     const numSec = section('解析・表示', { remember: false, open: false });
-    numSec.body.append(num('stations', '幅方向 分割数', '', 21, 241, 2, 1, '全ロール共通の節点数。増やすと帯行列の解法時間が線形に伸びる。'));
+    numSec.body.append(num('stations', '幅方向 分割数', '', 21, 601, 1, 1, '全ロール共通の節点数（等間隔、偶数は 1 足して奇数にする。「板・圧延条件 ▸ 材料 幅方向 分割数」が 0 なら板上の点数もこれで決まる）。計算時間は点数より速く伸びる: 81 → 301 点で 1 反復あたり 7〜9 倍（張力の連成が板上の点数で効く）。'));
     numSec.body.append(select<'hertz' | 'ring'>('扁平モデル', [
       { value: 'hertz', text: 'Hertz 式（Johnson の円筒近似）' },
       { value: 'ring', text: '断面 FEM（リングメッシュ nt × nr）' },

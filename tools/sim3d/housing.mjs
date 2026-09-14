@@ -29,6 +29,8 @@ function report(ok, name, detail) {
   if (!ok) failed++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`);
 }
+/** a mill's defaults at 81 stations: what these checks hold does not depend on the grid, and the default 301 takes ten times as long */
+const defaults81 = (mill) => ({ ...defaultParams(mill), stations: 81 });
 function solve(p) {
   const sv = new StackSolver(p);
   let it = 0;
@@ -41,7 +43,7 @@ const TONF = 9.80665e3;
 
 // ── 1. off is off ────────────────────────────────────────────────────────────
 for (const [label, mill, patch] of [['4Hi', '4hi', {}], ['6Hi shifted −50 mm', '6hi', { irShift: -0.05 }]]) {
-  const base = { ...defaultParams(mill), ...patch };
+  const base = { ...defaults81(mill), ...patch };
   delete base.housingMode;
   const a = solve(base), b = solve({ ...base, housingMode: false });
   report(sameBits(a.sv.u, b.sv.u) && a.R.housing === null && b.R.housing === null,
@@ -50,7 +52,7 @@ for (const [label, mill, patch] of [['4Hi', '4hi', {}], ['6Hi shifted −50 mm',
 
 // ── 2. the frame against a hand calculation ─────────────────────────────────
 for (const mill of ['4hi', '2hi']) {
-  const p = { ...defaultParams(mill), housingMode: true };
+  const p = { ...defaults81(mill), housingMode: true };
   const { R, sv } = solve(p);
   const E = p.housingE, G = E / 2.6;
   const cPost = p.housingPostLength / (p.housingPostCount * E * p.housingPostArea);
@@ -84,7 +86,7 @@ for (const mill of ['4hi', '2hi']) {
     }
     return d;
   };
-  const base = { ...defaultParams('6hi'), irShift: 0 };
+  const base = { ...defaults81('6hi'), irShift: 0 };
   const off = solve(base);
   const seatOff = solve({ ...base, housingMode: true, irSeat: false });
   const on = solve({ ...base, housingMode: true });
@@ -99,7 +101,7 @@ for (const mill of ['4hi', '2hi']) {
 
 // ── 4. out of scope ─────────────────────────────────────────────────────────
 for (const mill of ['12hi', '20hi']) {
-  const p = defaultParams(mill);
+  const p = defaults81(mill);
   const off = solve(p), on = solve({ ...p, housingMode: true });
   report(on.R.warnings.includes('housingScope') && sameBits(off.sv.u, on.sv.u) && on.R.housing === null,
     `${mill}: the mode warns and leaves the solve alone`, `warnings [${on.R.warnings.join(',')}], unknowns bit-identical ${sameBits(off.sv.u, on.sv.u)}`);
@@ -107,7 +109,7 @@ for (const mill of ['12hi', '20hi']) {
 
 // ── 5. the strip clearance ───────────────────────────────────────────────────
 for (const [mill, Ls] of [['4hi', 'burLs'], ['2hi', 'wrLs']]) {
-  const p = { ...defaultParams(mill), housingMode: true };
+  const p = { ...defaults81(mill), housingMode: true };
   // the post width at which the inner faces reach the strip edges
   const reach = p[Ls] - p.width;
   const clear = solve({ ...p, housingPostWidth: reach - 0.01 }), hit = solve({ ...p, housingPostWidth: reach + 0.01 });

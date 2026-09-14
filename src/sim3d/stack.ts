@@ -256,7 +256,7 @@ export function defaultParams(mill: MillType): Params3D {
     angle1: (24 * Math.PI) / 180,
     clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
-    stations: 81, stripStations: 0,
+    stations: 301, stripStations: 0,
     stripModel: 'fem', stripNz: 8, stripNy: 2,
     flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
   };
