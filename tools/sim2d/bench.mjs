@@ -26,7 +26,6 @@
 //   roll      roll elastic solve, AGC, gap update           (lastRollMs)
 //   step      the whole RollingSim.advance                  (lastStepMs)
 //   factors/frame  band factorisations per frame (FlowSolver.factorCount; 1 on a build without it)
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defaultParams } from './params.mjs';
 
@@ -44,13 +43,8 @@ const only = opt('only', null);
 const ROUNDS = Number(opt('rounds', 2));
 const older = args[0];
 
-// The presets live in src/main.ts, which cannot be loaded in node; slice the literal out
-// the way params.mjs does, so a changed preset is measured as it is.
-const MAIN = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
-const src = readFileSync(MAIN, 'utf8');
-const start = src.indexOf('const MESH_LEVELS = {');
-if (start < 0) throw new Error('src/main.ts: `const MESH_LEVELS = {` not found');
-const LEVELS = new Function(`return (${src.slice(src.indexOf('{', start), src.indexOf('} as const;', start) + 1)});`)();
+// The mesh presets the app offers (src/app/defaults.ts), so a changed preset is measured as it is.
+const { MESH_LEVELS: LEVELS } = await import('./build/app/defaults.js');
 
 const load = async (dir) => {
   const solver = await import(`${dir}/sim/solver.js`);
