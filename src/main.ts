@@ -750,6 +750,21 @@ function syncWindowDials(): void {
   params.windowOut = sim.winOut;
   params.biteGrade = sim.biteGradeEff;
   sWinIn.set(sim.winIn); sWinOut.set(sim.winOut); sBite.set(sim.biteGradeEff);
+  shownWindow = { sim, winIn: sim.winIn, winOut: sim.winOut, bite: sim.biteGradeEff };
+}
+/** the window `syncWindowDials` last showed, and whose */
+let shownWindow: { sim: RollingSim | null; winIn: number; winOut: number; bite: number } =
+  { sim: null, winIn: NaN, winOut: NaN, bite: NaN };
+/**
+ * Once a frame, and only writing when something moved: the solver widens a
+ * window on its own when the bite outgrows it (`widenWindow`, no rebuild),
+ * and the stand on screen can change to one with a different window. Left to
+ * rebuilds alone the dials kept the pre-widening window, and turning 自動 off
+ * then rebuilt the stand into the window its bite had already outgrown.
+ */
+function followWindowDials(): void {
+  if (shownWindow.sim !== sim || shownWindow.winIn !== sim.winIn
+    || shownWindow.winOut !== sim.winOut || shownWindow.bite !== sim.biteGradeEff) syncWindowDials();
 }
 
 const millLine = new MillLineView(
@@ -4093,6 +4108,7 @@ function frameBody(now: number): void {
   }
   if (view.running && view.showTracers) tracers.update(dt);
   if (solved && solveCount === Q.stopafter) setRunning(false);
+  followWindowDials();
 
   if (solved || fieldDirty) {
     lastRange = sim.computeField(view.field);
