@@ -3525,6 +3525,7 @@ if (DEBUG_TITLE) {
         // Which inner loop is holding the screws, and by how much. Without
         // these a stalled stand is indistinguishable from a slow one.
         feedResidual: d.feedResidual,
+        feedNotEstablished: d.feedNotEstablished,
         feedFloor: d.feedFloor,
         feedDeadband: p.feedDeadband,
         millResidual: d.millResidual,
@@ -4138,7 +4139,7 @@ function updateStats(): void {
   gKin.set('neut', d.neutralFound ? (d.neutralX * 1000).toFixed(2) : '—',
     d.neutralFound ? 'ok' : 'warn');
   gKin.set('fres', d.feedResidual.toExponential(1),
-    d.feedResidual < params.feedDeadband * 2 ? 'ok' : 'warn');
+    d.feedNotEstablished ? 'bad' : d.feedResidual < params.feedDeadband * 2 ? 'ok' : 'warn');
   gKin.set('mb', d.massBalance.toFixed(4),
     Math.abs(d.massBalance - 1) < 0.01 ? 'ok'
       : Math.abs(d.massBalance - 1) < 0.03 ? 'warn' : 'bad');
@@ -4401,19 +4402,29 @@ function updateStats(): void {
   const clipped = mill.stands.slice(0, standCount)
     .map((st, k) => [k, st.diag.windowShortfall] as const)
     .filter(([, s]) => s > 0);
+  // A feed that cannot establish itself is named too: the load and the exit
+  // gauge go still anyway, so the stand looks settled while the entry face is
+  // pushing the strip through and no free-running solution exists at all.
+  const unfed = mill.stands.slice(0, standCount)
+    .map((st, k) => [k, st.diag] as const)
+    .filter(([, sd]) => sd.feedNotEstablished);
+  const feedTag = unfed.length
+    ? ` ／ ⚠ 送り速度の自走が成り立っていない ${unfed.map(([k, sd]) => `${standTag(k)} 送り残差 ${sd.feedResidual.toExponential(1)}`).join('・')}`
+      + '（入側面が板を押し込んでいる。荷重と h₁ は静止していても定常解ではない）'
+    : '';
   const windowTag = clipped.length
     ? ` ／ ⚠ 解析窓が噛み込み弧に足りない ${clipped.map(([k, s]) => `${standTag(k)} ${(s * 1000).toFixed(2)} mm`).join('・')}`
       + '（窓の外の弧が面圧を持たないので、その段の荷重は過小）'
     : '';
   millSub.textContent = mill.count > 1
-    ? `${mill.count} ${w}${modelTag}${massTag}${windowTag} ／ 合計圧下率 ${(md.totalReduction * 100).toFixed(2)}%`
+    ? `${mill.count} ${w}${modelTag}${massTag}${feedTag}${windowTag} ／ 合計圧下率 ${(md.totalReduction * 100).toFixed(2)}%`
       + ` ／ 出側 ${(md.h1[mill.count - 1] * 1000).toFixed(4)} mm`
       + totals
       // Consecutive passes do not share a flow, so there is nothing to be off by.
       + (Number.isFinite(md.flowError)
         ? ` ／ 流量ずれ ${(md.flowError * 100).toFixed(2)}%` : '')
       + ` ／ ${md.settled ? `全${w}収束` : '調整中'}${tensionTag}`
-    : `単スタンド${modelTag}${massTag}${windowTag}${totals}`
+    : `単スタンド${modelTag}${massTag}${feedTag}${windowTag}${totals}`
       + ` ／ 「ライン構成」で${view.lineMode === 'reverse' ? 'パス' : 'スタンド'}数を増やせる`;
 
   // Gauge axis from the schedule as typed: the first stand's target exit
