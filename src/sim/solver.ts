@@ -680,6 +680,27 @@ export interface RollingDiagnostics {
   feedReaction: number;
   /** height of the prescribed feed face [m]; `feedReaction` over this is a stress */
   feedFace: number;
+  /**
+   * Roll load from the reactions [N/m]: the vertical force the symmetry plane
+   * and the entry face carry, K v − b on their rows. Exact for the discrete
+   * system up to the solve's residual, where `rollForce` integrates a
+   * pressure recovered from element stresses. A check on that number; it does
+   * not replace it (see docs/validation.md, 力の釣り合い).
+   */
+  loadReaction: number;
+  /**
+   * Vertical force the free-surface condition off the arc puts on the strip
+   * [N/m], + towards the roll. `loadReaction + loadFreeSurface` is the
+   * vertical force the barrel constraint applies.
+   */
+  loadFreeSurface: number;
+  /**
+   * Horizontal balance of the half strip with the interface traction as
+   * reported [N/m]: entry reaction + tensions + the pressure and shear behind
+   * `rollForce` and `torque` + the free-surface force. Zero if those
+   * tractions were the ones the solve applied.
+   */
+  balanceX: number;
   picardDelta: number;
   cgIterations: number;
   cgResidual: number;
@@ -1636,6 +1657,9 @@ export class RollingSim {
     d.exitThicknessGap = p.h0;
     d.entryThickness = p.h0;
     d.rollForce = 0;
+    d.loadReaction = 0;
+    d.loadFreeSurface = 0;
+    d.balanceX = 0;
     d.torque = 0;
     d.power = 0;
     d.meanPressure = 0;
@@ -2907,6 +2931,8 @@ export class RollingSim {
     const d = this.diag;
 
     let P = 0, T = 0, peak = 0, arcIn = Infinity, arcOut = -Infinity, count = 0;
+    /** horizontal force of the reported pressure and shear on the strip, for `balanceX` */
+    let Fx = 0;
     let neutralX = 0, found = false;
     let prevSlip = 0, prevX = 0, have = false;
     for (let i = this.contactFrom; i <= this.contactTo; i++) {
@@ -2924,6 +2950,9 @@ export class RollingSim {
       const pr = this.flow.ifPressure[i];
       P += pr * seg * -ny;                   // upward force on the barrel
       T += -this.flow.ifShear[i] * seg * p.R;
+      // pressure along the radius into the strip, shear along the tangent
+      // (+x at the bite) - the directions P and T are taken in
+      Fx += pr * seg * nx + this.flow.ifShear[i] * seg * -ny;
       if (pr > peak) peak = pr;
       if (x < arcIn) arcIn = x;
       if (x > arcOut) arcOut = x;
@@ -3103,6 +3132,16 @@ export class RollingSim {
 
     d.feedReaction = this.flow.feedReaction();
     d.feedFace = this.flow.feedFaceHeight();
+    {
+      const cf = this.flow.constraintForces(inp);
+      d.loadReaction = cf.symmetryY + cf.entryY;
+      d.loadFreeSurface = cf.freeSurfaceY;
+      const hIn = m.X[2 * m.ny + 1] - m.X[1];
+      const exitBase = m.nx * m.rows;
+      const hOut = m.X[2 * (exitBase + m.ny) + 1] - m.X[2 * exitBase + 1];
+      // the tensions as `applyTensions` loads them: back pulls -x on the entry column, front +x on the exit
+      d.balanceX = cf.entryX - p.backTension * hIn + p.frontTension * hOut + Fx + cf.freeSurfaceX;
+    }
 
     // roll flattening at the bite
     let flat = 0;
@@ -3420,7 +3459,7 @@ function emptyDiag(): RollingDiagnostics {
     exitFlowStress: 0, meanFlowStress: 0, meanPlaneStrainStress: 0,
     meanFlowStressTheory: 0, peakStrainRate: 0, rollFlattening: 0, hitchcockR: 0,
     stoneHMin: 0, biteLimitH1: 0, biteLimitH1Cont: 0,
-    rollPeakVm: 0, feedReaction: 0, feedFace: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
+    rollPeakVm: 0, feedReaction: 0, feedFace: 0, loadReaction: 0, loadFreeSurface: 0, balanceX: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
     rollCgIterations: 0, rollCgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
     feedResidual: 0, feedFloor: 0, meshResidual: 0,

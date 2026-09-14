@@ -272,6 +272,54 @@ export class FlowSolver {
   }
 
   /**
+   * The forces the model's constraints put on the strip [N/m], from the
+   * system as it was last solved. For checking the load, not for driving
+   * anything: nothing here feeds back into a solve.
+   *
+   * - `entryX`, `entryY`, `symmetryY`: reactions K v − b at the prescribed
+   *   entry face and on the symmetry plane (the entry face's bottom node is
+   *   counted with the entry face). With nothing else holding the half strip
+   *   up, `symmetryY + entryY` is the vertical force it carries - the roll
+   *   load of the discrete system, exact to the solve's own residual.
+   * - `freeSurfaceX`, `freeSurfaceY`: what the free-surface condition off the
+   *   arc (`applyInterface`) pushes on the strip, −kN (v·n) n per node. A
+   *   free surface carries no load, but this one is a penalty holding the top
+   *   on the surface the mesh was laid on, and where the flow disagrees with
+   *   that surface the penalty takes a force the barrel then does not.
+   *
+   * Must be called before the mesh is re-laid for the next frame: the slopes
+   * and the stiffness are those of this frame's solve.
+   */
+  constraintForces(inp: FlowInput): {
+    entryX: number; entryY: number; symmetryY: number; freeSurfaceX: number; freeSurfaceY: number;
+  } {
+    const m = this.mesh;
+    spmv(this.pattern, this.vals, this.v, this.tmp);
+    let entryX = 0, entryY = 0, symmetryY = 0;
+    for (let j = 0; j < m.rows; j++) {
+      entryX += this.tmp[2 * j] - this.b[2 * j];
+      entryY += this.tmp[2 * j + 1] - this.b[2 * j + 1];
+    }
+    for (const nd of m.bottomNodes) {
+      if (nd < m.rows) continue;
+      symmetryY += this.tmp[2 * nd + 1] - this.b[2 * nd + 1];
+    }
+    const kN = inp.normalPenalty * inp.muRef;
+    let freeSurfaceX = 0, freeSurfaceY = 0;
+    for (let i = 0; i <= m.nx; i++) {
+      if (i >= inp.contactFrom && i <= inp.contactTo) continue;
+      const nd = m.topNodes[i];
+      const { sp } = this.surfaceSlope(i);
+      const L = Math.hypot(sp, 1);
+      const nx = -sp / L, ny = 1 / L;
+      const f = -kN * (this.v[2 * nd] * nx + this.v[2 * nd + 1] * ny);
+      freeSurfaceX += f * nx;
+      freeSurfaceY += f * ny;
+    }
+    return { entryX, entryY, symmetryY, freeSurfaceX, freeSurfaceY };
+  }
+
+  /**
    * Everything this solver is holding.
    *
    * Counted array by array rather than by multiplying one length by a
