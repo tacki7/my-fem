@@ -166,7 +166,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cDefl = cell('v3-defl', 'ロール撓み', '各ロール軸の鉛直たわみ v(x)（支持点基準ではなく絶対値：スクリュー分の沈み込みを含む）');
   const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
   const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
-  const cGauge = cell('v3-gauge', '板厚プロファイル', '入側 h₀（青の破線）と出側 h₁（黄の実線）、それぞれ自分の平均からの偏差');
+  const cGauge = cell('v3-gauge', '板厚プロファイル', '板幅中央を 0 とした偏差');
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
@@ -624,20 +624,23 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: onBarrels(c) })),
     ], { unit: 'kN/mm', halfWidth, strip, zero: true });
 
-    const dev = (a: Float64Array) => {
-      let s = 0, n = 0;
-      for (let i = 0; i < a.length; i++) if (Number.isFinite(a[i])) { s += a[i]; n++; }
-      const m = n ? s / n : 0;
-      return Float64Array.from(a, (v) => (v - m) * 1e6);
+    // Entry and exit, each against its own thickness at the strip centre: the two
+    // shapes on one scale, the entry crown the pass was given and the exit profile
+    // it produced, and an edge reads as its crown with the sign turned.
+    const centred = (a: Float64Array) => {
+      let c = NaN;
+      for (let i = 1; i < a.length; i++) {
+        const x0 = R.x[i - 1], x1 = R.x[i];
+        if (x0 <= 0 && x1 >= 0 && Number.isFinite(a[i - 1]) && Number.isFinite(a[i])) {
+          c = a[i - 1] + (a[i] - a[i - 1]) * (-x0 / (x1 - x0));
+          break;
+        }
+      }
+      return Float64Array.from(a, (v) => (v - c) * 1e6);
     };
-    // entry and exit, each against its own mean: the entry crown the pass was given
-    // and the exit crown it produced, on one scale, so the two shapes can be compared
-    let h0Mean = 0, h0n = 0;
-    for (let i = 0; i < R.h0.length; i++) if (Number.isFinite(R.h0[i])) { h0Mean += R.h0[i]; h0n++; }
-    h0Mean = h0n ? h0Mean / h0n : NaN;
     charts.gauge.draw([
-      { label: `入側 h₀（平均 ${(h0Mean * 1e3).toFixed(4)} mm）`, color: '#7fb2ff', x: R.x, y: dev(R.h0), dash: true, width: 2 },
-      { label: `出側 h₁（平均 ${(R.h1Mean * 1e3).toFixed(4)} mm）`, color: STRIP_COLOR, x: R.x, y: dev(R.h1), width: 2 },
+      { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: centred(R.h0), dash: true, width: 2 },
+      { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: centred(R.h1), width: 2 },
     ], { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true });
 
     // Each curve shifted so its smallest value across the strip reads zero:
