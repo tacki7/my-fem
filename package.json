@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4173",
-    "check": "tsc --noEmit && node tools/build-esm.mjs sim2d && node tools/build-esm.mjs slab && node tools/exact/check.mjs && node tools/sim2d/solves.mjs && node tools/sim2d/mesh.mjs && node tools/sim2d/tension.mjs && node tools/slab/orowan.mjs && node tools/slab/muinv.mjs && node tools/slab/consistency.mjs && node tools/slab/stone.mjs && node tools/build-esm.mjs --out tools/app/build src/app/query.ts && node tools/app/query.mjs"
+    "check": "node tools/check.mjs"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

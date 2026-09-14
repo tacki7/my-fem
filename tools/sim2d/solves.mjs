@@ -3,6 +3,9 @@
 // cap; the roll's result used to be discarded, so running out would not have shown.
 //
 //   node tools/sim2d/solves.mjs      (exit 1 on FAIL; 15 s of simulated time per case)
+//
+// @check
+// @check-build sim2d
 import { defaultParams } from './params.mjs';
 import { RollingSim, setSlabHook } from './build/sim/solver.js';
 import { slabLoad } from './build/sim/muinv.js';

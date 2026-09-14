@@ -17,6 +17,9 @@
 // long before the arc runs away and has no Stone boundary to find at all. The
 // cases are set to d ~ 0.03-0.04 (R'/R ~ 60-80); the finite-draft term moves the
 // limit by about d/((e^a - 1) z_max), so ~1.5 % above the zero-draft h_min.
+//
+// @check
+// @check-build slab
 import { slabLoad } from './build/sim/muinv.js';
 import { STONE_Z_MAX, stoneMinThickness } from './build/sim/stone.js';
 

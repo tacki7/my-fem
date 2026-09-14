@@ -7,6 +7,9 @@
 //    two never cross, between the two samples that bracket the crossing otherwise.
 // 2. RollingSim.slabMethod without the app's hook (a headless solver) against
 //    slab.ts Kármán at the same radius.
+//
+// @check
+// @check-build slab
 import { orowanBranches } from './build/sim/slab.js';
 import { slabLoad } from './build/sim/muinv.js';
 import { RollingSim } from './build/sim/solver.js';

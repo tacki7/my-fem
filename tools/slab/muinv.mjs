@@ -4,6 +4,9 @@
 // status a pass with no load at any mu is given.
 //
 //   node tools/slab/muinv.mjs            (exit 1 on FAIL; about half a minute)
+//
+// @check
+// @check-build slab
 import { slabLoad, muFromLoad, MU_MIN, MU_MAX } from './build/sim/muinv.js';
 
 let failed = 0;

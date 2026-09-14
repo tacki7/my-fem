@@ -138,7 +138,9 @@ npm run build        # tsc + vite
 npm run check        # tsc → 2D を node 用にビルド → 2D の回帰チェック一式（直列、約 1 分。どれか FAIL で非 0）
 ```
 
-`check` の中身は `package.json` の 1 行。ビルドは `tools/build-esm.mjs`（node だけで動くので Linux でも同じ）。
+`check` は `tools/check.mjs` が `tools/` 以下の `.mjs` から印の付いたものを集めて回す。チェックを足すときは
+そのスクリプトの import の上に `// @check` と、要るビルドごとに `// @check-build sim2d`（`build-esm.mjs` の引数）を書くだけ
+（`package.json` や一覧は触らない）。ビルドは `tools/build-esm.mjs`（node だけで動くので Linux でも同じ）。
 `node_modules` が無いと `npx tsc` は TypeScript ではない別の `tsc` パッケージを取りに行くので、先に `npm ci`。
 
 数値を変えたら **README / docs/validation.md の実測値も直す**。両方に「測定時の条件」を

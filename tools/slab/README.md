@@ -1,6 +1,6 @@
 # スラブ法のヘッドレス検証
 
-ここの 4 本は `npm run check`（2D の回帰関門一式、FAIL で非 0）にも入っている。個別に回すときは:
+下のチェックは `npm run check`（2D の回帰関門一式、FAIL で非 0）にも入っている（先頭の `// @check` の印で）。個別に回すときは:
 
 ```bash
 tools/slab/build.sh                          # src/sim/slab.ts・muinv.ts → tools/slab/build（git 管理外）。中身は node tools/build-esm.mjs slab [出力先]
