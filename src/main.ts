@@ -2862,7 +2862,13 @@ let neutralTextLen = -1;
  */
 function selectStand(i: number): void {
   view.stand = Math.max(0, Math.min(standCount - 1, i));
+  const was = sim;
   sim = mill.stands[view.stand];
+  // The markers are positions in the strip they were released into. Another
+  // stand's strip has its own gauge and window, so they would be drawn across
+  // it where the last one was - left alone, over the thinner strip of #2 they
+  // stuck out of it. Picking the stand already on screen keeps them.
+  if (sim !== was) tracers.reset();
   renderer.setMesh(sim);
   millLine.setSelected(view.stand);
   paintStandGridSelection();
