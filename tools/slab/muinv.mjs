@@ -3,7 +3,7 @@
 // P(mu) monotone with the flattening fixed point in it, runaway closed upwards, and the
 // status a pass with no load at any mu is given.
 //
-//   node tools/slab/muinv.mjs            (exit 1 on FAIL; about half a minute)
+//   node tools/slab/muinv.mjs            (exit 1 on FAIL; 20-65 s depending on load)
 //
 // @check
 // @check-build slab
