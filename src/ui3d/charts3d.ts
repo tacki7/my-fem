@@ -5,7 +5,7 @@
  * The same dark palette as the 2D tab's canvases, in every theme.
  */
 
-import type { Result3D, RollState } from '../sim3d/solver';
+import type { HousingResult, Result3D, RollState } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
 import { onBearing, saddleXs } from '../sim3d/stack';
 import type { RingInfluence } from '../sim3d/ring';
@@ -650,7 +650,7 @@ export class EndView {
 export class SideView {
   constructor(private canvas: HTMLCanvasElement) {}
 
-  draw(stack: Stack, width: number): void {
+  draw(stack: Stack, width: number, housing: HousingResult | null = null): void {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     ctx.fillStyle = BG;
@@ -665,11 +665,24 @@ export class SideView {
       xmax = Math.max(xmax, Math.abs(r.shift) + r.Lb / 2, Math.abs(r.shift) + r.Ls / 2 + block(r) / 2);
       top = Math.max(top, r.cy + r.D / 2);
     }
+    // the housing frames, in the housing mode: one per side around the screw roll's chocks
+    const screwRoll = housing ? rolls.find((r) => r.support === 'screw') : undefined;
+    const frame = screwRoll ? {
+      xs: [screwRoll.shift - screwRoll.Ls / 2, screwRoll.shift + screwRoll.Ls / 2],
+      half: Math.max(block(screwRoll) * 1.1, 0.08),
+      top: screwRoll.cy + screwRoll.D / 2 + Math.max(screwRoll.Dn * 0.35, 0.05),
+    } : null;
+    if (frame) {
+      xmax = Math.max(xmax, ...frame.xs.map((x) => Math.abs(x) + frame.half * 1.4));
+      top = Math.max(top, frame.top + frame.half * 0.45);
+    }
     const pass = wr.cy - wr.D / 2;
     const bottom = pass - 0.03;
     const pad = 14;
-    const scale = Math.min((W - 2 * pad) / (2 * xmax), (H - 2 * pad - 14) / (top - bottom));
-    const cx = W / 2, cy0 = pad + ((H - 2 * pad - 14) - (top - bottom) * scale) / 2 + top * scale;
+    // room over the drawing for the housing's two lines of numbers
+    const headroom = frame ? 40 : 0;
+    const scale = Math.min((W - 2 * pad) / (2 * xmax), (H - 2 * pad - 14 - headroom) / (top - bottom));
+    const cx = W / 2, cy0 = pad + headroom + ((H - 2 * pad - 14 - headroom) - (top - bottom) * scale) / 2 + top * scale;
     const px = (x: number) => cx + x * scale;
     const py = (y: number) => cy0 - y * scale;
 
@@ -750,6 +763,45 @@ export class SideView {
     // the strip at the pass line, its width to scale
     ctx.fillStyle = STRIP_COLOR;
     ctx.fillRect(px(-width / 2), py(pass), width * scale, 3);
+    // Housing frames, schematic: seen from the side a window's two posts stand one
+    // behind the other, so each side is a post drawn round its chock, the top
+    // crosshead across its head, and the post carried on below the pass line
+    // (dashed) to the bottom crosshead that is not drawn. The opening is a number,
+    // not a deformed shape: at a few hundred µm on a metres-tall frame there is
+    // no honest scale to draw it at.
+    if (frame && housing) {
+      const names = ['操作側', '駆動側'];
+      frame.xs.forEach((xs, k) => {
+        const sd = housing.sides[k];
+        const x0 = px(xs - frame.half), x1 = px(xs + frame.half);
+        const yTop = py(frame.top), yHead = py(frame.top + frame.half * 0.45);
+        ctx.strokeStyle = 'rgba(255, 196, 107, 0.75)';
+        ctx.lineWidth = 1.2;
+        // the top crosshead
+        ctx.strokeRect(x0 - 3, yHead, x1 - x0 + 6, yTop - yHead);
+        // the post, down to the pass line, then dashed below it
+        ctx.beginPath(); ctx.moveTo(x0, yTop); ctx.lineTo(x0, py(pass)); ctx.moveTo(x1, yTop); ctx.lineTo(x1, py(pass)); ctx.stroke();
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(x0, py(pass)); ctx.lineTo(x0, py(bottom) + 2); ctx.moveTo(x1, py(pass)); ctx.lineTo(x1, py(bottom) + 2); ctx.stroke();
+        ctx.setLineDash([]);
+        if (sd) {
+          // the opening, and the two crossheads' share of it: equal openings and the
+          // crossheads trading places are what a point-symmetric shift does to a frame
+          ctx.fillStyle = '#ffc46b';
+          ctx.textAlign = xs < 0 ? 'left' : 'right';
+          ctx.textBaseline = 'bottom';
+          const tx = xs < 0 ? pad : W - pad;
+          ctx.fillText(`${names[k]} 開き ${(sd.stretch * 1e6).toFixed(0)} µm`, tx, yHead - 15);
+          ctx.fillText(`上 ${(sd.crossheadTop * 1e6).toFixed(0)} ・ 下 ${(sd.crossheadBottom * 1e6).toFixed(0)} µm`, tx, yHead - 3);
+        }
+      });
+      // the screw roll's supports: how far the drive side sits below the operator side
+      ctx.fillStyle = '#ffc46b';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`${screwRoll!.id} 支持の傾き（駆動側 − 操作側）${Math.round(housing.burTilt * 1e6) || 0} µm`, W / 2, py(frame.top + frame.half * 0.45) - 27);
+      ctx.textBaseline = 'middle';
+    }
     // names last, over everything: the front roll's where two would sit together
     for (const i of [...order].reverse()) {
       const r = rolls[i];
