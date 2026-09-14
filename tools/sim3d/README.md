@@ -8,6 +8,8 @@ node tools/sim3d/table.mjs           # 5 形式の既定ケース（docs/validat
 node tools/sim3d/table.mjs '{"flatModel":"ring"}' 4hi,20hi
 node tools/sim3d/stress.mjs          # 202 ケースのストレステスト（上限 1500 反復で数分、npm run check には入れない）。例外・NaN・警告なしの未収束で exit 1
 node tools/sim3d/stress.mjs foil     # タグに一致するものだけ
+PATCH='{"postBucklingStiffness":0.05}' node tools/sim3d/stress.mjs   # 全ケースに同じパラメータを重ねる（ケース自身の設定が後）
+node tools/sim3d/postbuckling.mjs    # 座屈した後の板の剛性: 剛性 0 のビット一致・構成則の読み戻し・1/(1+βG)（npm run check に入る。約 5〜10 s）
 node tools/sim3d/audit.mjs 4hi       # 接触の釣り合い・幾何・板の検算を印字（検算の式は audit-lib.mjs、check.mjs と共通）
 node tools/sim3d/bench.mjs [out.json] # 速度と結果のベンチマーク（数値解法を変えたら前後で比べる）
 node tools/sim3d/sixhi.mjs           # 6Hi の IR シフト: 下半分の点対称（|v上(x) − v下(−x)|）と、鏡像モデルとの経路一致
@@ -50,3 +52,15 @@ node tools/sim3d/widthsweep.mjs 4hi fem 990 1040 2.5  # 板幅の掃引: 板端�
 
 `audit.mjs` は以前、スライスの荷重を補正比 k なしのスラブ法と比べていた（4Hi で 1.9e-1 と出ていたのは |k − 1|）。
 出側板厚の式もソルバと違っていた（2.5e-2 µm）。どちらも `audit-lib.mjs` でソルバの式に揃え、4Hi で 4.6e-4・2.8e-12 m になった。
+
+## 座屈した後の板の剛性（`postbuckling.mjs`）
+
+4Hi・20Hi の既定（stations 81 +「材料 幅方向 分割数」101）で、`postBucklingStiffness` 0 の明示が既定とビット一致すること、
+β 0.05・有効幅 k 1 で収束すること、結果だけから読み戻した構成則を確かめる。
+- 生きたスライスの λ がそろう
+- 座屈域の σ = b(free)
+- 顕在 = (σ − free)/E′
+- 平均張力 = 設定値
+- 座屈域の伸びの傾きが 1/(1 + βG) で下がる（±20 %）
+
+壊し方と FAIL した項目は `docs/validation.md`「座屈した後の板の剛性」の表。
