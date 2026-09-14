@@ -135,7 +135,7 @@ gh pr create --fill                # main へのマージは PR 経由
 ```bash
 npx tsc --noEmit     # 型だけ
 npm run build        # tsc + vite
-npm run check        # tsc → 2D を node 用にビルド → 回帰チェック 9 本（直列、約 1 分。どれか FAIL で非 0）
+npm run check        # tsc → 2D を node 用にビルド → 2D の回帰チェック一式（直列、約 1 分。どれか FAIL で非 0）
 ```
 
 `check` の中身は `package.json` の 1 行。ビルドは `tools/build-esm.mjs`（node だけで動くので Linux でも同じ）。
