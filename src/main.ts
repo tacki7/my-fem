@@ -3496,13 +3496,30 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 /**
+ * Whether focus last got where it is by the pointer rather than the keyboard.
+ *
+ * Chrome leaves a clicked button focused, so after clicking スラブ法 or 保存
+ * the next Space would press that button again instead of pausing. A button
+ * reached with Tab is different: there Space is the way to press it. Neither
+ * `:focus-visible` nor the focus event tells the two apart at keydown - Chrome
+ * turns `:focus-visible` on as soon as a key arrives - so the origin is kept
+ * here: a pointer press sets it, Tab clears it. Both listen in the capture
+ * phase so that nothing stopping propagation can leave it stale.
+ */
+let focusByPointer = false;
+window.addEventListener('pointerdown', () => { focusByPointer = true; }, true);
+window.addEventListener('keydown', (e) => { if (e.key === 'Tab') focusByPointer = false; }, true);
+
+/**
  * Whether the focused element does something with a key press of its own: a
- * field takes the characters, and a button or a select takes Space (press,
- * open) - taking the key from them here would pause the solve instead.
+ * field takes the characters, a select takes Space (open), and a button
+ * reached from the keyboard takes Space (press) - taking the key from them
+ * here would pause the solve instead.
  */
 function ownsKeys(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
-  return t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(t.tagName);
+  if (t.tagName === 'BUTTON') return !focusByPointer;
+  return t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);
 }
 
 window.addEventListener('keydown', (e) => {
