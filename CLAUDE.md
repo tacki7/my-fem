@@ -74,26 +74,19 @@ h0 / h1 / 荷重 / kf / R' / ひずみ を段ごとにダンプしたら 1 回�
 
 ## ヘッドレス検証の道具
 
-`screencapture` はユーザーの画面を撮るので使わない（別タブを撮って混乱した）。
-CDP 経由のヘッドレス Chrome を使う。スクラッチパッドに以下がある:
-
-| スクリプト | 用途 |
-|---|---|
-| `shot.mjs <url> <out> <wait> <w> <h>` | 全画面スクショ |
-| `crop.mjs <out> <x> <y> <w> <h> <scale>` | 現在のページの矩形切り出し（CSS px） |
-| `exec.mjs '<式>'` | ページ内で式を評価 |
-
-起動:
+`screencapture` はユーザーの画面を撮るので使わない（別タブを撮って混乱した）。人が使っている Chrome にも
+触らない。CDP 経由の**自分専用の**ヘッドレス Chrome を `tools/browser/` の道具で使う（手順は `tools/browser/README.md`）:
 
 ```bash
-npm run dev -- --port 5177 --strictPort &
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu --enable-unsafe-swiftshader --hide-scrollbars \
-  --remote-debugging-port=9222 --user-data-dir=<tmp>/chrome-profile \
-  --window-size=1700,1050 about:blank &
+npm run dev -- --port <dev> --strictPort &
+tools/browser/browser.sh start <cdp> "$(mktemp -d)"          # 止めるときは browser.sh stop <cdp>
+CDP_PORT=<cdp> node tools/browser/smoke.mjs http://localhost:<dev>   # 2D が回り 3D が収束するか
+CDP_PORT=<cdp> node tools/browser/cdp-cli.mjs nav|eval|wait|shot|crop …
 ```
 
-**十分に待ってから測る。** 3 スタンドが落ち着くのに 20〜30 秒かかる。
+ポートは作業ごとに決めて必ず渡す（既定値は無い。9222 や 5173 を決め打ちすると別の作業の Chrome・サーバーに繋がる）。
+**測るときは時間ではなく信号で待つ**（`cdp-cli.mjs wait '<式>'`）。3 スタンドが落ち着くのに 20〜30 秒かかるが、
+その秒数を待つのではなく収束の式が真になるのを待つ。
 
 ## クエリパラメータ（測定用）
 
