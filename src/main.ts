@@ -654,8 +654,15 @@ function scheduleStandRebuild(k: number): void {
   standRebuildQueue.add(k);
   clearTimeout(standRebuildTimer);
   standRebuildTimer = window.setTimeout(() => {
-    const setups = activeSetups();
+    // Sized to the mill as it is now, not to `standCount`. The stand count can
+    // have been lowered inside this debounce with the line's own rebuild still
+    // pending (both wait 160 ms, and this one was started first), and then the
+    // mill still has stands the active setups no longer cover - reading
+    // `setups[k]` for one of them threw. A stand that is leaving the line is
+    // not rebuilt: the pending line rebuild drops it anyway.
+    const setups = standSetups.slice(0, mill.count);
     for (const i of standRebuildQueue) {
+      if (i >= standCount || i >= mill.count) continue;
       mill.rebuildStand(i, params, setups);
       // that stand's meshes are new objects, so the trail collected against
       // the old ones is stale - whether or not it is the stand on screen
