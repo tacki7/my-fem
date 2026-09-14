@@ -74,6 +74,13 @@ const DIVERGE_WINDOW = 30000;
  */
 const ARC_REFIT = 1.6;
 /**
+ * Frames the bite must stay past the window's upstream limit before the window
+ * is widened - see `widenWindow`. Enough that a crossing flickering over the
+ * limit for a frame or two while the flattening settles does not remesh; far
+ * shorter than a load loop takes to wind the screws into the wall.
+ */
+const WINDOW_REFIT_FRAMES = 30;
+/**
  * When the mesh entry moves onto the barrel crossing.
  *
  * As an outer iteration, and only then: on a frame where the stand is
@@ -983,6 +990,10 @@ export class RollingSim {
   private xEntryLaid = NaN;
   /** debug: where the relaxed barrel crosses h0/2 this frame [m], pinned or not */
   entryCross = 0;
+  /** consecutive frames the bite has been past the window's upstream limit */
+  private shortfallFrames = 0;
+  /** times the window has been widened since the last rebuild, for the checks */
+  windowRefits = 0;
   private rollTick = 0;
   /** exit half thickness of the previous frame, for the oscillation detector */
   private lastExitHalf = 0;
@@ -1287,6 +1298,7 @@ export class RollingSim {
   rebuild(): void {
     const p = this.params;
     this.forgiveDivergence();
+    this.windowRefits = 0;
     this.gap = this.h1Command;
     this.stretch = 0;
     this.placedSep = this.gap;
@@ -1348,6 +1360,7 @@ export class RollingSim {
 
   resetState(): void {
     const p = this.params;
+    this.shortfallFrames = 0;
     this.time = 0;
     this.phase = 0;
     this.stretch = 0;
@@ -1432,6 +1445,82 @@ export class RollingSim {
     this.barrelY.fill(0);
   }
 
+  /**
+   * Widen the analysis window to hold a bite of length `arc` [m].
+   *
+   * The window is sized at rebuild from the *commanded* draft, and a load or
+   * gauge loop can roll far more than that: commanded 5 %, rolled 35 %, the
+   * bite three times the nominal arc and the entry held at the window's
+   * limit, where the arc upstream of it carries no pressure and the load
+   * reads low (987 tonf against a 1374 tonf target, the loop closing on it).
+   * `updateGap` calls this once the bite has stayed past the limit for
+   * WINDOW_REFIT_FRAMES.
+   *
+   * Only the window: the same `fitToArc` rule with the real arc in place of
+   * the nominal one, and the columns re-laid in it. The roll mesh, its
+   * displacement, the screws, the gap loop's identification and the feed all
+   * carry on - rebuilding would throw away everything the loops have settled.
+   * The new upstream limit is 2.4 arcs away, so it takes the bite growing
+   * another 2.25x to come back here. It never shrinks: a window larger than
+   * the bite costs little (`fitColumns` keeps the arc's share of columns),
+   * and shrinking would give the bite a way to bounce between two layouts.
+   * The nominal window returns with the next rebuild.
+   */
+  private widenWindow(arc: number): void {
+    const p = this.params;
+    this.winIn = -(arc + Math.max(3 * p.h0, 2 * arc));
+    this.winOut = Math.max(2 * p.h0, 1.5 * arc);
+    this.xEntryFit = -arc;
+    this.fitColumns();
+    this.shortfallFrames = 0;
+    this.windowRefits++;
+  }
+
+  /**
+   * Carry the solved fields from the stations they were solved on to the
+   * stations a new layout will lay for an entry at `xE`, column by column.
+   *
+   * The fields are stored per node index, and a new layout moves every
+   * column: left where they were, the velocity of one x lands at another, and
+   * the next solve starts from a field that no longer conserves anything. On
+   * the widened window (tools/sim2d/window.mjs, load P(40 %) commanded 5 %)
+   * that peaked at 4485 tonf against 1222 just before (3.7x) and threw the
+   * screws 4.2 mm through the mill stretch; carried, 1471 tonf (1.2x) and
+   * 0.3 mm. Each row keeps its place across the thickness, so only x moves.
+   */
+  private carryFields(oldXs: Float64Array, xE: number): void {
+    const m = this.flow.mesh;
+    const rows = m.rows;
+    const at = new Int32Array(m.nx + 1), frac = new Float64Array(m.nx + 1);
+    for (let i = 0; i <= m.nx; i++) {
+      const x = this.stationAt(i, xE);
+      if (x <= oldXs[0]) { at[i] = 0; frac[i] = 0; continue; }
+      if (x >= oldXs[m.nx]) { at[i] = m.nx - 1; frac[i] = 1; continue; }
+      let lo = 0, hi = m.nx;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (oldXs[mid] <= x) lo = mid; else hi = mid; }
+      at[i] = lo;
+      frac[i] = (x - oldXs[lo]) / Math.max(oldXs[hi] - oldXs[lo], 1e-30);
+    }
+    const carry = (arr: Float64Array, per: number, perColumn: number) => {
+      const old = Float64Array.from(arr);
+      for (let i = 0; i <= m.nx; i++) {
+        const k = at[i], t = frac[i];
+        for (let j = 0; j < perColumn; j++) {
+          for (let c = 0; c < per; c++) {
+            const o0 = per * (k * perColumn + j) + c, o1 = per * ((k + 1) * perColumn + j) + c;
+            arr[per * (i * perColumn + j) + c] = old[o0] + t * (old[o1] - old[o0]);
+          }
+        }
+      }
+    };
+    carry(this.flow.v, 2, rows);
+    carry(this.strain, 1, rows);
+    carry(this.temp, 1, rows);
+    carry(this.sigmaF, 1, rows);
+    // read by the next assembly as the friction cap, before the solve recovers it
+    carry(this.flow.ifPressure, 1, 1);
+  }
+
   /** Column station i for a bite entry at xE: piecewise linear in i, linear in xE. */
   private stationAt(i: number, xE: number): number {
     const m = this.flow.mesh;
@@ -1477,7 +1566,9 @@ export class RollingSim {
       return sy[lo] + f * (sy[hi] - sy[lo]);
     };
 
-    const dx0 = (this.winOut - this.winIn) / m.nx;
+    let dx0 = (this.winOut - this.winIn) / m.nx;
+    /** the stations the fields were solved on, when this frame widens the window */
+    let refitFrom: Float64Array | null = null;
 
     // Where the barrel crosses h0/2, on the relaxed roll displacement the
     // rest of this frame is meshed against - so the mesh laid below is
@@ -1499,9 +1590,8 @@ export class RollingSim {
         if (barrelAt(mid) > half0) lo = mid; else hi = mid;
       }
       const found = 0.5 * (lo + hi);
-      const reach = 0.8 * this.winIn;
-      const xNew = Math.max(reach, Math.min(-0.25 * dx0, found));
-      this.entryCross = xNew;
+      let reach = 0.8 * this.winIn;
+      let xNew = Math.max(reach, Math.min(-0.25 * dx0, found));
       // Held at the limit: find where the barrel really crosses, over the
       // whole sampled barrel rather than the window. Upstream of the samples
       // `barrelAt` is far above the strip, so the bracket holds.
@@ -1511,10 +1601,21 @@ export class RollingSim {
           const mid = 0.5 * (a + b);
           if (barrelAt(mid) > half0) a = mid; else b = mid;
         }
-        this.diag.windowShortfall = reach - 0.5 * (a + b);
+        const cross = 0.5 * (a + b);
+        this.diag.windowShortfall = reach - cross;
+        if (this.params.autoFit && ++this.shortfallFrames >= WINDOW_REFIT_FRAMES) {
+          refitFrom = Float64Array.from(m.xs);
+          this.widenWindow(-cross);
+          dx0 = (this.winOut - this.winIn) / m.nx;
+          reach = 0.8 * this.winIn;
+          xNew = Math.max(reach, Math.min(-0.25 * dx0, cross));
+          this.diag.windowShortfall = 0;
+        }
       } else {
         this.diag.windowShortfall = 0;
+        this.shortfallFrames = 0;
       }
+      this.entryCross = xNew;
       if (this.entrySnap) {
         this.xEntryFit = xNew;
         this.entrySnap = false;
@@ -1545,7 +1646,9 @@ export class RollingSim {
     } else {
       this.diag.meshResidual = 0;
       this.diag.windowShortfall = 0;
+      this.shortfallFrames = 0;
     }
+    if (refitFrom) this.carryFields(refitFrom, this.xEntryFit);
     const iE = this.fitIE, iX = this.fitIX;
 
     // Pass 1: the column stations for this frame's bite entry, and the
