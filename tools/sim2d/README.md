@@ -17,7 +17,7 @@ node tools/sim2d/mesh.mjs [旧ビルド]  # ロール半径方向の格子: 等�
 node tools/sim2d/tension.mjs    # スタンド間の速度感度 dΔv/dT が正にならないこと（432 組、Bland & Ford）
 node tools/sim2d/balance.mjs    # 面圧積分の荷重と、対称面・入側面の反力（離散系の荷重）の突き合わせ（約 25〜65 s — 下の注）
 node tools/sim2d/chain.mjs      # 保留・自動再計算・単独リビルドのスタンドが下流に渡すもの（3 スタンド、約 25〜65 s — 下の注）
-node tools/sim2d/feed.mjs       # 送り速度の自走が成り立たない状態の判定（diag.feedNotEstablished）が出る・出ない（約 60 s）
+node tools/sim2d/feed.mjs       # 送り速度の自走が成り立たない状態の判定（diag.feedNotEstablished）が出る・出ない（混み具合で 55〜90 s）
 ```
 
 所要時間（2026-09-14、Apple M2 8 コア・8 GB・Node 24、ほかのワーカーの計算と重なる中の `npm run check` の表から）:

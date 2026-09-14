@@ -184,21 +184,32 @@ const AGC_RELEASE = 1e-4;
 const FEED_SETTLED = 3;
 /**
  * The feed counts as not established - no free-running speed exists, and the
- * entry face is pushing the strip in - once the residual's floor has stayed
- * above FEED_UNESTABLISHED x the deadband for FEED_UNESTABLISHED_SOLVES solves.
+ * entry face is pushing the strip in - while the residual's floor is above
+ * FEED_UNESTABLISHED x the deadband and has stopped coming down: over the last
+ * FEED_STALL_SOLVES solves it fell by less than FEED_STALL_FALL.
  *
  * Only a readout: nothing in the solve reads it. What it is for is that the
  * load and the exit gauge go still all the same, so the stand looks settled.
- * Measured with the screws parked (docs/validation.md, 締め込みと Stone の比):
- * where the strip feeds itself the settled residual is at most 2.4x the
- * deadband (0.63 mm and 0.05 mm strip, 25-98 %); past the bite continuation
- * limit (8 mm plate from 45 %) it stays above 280x (0.085 after 2400 solves
- * at 45 %), and the floor tracks it. 30x sits between the two. The floor, not the residual, and 300 solves:
- * starting up, the residual is that large for a moment too, and the floor
- * comes down with it inside 300 solves (8 mm at 35 %, the 2 mm default).
+ *
+ * How high the floor is does not say it on its own, because a start-up can
+ * outlast any fixed wait. Measured with the screws parked, 8 mm plate: at 38 %
+ * the strip feeds itself (vIn/omega R settles at 0.370) and the floor is still
+ * above 30x at solve 612, down to 1x by 4500; at 40 % it does not (vIn/omega R
+ * sinks from 0.216 to 0.003 over 12000 solves) and the floor levels out at 49x.
+ * The trend is what differs. Over a 300-solve window ending above 30x the
+ * floor fell 47 % at 38 % and never less than 10.5 % at 39 % (still coming
+ * down at 12000 solves, 9.6x); it falls under 5 % from solve 2100 at 40 %,
+ * from 1200 at 45 % (levelling at 280x) and from 600 at 65 % (1170x). The
+ * 0.05 mm foil at 50 % is at 200x at solve 250 and under 1x by 750; where the
+ * strip feeds itself the floor ends at 2.4x or less (0.63 mm and 0.05 mm
+ * strip, 25-98 %, docs/validation.md 締め込みと Stone の比).
+ *
+ * The bite continuation limit is not the boundary: 40 % exits at 4.99 mm,
+ * above its 4.89 mm limit, and still has no feed.
  */
 const FEED_UNESTABLISHED = 30;
-const FEED_UNESTABLISHED_SOLVES = 300;
+const FEED_STALL_SOLVES = 300;
+const FEED_STALL_FALL = 0.05;
 
 export interface RollingParams {
   /* work roll */
@@ -769,10 +780,10 @@ export interface RollingDiagnostics {
    */
   feedFloor: number;
   /**
-   * The residual has stayed far outside the deadband long enough that no
-   * free-running feed speed exists: the entry face is pushing the strip in,
-   * and the still load and exit gauge are not a steady state. Always false
-   * with the feed speed prescribed. See FEED_UNESTABLISHED.
+   * The residual's floor is far outside the deadband and has stopped coming
+   * down: no free-running feed speed exists, the entry face is pushing the
+   * strip in, and the still load and exit gauge are not a steady state. Always
+   * false with the feed speed prescribed. See FEED_UNESTABLISHED.
    */
   feedNotEstablished: boolean;
   /**
@@ -1043,8 +1054,11 @@ export class RollingSim {
    * rather than pinning itself to one lucky sample.
    */
   private feedFloor = 0;
-  /** consecutive solves the floor has been above FEED_UNESTABLISHED x the deadband */
-  private feedStuck = 0;
+  /** the floor at the start of the current FEED_STALL_SOLVES window, and the solves into it */
+  private feedMark = 0;
+  private feedMarkAge = 0;
+  /** over the last complete window the floor fell by less than FEED_STALL_FALL */
+  private feedStalled = false;
   /** inside its deadband, and holding there until the residual clears the gate - see `updateFeedSpeed` */
   private feedHeld = false;
   /**
@@ -1407,7 +1421,9 @@ export class RollingSim {
     this.reactSeen = false;
     this.feedTick = 0;
     this.feedFloor = 0;
-    this.feedStuck = 0;
+    this.feedMark = 0;
+    this.feedMarkAge = 0;
+    this.feedStalled = false;
     this.feedHeld = false;
     this.strain.fill(this.entryStrain);
     this.temp.fill(this.entryTemp);
@@ -1981,7 +1997,9 @@ export class RollingSim {
 
     if (p.feedSpeed > 0) {
       this.vIn = p.feedSpeed;
-      this.feedStuck = 0;
+      this.feedMark = 0;
+      this.feedMarkAge = 0;
+      this.feedStalled = false;
       this.diag.feedNotEstablished = false;
     } else {
       // Feed forward a barrel-speed change before the loop trims the rest.
@@ -2921,8 +2939,13 @@ export class RollingSim {
       ? Math.min(this.diag.feedResidual, this.feedFloor * 1.0005)
       : this.diag.feedResidual;
     this.diag.feedFloor = this.feedFloor;
-    this.feedStuck = this.feedFloor > FEED_UNESTABLISHED * this.params.feedDeadband ? this.feedStuck + 1 : 0;
-    this.diag.feedNotEstablished = this.feedStuck >= FEED_UNESTABLISHED_SOLVES;
+    if (++this.feedMarkAge >= FEED_STALL_SOLVES) {
+      this.feedStalled = this.feedMark > 0 && this.feedFloor > (1 - FEED_STALL_FALL) * this.feedMark;
+      this.feedMark = this.feedFloor;
+      this.feedMarkAge = 0;
+    }
+    this.diag.feedNotEstablished = this.feedStalled
+      && this.feedFloor > FEED_UNESTABLISHED * this.params.feedDeadband;
 
     if (++this.feedTick < Math.max(1, this.params.feedEvery | 0)) return;
     this.feedTick = 0;
