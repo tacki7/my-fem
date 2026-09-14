@@ -431,7 +431,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       if (params.mill === '6hi') {
         hSec.body.append(toggle('IR チョックの着座', params.irSeat, (v) => { params.irSeat = v; apply(); syncModeDials(); },
           'ON で IR のチョックが BUR のチョックに載る（軸受・チョック・ライナーを直列にしたばね、圧縮だけ）。IR シフトで胴が片側へ寄ると、座の力が左右で変わる。OFF では IR は接触だけで支持される（従来どおり）。'
-          + '座は荷重を片側へ流すので、形状が悪くなることがある: 既定の 6Hi でシフト +100 mm のとき、潜在形状は着座 OFF 973 → ON 1416 I-unit。').root);
+          + '座は荷重を片側へ流すので、形状が悪くなることがある: 既定の 6Hi でシフト +100 mm のとき、潜在形状は着座 OFF 1282 → ON 1762 I-unit（幅方向 81 点では 973 → 1416）。').root);
         hSec.body.append(num('irSeatK', 'IR チョック座の剛性', 'MN/mm', 0.1, 30, 0.1, 1e9, '軸受・チョック・ライナーを直列にしたばね。既定 3 MN/mm は桁の見積り（仮定）。'));
       }
       hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
