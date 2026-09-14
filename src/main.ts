@@ -2061,23 +2061,31 @@ sNum.body.append(
   }).root,
   slider({
     label: '法線ペナルティ', min: 1e3, max: 1e7, log: true, value: params.normalPenalty,
-    format: (v) => v.toExponential(0), onInput: (v) => { params.normalPenalty = v; },
+    format: (v) => v.toExponential(0),
+    hint: 'ロール表面への食い込みを罰則で防ぐ強さ。基準粘度の何倍か。小さいと板がロールにめり込み、大きすぎると条件数が悪化する。既定 1e5。',
+    onInput: (v) => { params.normalPenalty = v; },
   }).root,
   slider({
     label: 'ひずみ速度 正則化 ε̇₀', min: 0.002, max: 0.2, log: true, value: params.eps0Frac,
     format: (v) => v.toFixed(3),
-    hint: 'ロール表面への食い込みを罰則で防ぐ強さ。基準粘度の何倍か。小さいと板がロールにめり込み、大きすぎると条件数が悪化する。既定 1e5。',
+    hint: '剛塑性の粘度 σf / (3√(ε̇² + ε̇₀²))（ε̇ は相当ひずみ速度）の正則化。噛み込みの公称ひずみ速度（通過速度 × ln(h₀ / 指令 h₁) ÷ 接触弧長）に対する比で、'
+      + 'ひずみ速度がほぼ 0 の噛み込み前後の剛体域で粘度を有限に保つ。小さいほど剛体域が硬く剛塑性に近いが、線形系の条件数が悪くなる'
+      + '（粘度は別の上限でも頭打ちになる — 弾性域 ON なら G × 通過時間、OFF なら基準粘度の 150 倍）。既定 0.02。',
     onInput: (v) => { params.eps0Frac = v; },
   }).root,
   slider({
     label: '摩擦 正則化速度', min: 0.002, max: 0.3, log: true, value: params.slipFrac,
-    format: (v) => v.toFixed(3), onInput: (v) => { params.slipFrac = v; },
+    format: (v) => v.toFixed(3),
+    hint: 'クーロン摩擦の正則化（無次元、ロール周速比）。すべり速度がこの値より小さい領域で摩擦力を滑らかに 0 に落とす（atan 型）'
+      + '。小さいほど厳密な固着–すべり境界になるが収束が悪い。中立点付近の面圧・せん断分布の形に効く。既定 0.02。',
+    onInput: (v) => { params.slipFrac = v; },
   }).root,
   slider({
     label: '自走制御 更新間隔', unit: 'frame', min: 1, max: 20, step: 1, value: params.feedEvery,
     format: (v) => v.toFixed(0),
-    hint: 'クーロン摩擦の正則化（無次元、ロール周速比）。すべり速度がこの値より小さい領域で摩擦力を滑らかに 0 に落とす（atan 型）'
-      + '。小さいほど厳密な固着–すべり境界になるが収束が悪い。中立点付近の面圧・せん断分布の形に効く。既定 0.02。',
+    hint: '送り速度（入側速度）をこのフレーム数ごとにしか改訂しない（入側反力の低域通過は毎フレーム）。改訂の合間にロール扁平が落ち着くので、'
+      + '送り速度ループと扁平ループが時間分離される — 扁平限界の近くでは荷重が送り速度に敏感で、1 にすると両者が競合しやすい。'
+      + 'タンデムで張力モデル ON のときは #2 以降の送り速度が前段の出側速度で決まるので、効くのは #1 だけ。既定 6。',
     onInput: (v) => { params.feedEvery = Math.round(v); },
   }).root,
   slider({
