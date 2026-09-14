@@ -1,9 +1,8 @@
-#!/bin/zsh
+#!/bin/sh
 # Compile the 3D core (src/sim3d and the 2D modules it imports) to plain ESM
 # under tools/sim3d/build so the node harnesses here can import it.
+# The build itself is tools/build-esm.mjs (node only, the same on macOS and Linux);
+# this is the name the harnesses and docs have always used for it.
 set -e
-HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../.." && pwd)
-cd "$ROOT" && npx tsc --outDir "$HERE/build" --rootDir src --module es2022 --moduleResolution bundler --target es2022 --noEmit false src/sim3d/*.ts
-cd "$HERE/build" && for f in sim3d/*.js sim/*.js; do sed -i '' -E "s#from '(\.\.?/[a-z0-9/]+)'#from '\1.js'#g" "$f"; done
-for f in sim3d/*.js; do ln -sf "$f" "$(basename "$f")"; done
+cd "$(dirname "$0")/../.."
+exec node tools/build-esm.mjs sim3d "$@"

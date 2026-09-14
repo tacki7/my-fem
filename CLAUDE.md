@@ -134,7 +134,7 @@ gh pr create --fill                # main へのマージは PR 経由
 ```bash
 npx tsc --noEmit     # 型だけ
 npm run build        # tsc + vite
-npm run check        # tsc → 2D を node 用にビルド → 2D の回帰チェック一式（直列、約 2〜5 分。どれか FAIL で非 0）
+npm run check        # tsc → 2D・3D を node 用にビルド → 2D の回帰チェック一式と 3D の quick 関門（直列、約 2〜5 分。どれか FAIL で非 0）
 ```
 
 所要時間は負荷しだい（2026-09-14、Apple M2・8 GB・Node 24）: 手元で 130 s（負荷平均 8→4）〜284 s（ほかの計算と重なる中）、CI（ubuntu-latest）の

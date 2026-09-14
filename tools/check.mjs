@@ -1,4 +1,4 @@
-// `npm run check`: the 2D regression gate, assembled from the scripts themselves.
+// `npm run check`: the regression gate (2D, and the 3D quick check), assembled from the scripts themselves.
 //
 //   node tools/check.mjs          run everything (exit 1 if anything FAILs)
 //   node tools/check.mjs --list   show what would run, and in which order

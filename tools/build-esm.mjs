@@ -4,6 +4,7 @@
 //
 //   node tools/build-esm.mjs sim2d [outdir]              -> tools/sim2d/build（既定）
 //   node tools/build-esm.mjs slab  [outdir]              -> tools/slab/build（既定）
+//   node tools/build-esm.mjs sim3d [outdir]              -> tools/sim3d/build（既定。src/sim3d の全部）
 //   node tools/build-esm.mjs --out <outdir> <entry.ts>…  -> 任意の入口
 //
 // tsc is taken from this repository's node_modules. `npx tsc` without
@@ -14,7 +15,7 @@
 // rewritten to the file that was actually emitted ('./slab.js', or
 // './dir/index.js' for a directory import).
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,6 +24,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRESETS = {
   sim2d: { out: 'tools/sim2d/build', entries: ['src/sim/solver.ts', 'src/sim/muinv.ts', 'src/sim/mill.ts', 'src/app/defaults.ts'] },
   slab: { out: 'tools/slab/build', entries: ['src/sim/slab.ts', 'src/sim/muinv.ts'] },
+  // Every module of the 3D core. The harnesses in tools/sim3d import them as
+  // `./build/<name>.js`, which `flatten` provides next to the `sim3d/` tree.
+  sim3d: {
+    out: 'tools/sim3d/build',
+    entries: readdirSync(join(ROOT, 'src/sim3d')).filter((f) => f.endsWith('.ts')).sort().map((f) => `src/sim3d/${f}`),
+    flatten: 'sim3d',
+  },
 };
 
 function usage(msg) {
@@ -33,7 +41,7 @@ function usage(msg) {
 }
 
 const args = process.argv.slice(2);
-let out, entries;
+let out, entries, flatten;
 if (args[0] === '--out') {
   if (args.length < 3) usage('--out needs an outdir and at least one entry');
   out = resolve(args[1]);
@@ -44,6 +52,7 @@ if (args[0] === '--out') {
   // An explicit outdir is relative to where the command was run, as build.sh did.
   out = args[1] ? resolve(args[1]) : join(ROOT, preset.out);
   entries = preset.entries.map((e) => join(ROOT, e));
+  flatten = preset.flatten;
 }
 
 const tsc = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
@@ -90,3 +99,16 @@ for (const file of emitted.filter((f) => f.endsWith('.js'))) {
   if (fixed !== src) writeFileSync(file, fixed);
 }
 if (unresolved) process.exit(1);
+
+// `<out>/<name>.js` re-exporting `<out>/<dir>/<name>.js`, for scripts that import the
+// modules of one directory by their bare names. An existing symlink there (the old
+// zsh build made them) already points at the same module and is left as it is:
+// writing through it would overwrite the module itself.
+if (flatten) {
+  for (const file of emitted.filter((f) => f.endsWith('.js') && dirname(f) === join(out, flatten))) {
+    const name = file.slice(dirname(file).length + 1);
+    const shim = join(out, name);
+    if (existsSync(shim) && lstatSync(shim).isSymbolicLink()) continue;
+    writeFileSync(shim, `export * from './${flatten}/${name}';\n`);
+  }
+}

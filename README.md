@@ -1158,7 +1158,7 @@ Newton の未知数にし、制御目標（平均出側板厚、または総荷�
 npm install
 npm run dev          # http://localhost:5173
 npm run build        # 型チェック + dist/ へビルド
-npm run check        # 型チェック + 2D の回帰チェック一式（node だけで直列、約 1〜2 分。どれか FAIL で非 0）
+npm run check        # 型チェック + 2D の回帰チェック一式 + 3D の quick 関門（node だけで直列、約 2〜5 分。どれか FAIL で非 0）
 ```
 
 `npm run check` が回すのは、`tools/` 以下で `// @check` の印が付いたスクリプト（厳密値との照合、
