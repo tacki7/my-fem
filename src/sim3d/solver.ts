@@ -255,7 +255,15 @@ export interface Result3D {
   edgeDropR: number;
   /** how much the tension lowers the yield pressure: σ̄t / k̄f over the loaded slices (0 with the feedback off) */
   yieldRelief: number;
-  /** flatness, as the peak-to-peak of the latent and manifest elongation [I-units = 1e-5] */
+  /**
+   * The elongation profile as shown and summarised: at the stations on the strip and at the
+   * strip's two edges, the latent elongation smoothed as the slices' `dEps` is, but over every
+   * slice by its weight, and the wave from it (where it passes the elongation the strip buckles
+   * at). Unlike `dEps` and `manifest`, read at the slices, it is continuous as the strip widens
+   * (see `collect`). [m] / [-] / [-]
+   */
+  profile: { x: Float64Array; latent: Float64Array; wave: Float64Array };
+  /** flatness, as the peak-to-peak of `profile`'s latent elongation and the largest wave [I-units = 1e-5] */
   latentIU: number;
   manifestIU: number;
   screw: number;
@@ -1241,6 +1249,12 @@ export class StackSolver {
 
   /** per slice: FEM load over slab load, and FEM elongation minus slab elongation */
   private femRatio: Float64Array | null = null;
+  /**
+   * What the shown elongation profile is evaluated from, as the last strip solve left it: each
+   * slice's elongation less the weighted mean, the smoothing length, and the free stress's
+   * offset λ, E′ and the buckling limit, which place the wave (see `collect`)
+   */
+  private shown = { e: new Float64Array(0), sig: 0, lambda: 0, Eeff: 0, lo: 0 };
   private femEps: Float64Array | null = null;
 
   /**
@@ -1654,6 +1668,15 @@ export class StackSolver {
     }
     evalSlices(false);
     evalFree();
+    {
+      // the shown profile's ingredients, with the mean exactly as `evalFree` takes it
+      let es = 0;
+      for (let i = 0; i < n; i++) es += eps[i] * w[i];
+      const mean = ws > 0 ? es / ws : 0;
+      const e = this.shown.e.length === n ? this.shown.e : new Float64Array(n);
+      for (let i = 0; i < n; i++) e[i] = eps[i] - mean;
+      this.shown = { e, sig, lambda, Eeff, lo };
+    }
     this.slices.forEach((sl, i) => {
       this.sigmaF[sl.s] = sigma[i];
       sl.clipped = held[i] !== 0;
@@ -1908,10 +1931,59 @@ export class StackSolver {
       x: this.x, rolls: this.rolls.slice(0, up), contacts: this.contacts.filter((c) => c.a < up && c.b < up),
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
+      profile: { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) },
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
       iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
       housing: null,
     };
+  }
+
+  /**
+   * The elongation profile as shown and summarised.
+   *
+   * The slices' own `dEps` is the smoothed elongation at each slice's position, and on an even
+   * grid the slice of an edge cell narrower than half a cell sits at the strip edge (its station
+   * is off the strip). So as the strip widened past a cell boundary a slice came onto it at no
+   * width and at once added a point at the edge, one-sided in the smoothing: on a 2Hi at 81
+   * stations the latent flatness jumped by 430 I-units (17 802 → 18 231) between 1023.75 and
+   * 1023.76 mm while the load and the crown moved in the fourth digit.
+   *
+   * Here the same smoothing - the Gaussian of the strip solve, its length `sig` - is evaluated at
+   * fixed points instead: the stations on the strip, and the strip's two edges (clipped to the
+   * slices' cells, for a strip past the barrel). It runs over every slice by its weight, so a new
+   * slice enters at zero weight, and it is not cut off at the solve's index window but at 8 σ
+   * (e^-32), so no slice enters it with a step either. The wave is the part of that elongation
+   * past the one at which the free stress reaches the buckling limit, D_cr = (σ̄ + λ − lo)/E′ -
+   * which at every slice is the solver's own `manifest` (held slack: D − D_cr; live and held
+   * taut: below D_cr).
+   */
+  private elongationProfile(): Result3D['profile'] {
+    const sl = this.slices, n = sl.length;
+    const { e, sig, lambda, Eeff, lo } = this.shown;
+    if (n === 0 || e.length !== n || !(sig > 0)) return { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) };
+    const { cellL, cellR } = this.grid;
+    const half = this.p.width / 2;
+    const xL = Math.max(-half, cellL[sl[0].s]), xR = Math.min(half, cellR[sl[n - 1].s]);
+    const pts: number[] = [xL];
+    for (const s of sl) { const x = this.x[s.s]; if (x > xL + 1e-12 && x < xR - 1e-12) pts.push(x); }
+    pts.push(xR);
+    const m = pts.length;
+    const x = Float64Array.from(pts), latent = new Float64Array(m), wave = new Float64Array(m);
+    const reach = 8 * sig;
+    const Dcr = Eeff > 0 ? (this.p.frontTension + lambda - lo) / Eeff : Infinity;
+    let j0 = 0;
+    for (let k = 0; k < m; k++) {
+      while (j0 < n - 1 && sl[j0].x < x[k] - reach) j0++;
+      let a = 0, b = 0;
+      for (let j = j0; j < n && sl[j].x <= x[k] + reach; j++) {
+        const d = (sl[j].x - x[k]) / sig;
+        const g = Math.exp(-0.5 * d * d) * sl[j].weight;
+        a += g * e[j]; b += g;
+      }
+      latent[k] = b > 0 ? a / b : 0;
+      wave[k] = Math.max(0, latent[k] - Dcr);
+    }
+    return { x, latent, wave };
   }
 
   private collect(iters: number, ms: number): void {
@@ -1996,13 +2068,16 @@ export class StackSolver {
     R.arc.fill(NaN);
     R.h0.fill(NaN); R.h1.fill(NaN); R.q.fill(NaN); R.flat.fill(NaN);
     R.dEps.fill(NaN); R.manifest.fill(NaN); R.sigmaF.fill(NaN);
-    let lat0 = Infinity, lat1 = -Infinity, man = 0;
     for (const sl of this.slices) {
       R.h0[sl.s] = sl.h0; R.h1[sl.s] = sl.h1; R.q[sl.s] = sl.q; R.flat[sl.s] = sl.flat; R.arc[sl.s] = sl.arc;
       R.dEps[sl.s] = this.dEps[sl.s]; R.manifest[sl.s] = this.manifest[sl.s];
       R.sigmaF[sl.s] = this.sigmaF[sl.s];
-      lat0 = Math.min(lat0, this.dEps[sl.s]); lat1 = Math.max(lat1, this.dEps[sl.s]);
-      man = Math.max(man, this.manifest[sl.s]);
+    }
+    R.profile = this.elongationProfile();
+    let lat0 = Infinity, lat1 = -Infinity, man = 0;
+    for (let k = 0; k < R.profile.x.length; k++) {
+      lat0 = Math.min(lat0, R.profile.latent[k]); lat1 = Math.max(lat1, R.profile.latent[k]);
+      man = Math.max(man, R.profile.wave[k]);
     }
     R.force = this.forceTotal;
     R.h1Mean = this.h1Mean;
