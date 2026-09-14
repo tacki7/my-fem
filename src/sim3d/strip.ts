@@ -22,6 +22,12 @@
  * on the same L(ε+M)^N law the 2D tab uses. Closed form because it is
  * evaluated a few thousand times a frame (every slice, every Newton
  * iteration, plus a finite difference for the tangent).
+ *
+ * σ̄t is the mean of the back and front tension by default. With
+ * `slabTension: 'split'` it is the equivalent tension of `splitDecrement`
+ * instead, where the front tension acts only between the exit and the
+ * neutral point and the back tension only between the neutral point and the
+ * entry, each amplified by the friction hill on its side.
  */
 
 export interface StripLaw {
@@ -38,11 +44,16 @@ export interface StripLaw {
   mu: number;
   /** whether the tensions act on the yield (see Params3D.tensionFeedback) */
   tensionFeedback: boolean;
+  /** how the back and front tension enter the load (see Params3D.slabTension); absent is 'mean' */
+  slabTension?: SlabTension;
   /** work roll radius [m] and elastic constants, for Hitchcock */
   R: number;
   Eroll: number;
   nuRoll: number;
 }
+
+/** the mean of the two tensions (Kármán, Siebel), or the two acting on their own sides of the neutral point */
+export type SlabTension = 'mean' | 'split';
 
 const EQ = 2 / Math.sqrt(3);
 /** the largest share of the resistance the mean tension is allowed to cancel */
@@ -68,6 +79,118 @@ export function kfMean(s: StripLaw, e0: number, e1: number): number {
   const n1 = s.lmnN + 1;
   if (b - a <= 1e-12) return kfAt(s, a);
   return (s.lmnL * (Math.pow(b + M, n1) - Math.pow(a + M, n1))) / (n1 * (b - a));
+}
+
+/** 4-point Gauss-Legendre on [-1, 1]: abscissae and weights */
+const GL4_X = [-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526];
+const GL4_W = [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538];
+
+/**
+ * The load of a pass whose back and front tension act on their own sides of
+ * the neutral point, as a decrement on the tensionless load.
+ *
+ * Kármán's equation at a constant resistance k on the parabolic arc, with
+ * θ = atan(x/√(R' h₁)) and c = 2μ√(R'/h₁), is linear in the pressure, so a
+ * tension at an end of the arc adds its own homogeneous solution to the
+ * pressure on its side (Nádai's solution):
+ *
+ *     exit  (θ < θn)   p = k (h/h₁) e^{cθ}         − σf e^{cθ}
+ *     entry (θ > θn)   p = k (h/h₀) e^{c(θ₀−θ)}    − σb e^{c(θ₀−θ)}
+ *
+ * The tension terms are exact: h dδp/dx = ∓2μ δp carries no h factor, which
+ * is why Bland & Ford's (1 − σ/k)(h/h_end) form, scaling the tension with
+ * the pressure, overstates the back tension on a hardening strip (its
+ * 1.7 L against Orowan's 0.91 L on the 4Hi pass). The tensionless parts are
+ * Bland & Ford's, and they only place the neutral point, where the two
+ * branches meet. Because the pressure is continuous there, moving the
+ * neutral point costs nothing to first order, and the load falls by
+ *
+ *     ∂P/∂σf = −∫₀^{xn} e^{cθ} dx,    ∂P/∂σb = −∫_{xn}^{L} e^{c(θ₀−θ)} dx
+ *
+ * - the friction hill over each tension's own side, not half the arc each.
+ * On the 4Hi pass at a fixed R' that is 0.36 L and 0.90 L against the mean
+ * tension's 0.56 L each (Orowan 0.34 and 0.91, the 2D FEM 0.27 and 0.92).
+ *
+ * Returned, per k L and for tensions tb = σb/k, tf = σf/k: the decrement
+ * P(σb, σf)/(kL) − P(0, 0)/(kL), which `sliceLoad` puts onto Hill's load,
+ * and its derivative in L at a fixed pass (the arc sets c, so the friction
+ * hill and the neutral point move with the flattening). NaN where the
+ * formula has nothing to say (no friction hill, or one so steep that the
+ * exponentials overflow). The integrals are 4-point Gauss-Legendre in θ:
+ * 1e-5 of the tension against 8 points over r 10-40 %, μ 0.03-0.12,
+ * R'/h 50-1000.
+ */
+export function splitDecrement(h0: number, h1: number, L: number, mu: number, tb: number, tf: number): [number, number] {
+  const dh = h0 - h1;
+  if (!(dh > 0) || !(L > 0)) return [NaN, 0];
+  const c = (2 * mu * L) / Math.sqrt(dh * h1); // 2μ √(R'/h₁) with R' = L²/Δh
+  const tanT0 = Math.sqrt(dh / h1);
+  const t0 = Math.atan(tanT0);
+  if (!(c > 0) || c * t0 > 600) return [NaN, 0];
+  if (tb === 0 && tf === 0) return [0, 0];
+  const g = h1 / h0;
+  const e0 = Math.exp(c * t0);
+  // the tensionless neutral point in closed form: e^{2cθ − cθ₀} = h₁/h₀
+  const tn0 = Math.min(t0, Math.max(0, 0.5 * t0 + Math.log(g) / (2 * c)));
+  // D = exit minus entry pressure over k, which rises through the neutral
+  // point; at the ends sec²θ is 1 and h₀/h₁
+  let tn: number;
+  if (1 - tf - e0 * (g - tb) >= 0) tn = 0;           // the exit branch is the lower one all along: no forward slip
+  else if (e0 * (1 / g - tf) - (1 - tb) <= 0) tn = t0;
+  else {
+    // Newton from the tensionless point, kept in the bracket. Loose on
+    // purpose: the load is stationary in θn (the branches meet there), so
+    // an error of 1e-10 in θn is 1e-20 in the load.
+    let lo = 0, hi = t0, t = tn0;
+    // a start with the tensions in: the branches' ratio with sec²θ frozen at θn0
+    {
+      const cs = Math.cos(tn0), s2 = 1 / (cs * cs), num = g * s2 - tb, den = s2 - tf;
+      if (num > 0 && den > 0) { const t1 = (c * t0 + Math.log(num / den)) / (2 * c); if (t1 > 0 && t1 < t0) t = t1; }
+    }
+    for (let i = 0; i < 40; i++) {
+      const cs = Math.cos(t), s2 = 1 / (cs * cs), ds2 = 2 * s2 * Math.tan(t);
+      const ep = Math.exp(c * t), em = e0 / ep;
+      const d = ep * (s2 - tf) - em * (g * s2 - tb);
+      if (d < 0) lo = t; else hi = t;
+      const dd = ep * (c * (s2 - tf) + ds2) + em * (c * (g * s2 - tb) - g * ds2);
+      let next = dd > 0 ? t - d / dd : 0.5 * (lo + hi);
+      // the bracket's ends count as inside: at an exact root the step is
+      // zero and lands on one, and a bisection from there would walk away
+      if (!(next >= lo && next <= hi)) next = 0.5 * (lo + hi);
+      const step = Math.abs(next - t);
+      t = next;
+      if (step <= 1e-10 * t0) break;
+    }
+    tn = t;
+  }
+  // the friction hill over each side times its tension, and the tensionless
+  // pressure difference over the neutral point's move; each with its
+  // derivative in c (the ends carry no terms: 0 and θ₀ are fixed, and at
+  // θn and θn0 the branches they separate are equal)
+  let tens = 0, dTens = 0, move = 0, dMove = 0;
+  if (tn > 0 && tf !== 0) {
+    const m = 0.5 * tn;
+    for (let i = 0; i < 4; i++) {
+      const t = m + m * GL4_X[i], cs = Math.cos(t), f = (GL4_W[i] * m * Math.exp(c * t)) / (cs * cs);
+      tens += tf * f; dTens += tf * t * f;
+    }
+  }
+  if (tn < t0 && tb !== 0) {
+    const m = 0.5 * (t0 + tn), hw = 0.5 * (t0 - tn);
+    for (let i = 0; i < 4; i++) {
+      const t = m + hw * GL4_X[i], cs = Math.cos(t), f = (GL4_W[i] * hw * e0 * Math.exp(-c * t)) / (cs * cs);
+      tens += tb * f; dTens += tb * (t0 - t) * f;
+    }
+  }
+  if (tn !== tn0) {
+    const m = 0.5 * (tn + tn0), hw = 0.5 * (tn - tn0); // signed: the move may be either way
+    for (let i = 0; i < 4; i++) {
+      const t = m + hw * GL4_X[i], cs = Math.cos(t), s2 = 1 / (cs * cs), ep = Math.exp(c * t), em = (g * e0) / ep;
+      move += GL4_W[i] * hw * s2 * s2 * (ep - em); dMove += GL4_W[i] * hw * s2 * s2 * (t * ep - (t0 - t) * em);
+    }
+  }
+  // per unit arc (R'/s over L is 1/tan θ₀), and dc/dL = c/L
+  return [(move - tens) / tanT0, ((dMove - dTens) / tanT0) * (c / L)];
 }
 
 export interface SliceLoad {
@@ -122,6 +245,12 @@ export function sliceLoad(
   // from below reaches it in a few steps.
   const A = kf * tens;
   const Q0 = 1.08 - 1.02 * r, Q1 = (1.79 * r * s.mu * Math.sqrt(1 - r)) / Math.sqrt(dh * h1);
+  // With the tensions split, the relief depends on the arc (the friction
+  // hill and the neutral point move with R'), so it is taken at every L.
+  // The slope below leaves that dependence out: the Newton then converges
+  // a little less than quadratically onto the same root.
+  const split = s.tensionFeedback && s.slabTension === 'split';
+  const tbSplit = Math.min(sigmaB, TENSION_CAP * kf) / kf, tfSplit = Math.min(sigmaF, TENSION_CAP * kf) / kf;
   const F = (q: number): [number, number] => {
     const b2 = (C * s.R * q) / 4;
     const b = Math.sqrt(b2);
@@ -129,6 +258,16 @@ export function sliceLoad(
     const L = b + root;
     const dL = q > 0 ? (C * s.R) / 8 * (1 / b + 1 / root) : Infinity;
     const Qp = Q0 + Q1 * L;
+    if (split) {
+      const Qe = Math.max(Qp, 0.2), dQe = Qp < 0.2 ? 0 : Q1;
+      const [dec, dDec] = splitDecrement(h0, h1, L, s.mu, tbSplit, tfSplit);
+      // the tension decrement onto Hill's load, with the mean's cap on
+      // how much of the load it may take
+      if (dec > -TENSION_CAP * Qe) return [kf * L * (Qe + dec), kf * dL * (Qe + dec + L * (dQe + dDec))];
+      if (!Number.isFinite(dec)) return [A * L * Qe, A * dL * (Qe + L * dQe)];
+      const a = kf * (1 - TENSION_CAP);
+      return [a * L * Qe, a * dL * (Qe + L * dQe)];
+    }
     if (Qp < 0.2) return [A * L * 0.2, A * 0.2 * dL];
     return [A * L * Qp, A * dL * (Qp + Q1 * L)];
   };
@@ -163,9 +302,46 @@ export function sliceLoad(
   // the strip yields once the roll pressure reaches kf − σt: under tension
   // the elastic compression it takes to get there is shorter, and plastic
   // deformation starts at a smaller draft
+  if (split) {
+    // the split tension only where the ramp can apply: it caps the relief
+    // below 0.7 k̄f and a compressive tension raises it at most to σcr
+    if (dh < (h0 * 1.3 * kf * (1 - s.nu * s.nu)) / s.E) {
+      const sigTs = splitSigma(h0, h1, L, kf, s.mu, tbSplit, tfSplit, Q0 + Q1 * L, sigT);
+      const dhElastic = (h0 * Math.max(kf - sigTs, 0.3 * kf) * (1 - s.nu * s.nu)) / s.E;
+      if (dh < dhElastic) { const t = dh / dhElastic; q *= t * t * (3 - 2 * t); }
+    }
+    return { q, runaway, Rp: (L * L) / dh, arc: L, kf, kfExit };
+  }
   const dhElastic = (h0 * Math.max(kf - sigT, 0.3 * kf) * (1 - s.nu * s.nu)) / s.E;
   if (dh < dhElastic) { const t = dh / dhElastic; q *= t * t * (3 - 2 * t); }
   return { q, runaway, Rp: (L * L) / dh, arc: L, kf, kfExit };
+}
+
+/** the equivalent mean tension of the split decrement, capped as the mean one is; `mean` where the decrement has none */
+function splitSigma(h0: number, h1: number, L: number, kf: number, mu: number, tb: number, tf: number, Qp: number, mean: number): number {
+  const Qe = Math.max(Qp, 0.2);
+  const dec = splitDecrement(h0, h1, L, mu, tb, tf)[0];
+  if (!Number.isFinite(dec)) return mean;
+  return Math.min(-dec / Qe, TENSION_CAP) * kf;
+}
+
+/**
+ * The σ̄t the load of a slice rolled h0 → h1 on an arc L takes off k̄f [Pa]:
+ * the capped mean tension, or with `slabTension: 'split'` the equivalent
+ * tension of `splitDecrement` on Hill's load. 0 with the tension feedback off.
+ */
+export function sliceTension(s: StripLaw, h0: number, h1: number, sigmaB: number, sigmaF: number, L: number): number {
+  if (!s.tensionFeedback) return 0;
+  h1 = Math.max(h1, 1e-3 * h0);
+  const e0 = Math.max(s.entryStrain, 0);
+  const kf = kfMean(s, e0, e0 + EQ * Math.log(h0 / h1));
+  const mean = Math.min(0.5 * (sigmaB + sigmaF), TENSION_CAP * kf);
+  if (s.slabTension !== 'split') return mean;
+  const dh = h0 - h1;
+  if (!(dh > 0)) return mean;
+  const r = dh / h0;
+  const Qp = 1.08 - 1.02 * r + ((1.79 * r * s.mu * Math.sqrt(1 - r)) / Math.sqrt(dh * h1)) * L;
+  return splitSigma(h0, h1, L, kf, s.mu, Math.min(sigmaB, TENSION_CAP * kf) / kf, Math.min(sigmaF, TENSION_CAP * kf) / kf, Qp, mean);
 }
 
 
