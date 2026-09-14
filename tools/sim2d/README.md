@@ -9,11 +9,14 @@
 
 ```bash
 tools/sim2d/build.sh            # src/sim → tools/sim2d/build（git 管理外）。中身は node tools/build-esm.mjs sim2d [出力先]
-node tools/sim2d/solves.mjs     # 板・ロールの PCG が反復上限に届かないこと（6 条件 × 900 フレーム、約 30 s）
+node tools/sim2d/solves.mjs     # 板・ロールの PCG が反復上限に届かないこと（6 条件 × 900 フレーム、約 12〜25 s — 下の注）
 node tools/sim2d/mesh.mjs [旧ビルド]  # ロール半径方向の格子: 等比のコア・表示する隣接比 = 実際の比（旧ビルドを渡すと半径の移動量も出す）
 node tools/sim2d/tension.mjs    # スタンド間の速度感度 dΔv/dT が正にならないこと（432 組、Bland & Ford）
 node tools/sim2d/balance.mjs    # 面圧積分の荷重と、対称面・入側面の反力（離散系の荷重）の突き合わせ（約 30 s）
 ```
+
+`solves.mjs` の所要時間（2026-09-14、Apple M2 8 コア・8 GB・Node 24）: 負荷平均 4 前後の中で単体実行 11.9 / 12.7 s。
+`npm run check` の中で他の計算と重なったときは 20〜25 s だった。
 
 `sim.advance(1/60)` が 1 フレーム。表示・UI の処理（`main.ts`）は通らないので、画面上の
 数字の確認はブラウザで行う。

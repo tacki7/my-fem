@@ -110,7 +110,7 @@ npm run dev -- --port 5177 --strictPort &
 ```bash
 git switch -c feat/<やること>      # 例: feat/agc-methods, fix/mu-inverse
 # …作業…
-npx tsc --noEmit && npm run build  # 通してからコミット
+npm run check && npm run build     # 通してからコミット（check は tsc も含む）
 git add -A && git commit
 git push -u origin HEAD
 gh pr create --fill                # main へのマージは PR 経由
