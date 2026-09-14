@@ -9,6 +9,7 @@
 | `cdp.mjs` | 最小の CDP クライアント（Node 22+、依存なし）。**ポート必須**、待つのは式が真になるまで（固定 sleep ではない） |
 | `cdp-cli.mjs` | `cdp.mjs` のコマンドライン版: `nav` / `eval` / `wait` / `shot` / `crop` |
 | `smoke.mjs` | 起動確認: 2D が例外なくフレームを進める → 3D タブのソルバが収束する（FAIL で exit 1） |
+| `panels.mjs` | 決定論モードの画面のパネルの中身を取り、2 回分を比べる（下の「パネルの比較」） |
 
 ## 使い方
 
@@ -36,6 +37,26 @@ lsof -ti tcp:5182 -sTCP:LISTEN | xargs kill
 `eval` / `wait` の式は `await` を含んでよい。UI を操作するときは DOM を取って `value` を変え、
 `dispatchEvent(new Event('change', { bubbles: true }))`。実キー・実クリックが要るときは
 `cdp.mjs` の `send('Input.dispatchKeyEvent', …)` / `send('Input.dispatchMouseEvent', …)` を使う。
+
+## パネルの比較（`panels.mjs`）
+
+画面の表示を変えないはずの変更（`src/main.ts` の分割など）を、main とブランチで同じ条件の画面を取って比べる。
+
+- `capture`: `?debug&fixeddt&stopafter=N` のページで `#left`・`#right`・`#standgrid` のテキストノードと入力欄の値を
+  文書順にすべて取る（`innerText` と違い、折りたたみ中のパネルも入る）。あわせて `Object.keys(__lab)`、
+  `__lab.stands()`（処理時間を除く）、読み込み中のエラーも保存する
+- `compare`: 違う項目を位置つきで出し、1 つでもあれば exit 1
+
+```bash
+export CDP_PORT=9232
+node tools/browser/panels.mjs capture http://localhost:5182 /path/to/main.json      # main の dev サーバーで
+node tools/browser/panels.mjs capture http://localhost:5182 /path/to/branch.json    # ブランチの dev サーバーで
+node tools/browser/panels.mjs compare /path/to/main.json /path/to/branch.json
+```
+
+クエリの既定は 1 スタンドと 3 スタンドの `?debug&tab=2d&fixeddt&stopafter=300`（引数で足せる。`stopafter` は必須）。
+右パネルのリソース欄（処理時間の内訳と JS ヒープ、`right` の 200〜245 番付近）は同じ版を 2 回取っても揺れる。
+差がそこだけなら一致とみなしてよい。先に main を 2 回取って、揺れる項目を確かめておく。
 
 ## 待ち方
 
