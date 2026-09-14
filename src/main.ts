@@ -197,7 +197,10 @@ const params: RollingParams = {
   tensionFollow: 0.5,
   tensionControl: false,
   tensionKp: 0, tensionKi: 0.5, tensionVLimit: 0.1,
-  agcMode: 'off', agcTargetForce: (800 * TONF) / 1.0,
+  agcMode: 'off',
+  // Per unit width. Not set here: it is the dial's total load over the strip
+  // width (`agcTargetPerWidth`), both of which live in `view` below.
+  agcTargetForce: 0,
   // Absolute-gauge setpoint. Seeded to the default pass's own exit so it is
   // never zero; the real value is adopted when a stand enters the mode.
   agcTargetGauge: 0.002 * (1 - 0.25),
@@ -281,8 +284,14 @@ const view = {
    * Load target as the dial carries it: total force in tonf, which is what a
    * mill's load cell reads. The solver is plane strain and wants force per
    * unit width, so `syncAgcTarget` divides this by the strip width.
+   *
+   * Every stand is seeded from it, and from then on it shows the selected
+   * stand's target. 1040 tonf is the default every measurement in README and
+   * docs/validation.md was taken at: the stands used to be seeded from a
+   * literal 800 tonf per metre of width, 1040 tonf on the 1.3 m strip, while
+   * this still read 800.
    */
-  agcTargetTonf: 800,
+  agcTargetTonf: 1040,
   /**
    * Roll speed as the dial carries it: barrel surface speed in m/min, which is
    * how a line is actually run. The solver wants an angular speed, so
@@ -305,6 +314,7 @@ const view = {
    */
   millModulusMNmm: 5.8,
 };
+params.agcTargetForce = agcTargetPerWidth();
 
 /* ── query string overrides ──────────────────────────────────────────────── */
 // Read here, written into the state further down by `applyQuery` - after a
@@ -328,7 +338,7 @@ const standSetups: StandSetup[] = Array.from({ length: MAX_STANDS }, (_, k) => (
   R: params.R,
   mu: params.mu,
   reduction: params.reduction,
-  targetForce: params.agcTargetForce,
+  targetForce: agcTargetPerWidth(),
   /*
    * Seeded down the schedule, not flat.
    *
@@ -363,9 +373,8 @@ const restored = settings.applyPending(
   view as unknown as Record<string, unknown>,
   standSetups as unknown as Record<string, unknown>[]);
 if (restored.applied) {
-  // Derived from the width and the per-stand targets, both of which may have
-  // just moved underneath them.
-  params.agcTargetForce = agcTargetPerWidth();
+  // Derived from the width and the dials, which may have just moved underneath
+  // them. The load target is re-derived at boot, from the stand on screen.
   params.millModulus = millModulusPerWidth();
   params.omega = omegaFromMpm();
   params.lineSpeed = lineSpeedFromMpm();
@@ -478,6 +487,14 @@ try {
   f.hidden = false;
   f.textContent = `起動に失敗しました。\n\n${(e as Error).message}\n\nWebGL2 対応ブラウザで開いてください。`;
   throw e;
+}
+if (restored.applied) {
+  // The load dial shows the stand on screen, as `syncStandDials` leaves it on
+  // every selection. A file does not have to agree - one an earlier version
+  // saved straight after boot carries a dial of 800 tonf over stands at 1040 -
+  // and the mill was just built from the stands.
+  view.agcTargetTonf = (standSetups[view.stand].targetForce * view.stripWidth) / TONF;
+  params.agcTargetForce = agcTargetPerWidth();
 }
 
 const cam: Camera = { cx: 0, cy: 0, zoom: 4000 };

@@ -9,13 +9,11 @@
 // converted into `params` (syncMillModulus, syncRollSpeed, syncAgcTarget in main.ts).
 // The conversions that reach a stand are redone here from the same `view` numbers:
 //
-//   millModulus = millModulusMNmm * MN_PER_MM / stripWidth     (per unit width)
-//   omega       = rollSpeedMpm / 60 / R
-//   lineSpeed   = rollSpeedMpm / 60
-//
-// agcTargetForce stays the literal: syncAgcTarget converts the shared value, but the
-// per-stand setups the mill is built from are seeded from the literal before that runs,
-// so the literal is what a stand solves with. If that seeding changes, change it here.
+//   millModulus    = millModulusMNmm * MN_PER_MM / stripWidth     (per unit width)
+//   agcTargetForce = agcTargetTonf * TONF / stripWidth            (per unit width; the
+//                    per-stand setups are seeded from the same conversion)
+//   omega          = rollSpeedMpm / 60 / R
+//   lineSpeed      = rollSpeedMpm / 60
 //
 // The patch is applied after the conversions, as a dial changed by hand would be.
 import { readFileSync } from 'node:fs';
@@ -47,6 +45,7 @@ export function defaultParams(patch = {}) {
   const stripWidth = viewNumber(view, 'stripWidth');
   const rollSpeedMpm = viewNumber(view, 'rollSpeedMpm');
   params.millModulus = (viewNumber(view, 'millModulusMNmm') * MN_PER_MM) / Math.max(stripWidth, 1e-6);
+  params.agcTargetForce = (viewNumber(view, 'agcTargetTonf') * TONF) / Math.max(stripWidth, 1e-6);
   params.omega = rollSpeedMpm / MPM / Math.max(params.R, 1e-6);
   params.lineSpeed = rollSpeedMpm / MPM;
   return { ...params, ...patch };
