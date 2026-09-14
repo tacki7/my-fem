@@ -17,6 +17,7 @@ import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, hel
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
+import { housingCompliance, halfStiffness } from '../sim3d/housing';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
@@ -254,6 +255,24 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   secSec.body.append(secCanvas);
   const sectionView = new SectionView(secCanvas);
   into(gNum, 'flatCmp', '扁平コンプライアンス 断面FEM / Hertz');
+  // The housing deformation mode's frame and seats. In the panel only while the
+  // solve has a housing result - with the mode off, or on a mill outside its
+  // scope, the panel reads exactly as it did before the mode existed.
+  const housingSec = section('ハウジング', {
+    open: true,
+    hint: 'ハウジング変形考慮モードの結果。左右（操作側 −x・駆動側 +x）のハウジング枠それぞれについて、枠が受ける荷重（上下チョック荷重の平均）と窓の開き（ポストの伸び + 上下クロスヘッドのたわみ）。圧下ロールの傾きは駆動側の支持点の鉛直変位 − 操作側。IR チョック座の力は 6Hi で着座 ON のときの圧縮力（上 −x・上 +x・下 −x・下 +x）。ミル剛性は圧延荷重 ÷ 左右の窓の開きの平均。',
+  });
+  const housingStats = new StatGrid();
+  housingStats.add('hLoad', 'ハウジング荷重 操作側 / 駆動側', 'tonf')
+    .add('hStretch', '窓の開き 操作側 / 駆動側', 'µm')
+    .add('hPost', '　うち ポスト 操作側 / 駆動側', 'µm')
+    .add('hTop', '　うち 上クロスヘッド 操作側 / 駆動側', 'µm')
+    .add('hBottom', '　うち 下クロスヘッド 操作側 / 駆動側', 'µm')
+    .add('hTilt', '圧下ロールの傾き（駆動側 − 操作側）', 'µm')
+    .add('hSeatTop', 'IR チョック座 上 −x / +x', 'tonf')
+    .add('hSeatBottom', 'IR チョック座 下 −x / +x', 'tonf')
+    .add('hModulus', 'ミル剛性（荷重 ÷ 窓の開き）', 'MN/mm');
+  housingSec.body.append(housingStats.root);
   right.append(loadSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
 
   /* ── left panel: inputs ── */
@@ -270,19 +289,22 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       dials.get(dn as string)?.set(pr[dn as string]);
     }
   };
+  /** the housing section's derived-stiffness line, rewritten on every change while the section is built */
+  let refreshHousingHint: (() => void) | null = null;
   const apply = () => {
     clampNecks();
     solver.setParams(params);
+    refreshHousingHint?.();
     dirty = true;
     running = true;
   };
   /** a dial on a numeric field, in display units `scale` × SI */
   const num = (
     key: keyof Params3D, label: string, unit: string, min: number, max: number, step: number,
-    scale: number, hint?: string, log = false,
+    scale: number, hint?: string, log = false, format?: (v: number) => string,
   ) => {
     const h = slider({
-      label, unit, min, max, step, log, value: (params[key] as number) / scale, hint,
+      label, unit, min, max, step, log, value: (params[key] as number) / scale, hint, format,
       onInput: (v) => { (params as unknown as Record<string, number>)[key as string] = v * scale; apply(); },
     });
     dials.set(key as string, { set: (v) => h.set(v / scale) });
@@ -386,6 +408,48 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
     if (!actSec.body.children.length) actSec.body.append(el('div', 'ctrl-hint', '2Hi にはアクチュエータがない（圧下とレベリングのみ）。'));
     left.append(actSec.root);
+
+    // housing deformation mode
+    const housingInScope = params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi';
+    const hSec = section('ハウジング', {
+      remember: false, open: false,
+      hint: 'ハウジング変形考慮モード。OFF（既定）では圧下ロールの各チョックが独立したばね（「制御・目標」のハウジング剛性）に載る。ON では左右それぞれのハウジング枠（ポスト 2 本と上下のクロスヘッド）に載り、上下のチョックがポストでつながる。'
+        + '枠だけでは IR シフトの左右非対称は変わらない（窓の開きは左右で等しく、上下のクロスヘッドのたわみが点対称に入れ替わるだけ）。非対称を変えるのは 6Hi の IR チョックの着座（BUR チョックに圧縮だけで載る）。'
+        + '枠の寸法と座の剛性の既定は桁を見積もった仮定で、実機の図面の値ではない（docs/validation.md「ハウジング変形考慮モード」）。',
+    });
+    const modeToggle = toggle('ハウジング変形考慮モード', params.housingMode, (v) => { params.housingMode = v; apply(); syncModeDials(); },
+      'ON で圧下ロールのチョックをハウジング枠に載せる。枠の剛性は下の寸法から計算する（「ハウジング剛性」は圧下ロールには使わなくなる）。');
+    hSec.body.append(modeToggle.root);
+    refreshHousingHint = null;
+    if (!housingInScope) {
+      modeToggle.setEnabled(false);
+      hSec.body.append(el('div', 'ctrl-hint', `${MILL_LABEL[params.mill]} は対象外: クラスタミルはバッキング軸のサドルがハウジングに直接載り、窓の開き方が 2Hi・4Hi・6Hi の枠とは別物なので、このモードでは扱わない（ON のままでもこの形式は今の支持で解く）。`));
+    } else {
+      if (params.mill === '6hi') {
+        hSec.body.append(toggle('IR チョックの着座', params.irSeat, (v) => { params.irSeat = v; apply(); syncModeDials(); },
+          'ON で IR のチョックが BUR のチョックに載る（軸受・チョック・ライナーを直列にしたばね、圧縮だけ）。IR シフトで胴が片側へ寄ると、座の力が左右で変わる。OFF では IR は接触だけで支持される（従来どおり）。'
+          + '座は荷重を片側へ流すので、形状が悪くなることがある: 既定の 6Hi でシフト +100 mm のとき、潜在形状は着座 OFF 973 → ON 1416 I-unit。').root);
+        hSec.body.append(num('irSeatK', 'IR チョック座の剛性', 'MN/mm', 0.1, 30, 0.1, 1e9, '軸受・チョック・ライナーを直列にしたばね。既定 3 MN/mm は桁の見積り（仮定）。'));
+      }
+      hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
+      hSec.body.append(num('housingPostCount', 'ポスト 本数（片側）', '本', 1, 4, 1, 1, '片側のハウジングの窓を作るポストの数。ふつうは 2 本（入側・出側）。'));
+      hSec.body.append(num('housingPostLength', 'ポスト 長さ', 'm', 1, 8, 0.1, 1, '上下のクロスヘッドの間のポストの長さ。既定 4.5 m（仮定）。'));
+      hSec.body.append(num('housingCrossSpan', 'クロスヘッド スパン', 'm', 0.5, 4, 0.05, 1, 'ポスト中心の間隔（クロスヘッドはこの 2 点で支えられ、中央にチョック荷重を受ける梁）。既定 1.8 m（仮定）。'));
+      hSec.body.append(num('housingCrossI', 'クロスヘッド 断面二次モーメント', 'm⁴', 1e-4, 5e-2, 1e-4, 1, '曲げのたわみ F S³ / (48 E I)。既定 4.5×10⁻³ m⁴（700 × 420 mm の断面を仮定）。', true, (v) => v.toExponential(2)));
+      hSec.body.append(num('housingCrossShearArea', 'クロスヘッド せん断断面積', 'm²', 0.05, 1.5, 0.01, 1, 'せん断のたわみ F S / (4 G A_s)。既定 0.3 m²（仮定）。'));
+      hSec.body.append(num('housingE', 'ハウジング ヤング率', 'GPa', 100, 250, 1, 1e9, '鋳鋼・鋼板のハウジング。既定 206 GPa。'));
+      const derived = el('div', 'ctrl-hint');
+      refreshHousingHint = () => {
+        const c = housingCompliance(params);
+        const k = halfStiffness(c);
+        derived.textContent = `片側の鉛直剛性（上下対称なときの 1 チョック）: ${(k / 1e9).toFixed(2)} MN/mm ／ `
+          + `ポスト ${(c.post * 1e12).toFixed(2)} µm/MN・クロスヘッド ${(c.crosshead * 1e12).toFixed(2)} µm/MN（荷重あたりの伸び・たわみ）。`
+          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。';
+      };
+      refreshHousingHint();
+      hSec.body.append(derived);
+    }
+    left.append(hSec.root);
 
     // profiles
     const profSec = section('ロールプロファイル', { remember: false, open: false });
@@ -492,6 +556,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     on('reduction', params.mode === 'gauge');
     on('targetForce', params.mode === 'force');
     on('screw', params.mode === 'screw');
+    // the housing frame's dimensions only mean something with the mode on, and
+    // with it on the screw roll no longer sits on the per-support stiffness
+    const housingOn = params.housingMode && (params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi');
+    for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
+    on('irSeatK', params.housingMode && params.irSeat);
+    on('housingK', !housingOn);
   };
 
   buildLeft();
@@ -529,7 +599,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
-    sideView.draw(st, params.width);
+    sideView.draw(st, params.width, R.housing);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
     charts.defl.draw(R.rolls.map((r, i): XYSeries => ({
@@ -625,6 +695,25 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
         stats.set('flatCmp', `${(ringCompliance(inf, b) / johnson).toFixed(3)} (b = ${(b * 1e3).toFixed(1)} mm)`);
       } else stats.set('flatCmp', '—');
       sectionView.draw(inf, qc, sectionMagnify, `WR ／ 板中央 q = ${(qc / 1e6).toFixed(2)} kN/mm`);
+    }
+
+    // housing
+    if (R.housing) {
+      const h = R.housing;
+      if (!housingSec.root.isConnected) right.insertBefore(housingSec.root, contactSec.root);
+      const pair = (f: (s: (typeof h.sides)[number]) => number, scale: number, digits: number) => h.sides.map((sd) => (f(sd) * scale).toFixed(digits)).join(' / ');
+      housingStats.set('hLoad', pair((sd) => sd.force, 1 / TONF, 1));
+      housingStats.set('hStretch', pair((sd) => sd.stretch, 1e6, 1));
+      housingStats.set('hPost', pair((sd) => sd.post, 1e6, 1));
+      housingStats.set('hTop', pair((sd) => sd.crossheadTop, 1e6, 1));
+      housingStats.set('hBottom', pair((sd) => sd.crossheadBottom, 1e6, 1));
+      housingStats.set('hTilt', (h.burTilt * 1e6).toFixed(1));
+      const seats = (from: number) => (h.seatForces.length ? h.seatForces.slice(from, from + 2).map((f) => (f / TONF).toFixed(1)).join(' / ') : '—（座なし）');
+      housingStats.set('hSeatTop', seats(0));
+      housingStats.set('hSeatBottom', seats(2));
+      housingStats.set('hModulus', (h.millModulus / 1e9).toFixed(2));
+    } else if (housingSec.root.isConnected) {
+      housingSec.root.remove();
     }
 
     // chips
