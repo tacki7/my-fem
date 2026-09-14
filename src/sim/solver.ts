@@ -704,6 +704,20 @@ export interface RollingDiagnostics {
    */
   meshResidual: number;
   /**
+   * How much of the bite the analysis window cannot reach [m]; 0 while it fits.
+   *
+   * The window is sized once, at rebuild, from the *commanded* draft, and the
+   * mesh entry is never put further upstream than 0.8 of it. Under load
+   * control the draft can grow well past the command (5 % commanded, 35 %
+   * rolled and climbing), and then the barrel meets the incoming strip upstream of that
+   * limit: the entry sits on the limit, `meshResidual` reads 0 because the
+   * columns are exactly where they were put, and the strip upstream thins
+   * under a barrel that carries no pressure there - the load reads low, and a
+   * load loop squeezes harder. This is the distance from the limit to the
+   * real crossing.
+   */
+  windowShortfall: number;
+  /**
    * The best that residual has managed lately - the noise floor the plant
    * imposes, not a target. The gap loop waits for the feed to reach *this*,
    * not an arbitrary deadband it may be unable to get under.
@@ -1463,8 +1477,23 @@ export class RollingSim {
         const mid = 0.5 * (lo + hi);
         if (barrelAt(mid) > half0) lo = mid; else hi = mid;
       }
-      const xNew = Math.max(0.8 * this.winIn, Math.min(-0.25 * dx0, 0.5 * (lo + hi)));
+      const found = 0.5 * (lo + hi);
+      const reach = 0.8 * this.winIn;
+      const xNew = Math.max(reach, Math.min(-0.25 * dx0, found));
       this.entryCross = xNew;
+      // Held at the limit: find where the barrel really crosses, over the
+      // whole sampled barrel rather than the window. Upstream of the samples
+      // `barrelAt` is far above the strip, so the bracket holds.
+      if (found < reach && sx.length >= 2) {
+        let a = Math.min(sx[0], reach), b = reach;
+        for (let k = 0; k < 48; k++) {
+          const mid = 0.5 * (a + b);
+          if (barrelAt(mid) > half0) a = mid; else b = mid;
+        }
+        this.diag.windowShortfall = reach - 0.5 * (a + b);
+      } else {
+        this.diag.windowShortfall = 0;
+      }
       if (this.entrySnap) {
         this.xEntryFit = xNew;
         this.entrySnap = false;
@@ -1494,6 +1523,7 @@ export class RollingSim {
       if (stretch > ARC_REFIT || stretch < 1 / ARC_REFIT) this.fitColumns();
     } else {
       this.diag.meshResidual = 0;
+      this.diag.windowShortfall = 0;
     }
     const iE = this.fitIE, iX = this.fitIX;
 
@@ -3423,7 +3453,7 @@ function emptyDiag(): RollingDiagnostics {
     rollPeakVm: 0, feedReaction: 0, feedFace: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
     rollCgIterations: 0, rollCgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
-    feedResidual: 0, feedFloor: 0, meshResidual: 0,
+    feedResidual: 0, feedFloor: 0, meshResidual: 0, windowShortfall: 0,
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,
     elasticEntryTheory: 0, elasticEntryHertz: 0,
     springback: 0, exitThicknessGap: 0, elasticEntryCompression: 0,
