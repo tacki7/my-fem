@@ -1689,7 +1689,18 @@ sIncomp.setEnabled(!params.elasticZones);
 const tAutoFit = toggle('解析窓とニップ集中度を自動', params.autoFit, (v) => {
   params.autoFit = v;
   sWinIn.setEnabled(!v); sWinOut.setEnabled(!v); sBite.setEnabled(!v);
-  scheduleRebuild();
+  if (v) { scheduleRebuild(); return; }
+  // Off keeps the window the dials show - the stand on screen's, which
+  // `syncWindowDials` holds in `params` - for every stand. A stand already
+  // solving on exactly that window has nothing to rebuild, and rebuilding it
+  // anyway threw its state away: the load fell from 940 to 377 tonf and had
+  // to climb back. Only the stands on a window of their own are rebuilt, each
+  // on its own, so the rest of the line keeps running.
+  for (let k = 0; k < mill.count; k++) {
+    const st = mill.stands[k];
+    if (st.winIn !== params.windowIn || st.winOut !== params.windowOut
+      || st.biteGradeEff !== params.biteGrade) scheduleStandRebuild(k);
+  }
 });
 const autoFitHint = el('div', 'ctrl-hint');
 autoFitHint.textContent =
