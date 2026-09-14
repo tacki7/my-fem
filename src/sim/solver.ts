@@ -1674,8 +1674,17 @@ export class RollingSim {
    * so re-entering the schedule costs nothing: lower the target back below the
    * entry gauge and the stand resumes from where it was, rather than
    * re-converging from a seed.
+   *
+   * Everything else the strip carries passes through with its gauge. The
+   * next stand reads its entry strain, temperature and speed from these
+   * readouts, and they used to be left at whatever the stand last solved -
+   * from a stand parked since start-up, zero strain and no temperature, so
+   * everything downstream rolled unworked material at the line's entry
+   * temperature. `arrivingSpeed` is the speed the
+   * strip reaches this stand at, which the line knows and the stand does not;
+   * without one (the first stand) the barrel speed stands in for it.
    */
-  passThrough(): void {
+  passThrough(arrivingSpeed = NaN): void {
     const d = this.diag;
     const p = this.params;
     d.agcIdle = true;
@@ -1698,9 +1707,15 @@ export class RollingSim {
     d.arcLength = 0;
     d.reductionRatio = 1;
     d.millSpring = 0;
-    d.exitSpeed = p.omega * p.R;
+    d.exitSpeed = arrivingSpeed > 0 && Number.isFinite(arrivingSpeed) ? arrivingSpeed : p.omega * p.R;
     d.entrySpeed = d.exitSpeed;
     d.agcMeasured = p.h0;
+    d.entryStrain = this.entryStrain;
+    d.exitStrain = this.entryStrain;
+    d.entryTemp = this.entryTemp;
+    d.exitTemp = this.entryTemp;
+    d.tempRise = 0;
+    d.exitFlowStress = uniaxial(p, this.entryStrain, this.entryTemp);
     this.lastStepMs = 0;
   }
 

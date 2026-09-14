@@ -205,6 +205,8 @@ export class Mill {
   private histAt = 0;
   /** consecutive frames each stand has been held, so a hold cannot be forever */
   private heldFor: number[] = [];
+  /** speed the strip last arrived at each stand with [m/s], for a parked stand to pass on */
+  private arriving: number[] = [];
   /**
    * The conditions each stand was last synced to - a copy, never the solver's
    * own `params`. What "the conditions changed" means for a stand that has
@@ -265,6 +267,7 @@ export class Mill {
     this.fittedH0 = [];
     this.h1Hist = [];
     this.heldFor = [];
+    this.arriving = [];
     this.cond = [];
     this.histAt = 0;
     let hIn = base.h0;
@@ -331,8 +334,7 @@ export class Mill {
     this.stands[k] = new RollingSim(p);
     this.cond[k] = { ...p };
     this.fittedH0[k] = hIn;
-    this.h1Hist[k] = new Array(STEADY_WINDOW).fill(0);
-    this.heldFor[k] = 0;
+    this.rearm(k, true);
   }
 
   /**
@@ -537,6 +539,29 @@ export class Mill {
     // state would converge and the badge go on saying 発散.
     st.forgiveDivergence();
     st.resetState();
+    this.rearm(k);
+  }
+
+  /**
+   * The line's side of a stand starting over: whatever the chain remembers
+   * about stand k was measured against the state that has just gone.
+   *
+   * Shared by every way a stand starts again - the operator's reset, the
+   * automatic restart after a NaN, a rebuild for a new roll. The last two used
+   * to skip it, so the gaps either side stayed armed and read the fresh seed's
+   * feed reaction as a real tension on the very next frame: on the settled
+   * three-stand line under 'dist' and control, #1→#2 sat at its zero clamp
+   * for 29 frames after #2 restarted and #2→#3 jumped to 56 MPa.
+   *
+   * `keepControl` keeps what the gaps know that is not the stand's: the
+   * controller's trims and integrals, which are the line's speed-ratio
+   * correction, and the queues, which hold strip that has already been rolled.
+   * Throwing those away as well put the cone back to where it was before the
+   * line settled, and the first read after re-arming then jumped - 93 / 75 MPa
+   * on the same restart, against 31 / 25 MPa keeping them. The operator's
+   * reset still clears everything; that is what "start again" asks for.
+   */
+  private rearm(k: number, keepControl = false): void {
     this.h1Hist[k] = new Array(STEADY_WINDOW).fill(0);
     this.heldFor[k] = 0;
     // The gaps either side go back to the schedule with the stand: a tension
@@ -546,8 +571,11 @@ export class Mill {
       if (!g) continue;
       const h1 = this.stands[j].params.h0 * (1 - this.stands[j].params.reduction);
       g.T = this.cond[j]?.frontTension !== undefined ? this.cond[j].frontTension * h1 : g.T;
-      g.queue.reset(this.tp.L, h1);
-      g.integ = 0; g.trim = 0; g.tau = NaN; g.warm = 0; g.warmed = false; g.fresh = false;
+      if (!keepControl) {
+        g.queue.reset(this.tp.L, h1);
+        g.integ = 0; g.trim = 0;
+      }
+      g.tau = NaN; g.warm = 0; g.warmed = false; g.fresh = false;
     }
   }
 
@@ -582,6 +610,13 @@ export class Mill {
       const cur = st.params.h0;
       const lim = Math.max(cur, h) * H0_RATE;
       st.params.h0 = cur > 0 ? cur + Math.max(-lim, Math.min(lim, h - cur)) : h;
+      // A stand upstream that has just started over has no readouts yet - an
+      // empty diag, exit gauge 0 - and its strain and heat are then unknown,
+      // not zero. Handed on as they read, the stand here re-transported its
+      // whole field from unworked material at the entry temperature for that
+      // frame. What arrived last frame is the better guess.
+      if (!(up.exitThickness > 0) || !Number.isFinite(up.exitThickness)) continue;
+      if (up.exitSpeed > 0 && Number.isFinite(up.exitSpeed)) this.arriving[k] = up.exitSpeed;
       // Strain and temperature are not rate limited the way the gauge is. The
       // limit on h0 exists because the gauge feeds the mesh and the screw
       // rails, where a step would jolt the gap loop; these two only reach the
@@ -703,18 +738,19 @@ export class Mill {
     }
     this.histAt++;
 
-    for (const st of this.stands) {
+    for (let k = 0; k < n; k++) {
+      const st = this.stands[k];
       // A stand whose absolute-gauge target is at or above its entry gauge has
       // nothing to roll. Stepping it would open the screws until the bite
       // empties and then report the residue of a solve with no contact, so it
       // is parked instead: the strip passes through at entry gauge, which is
       // what a stand set to its own entry actually does.
-      if (st.gaugeIdle) { st.passThrough(); continue; }
+      if (st.gaugeIdle) { st.passThrough(k > 0 ? this.arriving[k] : NaN); continue; }
       st.advance(dt);
       // A stand that has gone to NaN restarts itself here, before the line
       // reads it: downstream stands take their entry gauge from this one,
       // and a NaN handed on is a line gone, not a stand.
-      st.recoverIfDiverged(performance.now());
+      if (st.recoverIfDiverged(performance.now())) this.rearm(k, true);
     }
     if (tm !== 'off') this.updateTension(dt);
     this.collect();
