@@ -69,6 +69,22 @@ const nice = (v: number): string => {
   return v.toFixed(3);
 };
 
+/**
+ * The width axis's labels: on every grid line where they fit, otherwise on every
+ * other one - the edges and the centre - so a narrow chart does not print its
+ * numbers over each other.
+ */
+function xTickEvery(ctx: CanvasRenderingContext2D, xr: number, spacing: number): 1 | 2 {
+  const widest = Math.max(ctx.measureText((-xr).toFixed(0)).width, ctx.measureText(xr.toFixed(0)).width);
+  return widest + 8 <= spacing ? 1 : 2;
+}
+
+/** a width-axis label centred on its grid line, kept inside the canvas at the right end */
+function xTickLabel(ctx: CanvasRenderingContext2D, x: number, px: number, y: number, W: number): void {
+  const text = x.toFixed(0);
+  ctx.fillText(text, Math.min(px, W - 2 - ctx.measureText(text).width / 2), y);
+}
+
 /** A profile chart: several series against the width coordinate. */
 export class LineChart {
   /** what was last drawn, so a hover can be painted over it without recomputing */
@@ -141,11 +157,12 @@ export class LineChart {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const nx = 4;
+    const every = xTickEvery(ctx, xr, pw / nx);
     for (let i = 0; i <= nx; i++) {
       const x = -xr + (2 * xr * i) / nx;
       const px = Math.round(sx(x)) + 0.5;
       ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + ph); ctx.stroke();
-      ctx.fillText(`${x.toFixed(0)}`, px, padT + ph + 4);
+      if (i % every === 0) xTickLabel(ctx, x, px, padT + ph + 4, W);
     }
     // zero line
     if (lo < 0 && hi > 0) {
@@ -1013,7 +1030,8 @@ export class HeatChart {
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    for (let i = 0; i <= 4; i++) { const xx = -xr + (2 * xr * i) / 4; ctx.fillText(`${xx.toFixed(0)}`, sx(xx), padT + ph + 4); }
+    const every = xTickEvery(ctx, xr, pw / 4);
+    for (let i = 0; i <= 4; i += every) { const xx = -xr + (2 * xr * i) / 4; xTickLabel(ctx, xx, sx(xx), padT + ph + 4, W); }
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillText('入側', padL - 5, padT + ph * 0.06);

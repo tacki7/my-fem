@@ -167,11 +167,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
   const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
   const cGauge = cell('v3-gauge', '板厚プロファイル', '板幅中央を 0 とした偏差');
+  const cCrown = cell('v3-crown', 'クラウン比率', '板厚プロファイル ÷ 中央の板厚');
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
   const cFlow = cell('v3-flow', '横流れ速度 u_x(x, z)', '材料 FEM ／ ロール周速比 [%] ／ 正 = +x 側へ（板端へ広がる流れ）');
-  chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cEps.root, cSig.root, cPress.root, cFlow.root);
+  chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cCrown.root, cEps.root, cSig.root, cPress.root, cFlow.root);
 
   // the headline numbers as chips over the front view, like the 2D top bar
   const status = el('div', 'v3-status');
@@ -208,7 +209,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const frontView = new FrontView(front.canvas);
   const charts = {
     defl: new LineChart(cDefl.canvas), flat: new LineChart(cFlat.canvas), load: new LineChart(cLoad.canvas),
-    gauge: new LineChart(cGauge.canvas), eps: new LineChart(cEps.canvas), sig: new LineChart(cSig.canvas),
+    gauge: new LineChart(cGauge.canvas), crown: new LineChart(cCrown.canvas), eps: new LineChart(cEps.canvas), sig: new LineChart(cSig.canvas),
     press: new HeatChart(cPress.canvas), flow: new HeatChart(cFlow.canvas),
   };
 
@@ -632,21 +633,27 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // Entry and exit, each against its own thickness at the strip centre: the two
     // shapes on one scale, the entry crown the pass was given and the exit profile
     // it produced, and an edge reads as its crown with the sign turned.
-    const centred = (a: Float64Array) => {
-      let c = NaN;
+    const centreOf = (a: Float64Array) => {
       for (let i = 1; i < a.length; i++) {
         const x0 = R.x[i - 1], x1 = R.x[i];
         if (x0 <= 0 && x1 >= 0 && Number.isFinite(a[i - 1]) && Number.isFinite(a[i])) {
-          c = a[i - 1] + (a[i] - a[i - 1]) * (-x0 / (x1 - x0));
-          break;
+          return a[i - 1] + (a[i] - a[i - 1]) * (-x0 / (x1 - x0));
         }
       }
-      return Float64Array.from(a, (v) => (v - c) * 1e6);
+      return NaN;
     };
+    const h0c = centreOf(R.h0), h1c = centreOf(R.h1);
     charts.gauge.draw([
-      { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: centred(R.h0), dash: true, width: 2 },
-      { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: centred(R.h1), width: 2 },
+      { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: Float64Array.from(R.h0, (v) => (v - h0c) * 1e6), dash: true, width: 2 },
+      { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: Float64Array.from(R.h1, (v) => (v - h1c) * 1e6), width: 2 },
     ], { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true });
+    // The same profiles over their centre thickness, the crown ratio. Where the exit's
+    // follows the entry's the pass kept the shape; before lateral flow, entry minus
+    // exit is the elongation relative to the centre (1 % = 1000 I-units).
+    charts.crown.draw([
+      { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: Float64Array.from(R.h0, (v) => ((v - h0c) / h0c) * 100), dash: true, width: 2 },
+      { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: Float64Array.from(R.h1, (v) => ((v - h1c) / h1c) * 100), width: 2 },
+    ], { unit: '%', halfWidth: strip * 1.05, strip, zero: true });
 
     // Each curve shifted so its smallest value across the strip reads zero:
     // the shortest fibre is the reference, as a flatness profile is quoted,
