@@ -31,6 +31,7 @@ import { installLayout, type LayoutHandle, type Theme, currentTheme } from './ui
 import * as settings from './ui/settings';
 import { installView3D, type View3DHandle } from './ui3d/view3d';
 import type { MillType } from './sim3d/stack';
+import { parseQuery, startIn3d, gaugeSchedule } from './app/query';
 
 /* ── presets ─────────────────────────────────────────────────────────────── */
 
@@ -60,9 +61,6 @@ const massTone = (m: number): 'ok' | 'warn' | 'bad' =>
 
 /** N in one tonf (1000 kgf). Mill loads are quoted in these. */
 const TONF = 9.80665e3;
-
-/** stand count asked for on the query string, applied once the line exists */
-let pendingStands = 1;
 
 /** The dial's total load [tonf] as the load per unit width the solver wants [N/m]. */
 function agcTargetPerWidth(): number {
@@ -309,63 +307,16 @@ const view = {
 };
 
 /* ── query string overrides ──────────────────────────────────────────────── */
-// Parsed before anything is built, so the widgets come up already matching.
-const QS = new URLSearchParams(location.search);
-const DEBUG_TITLE = QS.has('debug');
-if (QS.has('nowire')) view.showWire = false;
-if (QS.has('notrace')) view.showTracers = false;
-if (QS.has('nomirror')) view.extent = 'half';
-if (QS.has('nosolve')) view.running = false;
-if (QS.has('nogrid')) view.showGrid = false;
-{
-  const qf = QS.get('field') as FieldKind | null;
-  if (qf && FIELD_LABEL.has(qf)) {
-    view.field = qf;
-    const want = FIELD_RAMP[qf];
-    if (want) view.colormap = want;
-  }
-  const qc = QS.get('cmap');
-  if (qc && COLORMAP_NAMES.includes(qc)) view.colormap = qc;
-  // Mesh preset by name. Documented as a measurement parameter and read by
-  // nobody until now - every "mesh sweep" run through it had silently used
-  // the default.
-  const qmesh = QS.get('mesh') as MeshLevel | null;
-  if (qmesh && qmesh in MESH_LEVELS) {
-    view.meshLevel = qmesh;
-    const L = MESH_LEVELS[qmesh];
-    params.stripNx = L.nx; params.stripNy = L.ny; params.rollNt = L.nt; params.rollNr = L.nr;
-  }
-  // Gap control, so a measurement run can start with the loop already closed.
-  const qa = QS.get('agc');
-  if (qa === 'off' || qa === 'ratio' || qa === 'gauge' || qa === 'force') params.agcMode = qa;
-  // Interstand tension model and its controller, so a measurement run can
-  // start with the line already carrying its own tension.
-  const qt = QS.get('tension');
-  if (qt === 'off' || qt === 'rigid' || qt === 'simple' || qt === 'dist') params.tensionModel = qt;
-  const qtc = QS.get('tctl');
-  if (qtc === '1' || qtc === '0') params.tensionControl = qtc === '1';
-  const qts = Number(QS.get('tscale'));
-  if (Number.isFinite(qts) && qts > 0 && qts <= 1) params.tensionTimeScale = qts;
-  // Absolute exit gauge in mm, so a measurement run can start on a setpoint.
-  const qg = Number(QS.get('h1'));
-  if (Number.isFinite(qg) && qg > 0) params.agcTargetGauge = qg / 1000;
-  const qm = QS.get('mode');
-  if (qm === 'tandem' || qm === 'reverse') view.lineMode = qm;
-  // Load model, so a measurement run can start on the slab estimate.
-  const qlm = QS.get('loadmodel');
-  if (qlm === 'fem' || qlm === 'slab') params.loadModel = qlm;
-  const qst = QS.get('slab');
-  if (qst === 'karman' || qst === 'orowan' || qst === 'blandford') params.slabTheory = qst;
-  const qfl = QS.get('flat');
-  if (qfl === 'hitchcock' || qfl === 'roberts') params.flattening = qfl;
-  const qs = Number(QS.get('stands'));
-  if (Number.isFinite(qs) && qs >= 1) pendingStands = Math.min(MAX_STANDS, Math.round(qs));
-  const ql = Number(QS.get('load'));   // target total load in tonf
-  if (Number.isFinite(ql) && ql > 0) {
-    view.agcTargetTonf = ql;
-    params.agcTargetForce = agcTargetPerWidth();
-  }
-}
+// Read here, written into the state further down by `applyQuery` - after a
+// settings file has been restored, so the URL wins over the file.
+const MILL_TYPES = ['2hi', '4hi', '6hi', '12hi', '20hi'] as const;
+const Q = parseQuery(location.search, {
+  fields: FIELDS.map((f) => f.value),
+  colormaps: COLORMAP_NAMES,
+  meshes: Object.keys(MESH_LEVELS),
+  mills: MILL_TYPES,
+}, MAX_STANDS);
+const DEBUG_TITLE = Q.debug;
 
 /**
  * Per-stand setup. `params` carries everything the whole line shares - the
@@ -403,8 +354,9 @@ const standSetups: StandSetup[] = Array.from({ length: MAX_STANDS }, (_, k) => (
  * `standSetups` are still just data - every dial is built from them further
  * down and comes up already showing the right number.
  *
- * After the query string, deliberately: a URL is something the operator typed
- * just now, and it should win over a file loaded a moment ago.
+ * Before the query string is applied (`applyQuery`, just below), so that a URL
+ * - something the operator typed just now - wins over a file loaded a moment
+ * ago.
  */
 const restored = settings.applyPending(
   params as unknown as Record<string, unknown>,
@@ -419,12 +371,71 @@ if (restored.applied) {
   params.lineSpeed = lineSpeedFromMpm();
 }
 
+/**
+ * Write the query string into the state. Only what the URL names is touched;
+ * the rest of a restored file (or the defaults) stands.
+ *
+ * The per-stand parts go into `standSetups` as well as `params`: the setups
+ * were seeded from `params` above, and it is the setups the mill is built
+ * from. Writing `params` alone is how `?h1=` came to be read by nothing.
+ */
+function applyQuery(): void {
+  if (Q.nowire) view.showWire = false;
+  if (Q.notrace) view.showTracers = false;
+  if (Q.nomirror) view.extent = 'half';
+  if (Q.nosolve) view.running = false;
+  if (Q.nogrid) view.showGrid = false;
+  if (Q.field) {
+    view.field = Q.field as FieldKind;
+    const want = FIELD_RAMP[view.field];
+    if (want) view.colormap = want;
+  }
+  if (Q.cmap) view.colormap = Q.cmap;
+  // Mesh preset by name. Documented as a measurement parameter and read by
+  // nobody for a while - every "mesh sweep" run through it had silently used
+  // the default.
+  if (Q.mesh) {
+    const level = Q.mesh as MeshLevel;
+    view.meshLevel = level;
+    const L = MESH_LEVELS[level];
+    params.stripNx = L.nx; params.stripNy = L.ny; params.rollNt = L.nt; params.rollNr = L.nr;
+  }
+  // Gap control, so a measurement run can start with the loop already closed.
+  const agc = Q.agc;
+  if (agc) {
+    params.agcMode = agc;
+    for (const c of standSetups) c.agcMode = agc;
+  }
+  // Interstand tension model and its controller, so a measurement run can
+  // start with the line already carrying its own tension.
+  if (Q.tension) params.tensionModel = Q.tension;
+  if (Q.tctl !== undefined) params.tensionControl = Q.tctl;
+  if (Q.tscale !== undefined) params.tensionTimeScale = Q.tscale;
+  // The first stand's exit gauge, so a measurement run can start on a
+  // setpoint; the stands after it keep taking their reduction from it.
+  if (Q.h1 !== undefined) {
+    params.agcTargetGauge = Q.h1;
+    const g = gaugeSchedule(Q.h1, standSetups.map((c) => c.reduction));
+    standSetups.forEach((c, k) => { c.targetGauge = g[k]; });
+  }
+  if (Q.mode) view.lineMode = Q.mode;
+  // Load model, so a measurement run can start on the slab estimate.
+  if (Q.loadmodel) params.loadModel = Q.loadmodel;
+  if (Q.slab) params.slabTheory = Q.slab;
+  if (Q.flat) params.flattening = Q.flat;
+  if (Q.load !== undefined) {
+    view.agcTargetTonf = Q.load;
+    params.agcTargetForce = agcTargetPerWidth();
+    for (const c of standSetups) c.targetForce = params.agcTargetForce;
+  }
+}
+applyQuery();
+
 /** What one element of the chain is called, in words and as a caption. */
 const unitWord = () => (view.lineMode === 'reverse' ? 'パス' : 'スタンド');
 const standTag = (k: number) => (view.lineMode === 'reverse' ? `P${k + 1}` : `#${k + 1}`);
-let standCount = restored.standCount !== undefined
-  ? Math.min(MAX_STANDS, restored.standCount)
-  : pendingStands;
+let standCount = Q.stands
+  ?? (restored.standCount !== undefined ? Math.min(MAX_STANDS, restored.standCount) : 1);
 /** the setups actually in the line */
 const activeSetups = () => standSetups.slice(0, standCount);
 
@@ -454,7 +465,10 @@ try {
   // already obeying the right couplings rather than switching on the first frame.
   mill.mode = view.lineMode;
   if (restored.autoSpeed !== undefined) mill.autoSpeed = restored.autoSpeed;
-  sim = mill.stands[0];
+  // A restored file brings the stand it was saved on. Clamped, because the
+  // URL may have asked for fewer stands than the file had.
+  view.stand = Math.max(0, Math.min(standCount - 1, Math.round(view.stand) || 0));
+  sim = mill.stands[view.stand];
   renderer = new Renderer(canvas);
   renderer.setMesh(sim);
   renderer.setColormap(view.colormap);
@@ -705,6 +719,7 @@ function scheduleRebuild(): void {
 const millLine = new MillLineView(
   document.getElementById('millcanvas') as HTMLCanvasElement,
   (i) => selectStand(i));
+millLine.setSelected(view.stand);
 const millSub = document.getElementById('millline-sub') as HTMLElement;
 
 /** One frame's worth of the whole line, in the units the line view draws in. */
@@ -3521,10 +3536,8 @@ window.addEventListener('resize', () => { layout.refresh(); relayout(); view3d?.
 
 /* ── the 2D / 3D tabs ────────────────────────────────────────────────────── */
 
-const MILL_TYPES = new Set(['2hi', '4hi', '6hi', '12hi', '20hi']);
-const qsMill = (QS.get('mill') ?? '').toLowerCase();
 const view3d: View3DHandle = installView3D(document.getElementById('view3d') as HTMLElement, {
-  initialMill: MILL_TYPES.has(qsMill) ? (qsMill as MillType) : undefined,
+  initialMill: Q.mill as MillType | undefined,
 });
 view3dRef = view3d;
 {
@@ -3544,10 +3557,9 @@ view3dRef = view3d;
     const b = (e.target as HTMLElement).closest('button') as HTMLElement | null;
     if (b?.dataset.mode) setMode(b.dataset.mode as '2d' | '3d');
   });
-  const qsTab = QS.get('tab');
   let remembered: string | null = null;
   try { remembered = localStorage.getItem('rollfem.mode'); } catch { /* private mode */ }
-  if (qsTab === '3d' || (qsTab === null && remembered === '3d')) setMode('3d');
+  if (startIn3d(Q.tab, remembered)) setMode('3d');
 }
 
 /* ── loop ────────────────────────────────────────────────────────────────── */
