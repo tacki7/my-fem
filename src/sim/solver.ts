@@ -1486,7 +1486,9 @@ export class RollingSim {
    * the widened window (tools/sim2d/window.mjs, load P(40 %) commanded 5 %)
    * that peaked at 4485 tonf against 1222 just before (3.7x) and threw the
    * screws 4.2 mm through the mill stretch; carried, 1471 tonf (1.2x) and
-   * 0.3 mm. Each row keeps its place across the thickness, so only x moves.
+   * 0.3 mm. The same holds when the bite stretches past ARC_REFIT inside the
+   * window (see `updateGap`). Each row keeps its place across the thickness,
+   * so only x moves.
    */
   private carryFields(oldXs: Float64Array, xE: number): void {
     const m = this.flow.mesh;
@@ -1642,7 +1644,21 @@ export class RollingSim {
       // Re-fit - a discrete change of layout, so it is made rarely and only
       // ever from far away from its own threshold.
       const stretch = -this.xEntryFit / ((this.fitIX - this.fitIE) * dx0);
-      if (stretch > ARC_REFIT || stretch < 1 / ARC_REFIT) this.fitColumns();
+      if (stretch > ARC_REFIT || stretch < 1 / ARC_REFIT) {
+        // The same carry as a widened window: the columns move just as far
+        // (a bite rolled from 10 % up to 40 % re-lays 13 of them), and left
+        // on their node indices the fields put 6689 tonf on the next frame
+        // against 1950 before. `??=`: if the window was widened this frame
+        // too, carry from the stations the fields were actually solved on.
+        // Lay the new columns on the bite as it is, not on the lagging entry
+        // column (it catches up ENTRY_CATCH_UP of a column a frame, and at a
+        // refit it can be five columns behind): otherwise the next frame snaps
+        // the entry across those columns with nothing carried - the carry
+        // alone still left 5421 tonf a frame later. `widenWindow` does the same.
+        if (this.entryPin === 0) this.xEntryFit = this.entryCross;
+        refitFrom ??= Float64Array.from(m.xs);
+        this.fitColumns();
+      }
     } else {
       this.diag.meshResidual = 0;
       this.diag.windowShortfall = 0;
