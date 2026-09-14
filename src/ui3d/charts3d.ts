@@ -214,6 +214,9 @@ export class LineChart {
       for (const s of series) {
         const tw = ctx.measureText(s.label).width;
         if (lx + tw + 22 > W - padR) { lx = padL + 4; ly += 13; }
+        // a dark plate under each entry, so a curve running through the legend does not hide it
+        ctx.fillStyle = 'rgba(7, 10, 18, 0.72)';
+        ctx.fillRect(lx - 3, ly - 1, tw + 24, 14);
         ctx.strokeStyle = s.color;
         ctx.lineWidth = 2;
         ctx.setLineDash(s.dash ? [4, 3] : []);
