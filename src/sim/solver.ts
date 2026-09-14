@@ -247,8 +247,9 @@ export interface RollingParams {
    * thermal term over the homologous temperature, so `heatOn` couples strength
    * to the work already done rather than only to the strain.
    *
-   * Off by default. Every figure in docs/validation.md was measured isothermal
-   * and the switch is a clean A/B against them.
+   * On by default since 2026-09-12. The undated sections of docs/validation.md
+   * were measured before that, isothermal - switch this off to reproduce them;
+   * nothing else moves with it, so the two are a clean A/B.
    */
   heatOn: boolean;
   /** strip temperature entering the line [degC]; the datum softening is 1 at */
