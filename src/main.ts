@@ -2281,14 +2281,23 @@ sTension.body.append(selTension.root, tensionHint, sTScale.root, sTLen.root, sTF
 function syncTensionUi(): void {
   const reverse = view.lineMode === 'reverse';
   const on = !reverse && params.tensionModel !== 'off';
-  (selTension.root.querySelector('select') as HTMLSelectElement).disabled = reverse;
+  // The select shows the model the line runs, not the one it holds. A reverse
+  // mill has no gaps, so `Mill.syncTension` runs it with none whatever was
+  // picked, and a greyed-out select still reading 剛体 read as 剛体 in effect.
+  // The pick stays in `params` and is back on the select with the tandem line.
+  const sel = selTension.root.querySelector('select') as HTMLSelectElement;
+  sel.disabled = reverse;
+  (sel.querySelector('option[value="off"]') as HTMLOptionElement).textContent =
+    reverse ? 'なし（リバースでは無効）' : TENSION_MODEL_LABEL.off;
+  selTension.set(reverse ? 'off' : params.tensionModel);
   for (const d of tensionDials) d.setEnabled(on);
   if (on) {
     sTFollow.setEnabled(params.tensionModel === 'rigid');
     for (const d of [sTKp, sTKi, sTLim]) d.setEnabled(params.tensionControl);
   }
   tensionHint.textContent = reverse
-    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効。'
+    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効'
+      + (params.tensionModel !== 'off' ? `（選んであった「${TENSION_MODEL_LABEL[params.tensionModel]}」に戻る）。` : '。')
     : params.tensionModel === 'off'
       ? '張力は表の入力値がそのまま境界条件。下流スタンドの送り速度は自走で決まり、'
         + '残る不整合は上部の「流量ずれ」に出る（実機ならスタンド間張力が吸収する分）。'

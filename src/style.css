@@ -520,6 +520,8 @@ body.resizing * { cursor: inherit !important; }
   border: 1px solid var(--line); font-family: var(--sans); font-size: 11.5px;
 }
 .ctrl-select:focus { outline: none; border-color: rgba(var(--accent-rgb),.5); }
+/* dimmed like the dials beside it, so a disabled choice does not read as a live one */
+#left .ctrl-select:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ── toggles ─────────────────────────────────────────────────────────────── */
 .ctrl-toggle { display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
