@@ -12,15 +12,16 @@
 
 ```bash
 tools/sim2d/build.sh            # src/sim → tools/sim2d/build（git 管理外）。中身は node tools/build-esm.mjs sim2d [出力先]
-node tools/sim2d/solves.mjs     # 板・ロールの PCG が反復上限に届かないこと（6 条件 × 900 フレーム、約 12〜25 s — 下の注）
+node tools/sim2d/solves.mjs     # 板・ロールの PCG が反復上限に届かないこと（6 条件 × 900 フレーム、約 10〜30 s — 下の注）
 node tools/sim2d/mesh.mjs [旧ビルド]  # ロール半径方向の格子: 等比のコア・表示する隣接比 = 実際の比（旧ビルドを渡すと半径の移動量も出す）
 node tools/sim2d/tension.mjs    # スタンド間の速度感度 dΔv/dT が正にならないこと（432 組、Bland & Ford）
-node tools/sim2d/balance.mjs    # 面圧積分の荷重と、対称面・入側面の反力（離散系の荷重）の突き合わせ（約 30 s）
-node tools/sim2d/chain.mjs      # 保留・自動再計算・単独リビルドのスタンドが下流に渡すもの（3 スタンド、約 60 s）
+node tools/sim2d/balance.mjs    # 面圧積分の荷重と、対称面・入側面の反力（離散系の荷重）の突き合わせ（約 25〜65 s — 下の注）
+node tools/sim2d/chain.mjs      # 保留・自動再計算・単独リビルドのスタンドが下流に渡すもの（3 スタンド、約 25〜65 s — 下の注）
 ```
 
-`solves.mjs` の所要時間（2026-09-14、Apple M2 8 コア・8 GB・Node 24）: 負荷平均 4 前後の中で単体実行 11.9 / 12.7 s。
-`npm run check` の中で他の計算と重なったときは 20〜25 s だった。
+所要時間（2026-09-14、Apple M2 8 コア・8 GB・Node 24、ほかのワーカーの計算と重なる中の `npm run check` の表から）:
+`solves.mjs` 10〜32 s（負荷平均 4 前後の単体実行では 11.9 / 12.7 s）、`balance.mjs` 24〜67 s、`chain.mjs` 23〜64 s。
+負荷平均 10〜17 の中の 1 回では 15.8 / 47.7 / 41.7 s、8→4 の中の 1 回では 9.8 / 28.7 / 32.6 s。
 
 `chain.mjs` は 2 部構成。(1) #2 を目標 > 入側で保留にし、#3 の入側ひずみ・温度が #1 の出側と 2 フレーム遅れで
 ビット一致すること。(2) 張力 'dist'＋制御 ON のラインが整定（両ギャップ武装・目標どおりが 60 フレーム連続）
