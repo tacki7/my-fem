@@ -14,7 +14,7 @@ import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
 } from '../sim3d/stack';
 import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
-import { LineChart, FrontView, EndView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 
@@ -237,6 +237,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   endCanvas.id = 'v3-end';
   endSec.body.append(endCanvas);
   const endView = new EndView(endCanvas);
+  const sideSec = section('側面図（横から）', {
+    open: true,
+    hint: '端面図のロール配置を横（オペレータ側）から見た図。上半分の各ロールの胴・ネックを実寸の比で、ロール軸方向のシフトと支持（□ チョック、赤 ▼ 圧下、黄 ● サドル、緑の矢印 ベンダー）、パスラインの板幅とともに。端面図で同じ高さに並ぶロールは重なって見える（ミル中心線に近いロールが手前）。撓みは正面図、荷重は端面図。',
+  });
+  const sideCanvas = el('canvas');
+  sideCanvas.id = 'v3-side';
+  sideSec.body.append(sideCanvas);
+  const sideView = new SideView(sideCanvas);
   const secSec = section('ワークロール断面（扁平メッシュ）', {
     open: true,
     hint: '扁平モデルが「断面 FEM」のときのロール断面リング。板中央の接触線荷重による変形を倍率表示。刻み数は「解析・表示」で。',
@@ -246,7 +254,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   secSec.body.append(secCanvas);
   const sectionView = new SectionView(secCanvas);
   into(gNum, 'flatCmp', '扁平コンプライアンス 断面FEM / Hertz');
-  right.append(loadSec.root, shapeSec.root, endSec.root, contactSec.root, secSec.root, numSec2.root);
+  right.append(loadSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
 
   /* ── left panel: inputs ── */
   const dials = new Map<string, Dial>();
@@ -521,6 +529,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
+    sideView.draw(st, params.width);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
     charts.defl.draw(R.rolls.map((r, i): XYSeries => ({

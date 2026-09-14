@@ -7,7 +7,7 @@
 
 import type { Result3D, RollState } from '../sim3d/solver';
 import type { Stack } from '../sim3d/stack';
-import { onBearing } from '../sim3d/stack';
+import { onBearing, saddleXs } from '../sim3d/stack';
 import type { RingInfluence } from '../sim3d/ring';
 
 const FONT = '11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
@@ -632,6 +632,145 @@ export class EndView {
     ctx.textBaseline = 'bottom';
     const ang = stack.type === '12hi' || stack.type === '20hi' ? ` ／ 第1中間 ${((stack.angle1 * 180) / Math.PI).toFixed(1)}°` : '';
     ctx.fillText(`接触力 [tonf] ／ 板幅 ${(width * 1e3).toFixed(0)} mm${ang}`, pad, H - 3);
+  }
+}
+
+/**
+ * The end view's cluster seen from the side (from the operator side, across
+ * the rolling direction): every roll of the upper half as its barrel and
+ * necks along the roll axis, to the same scale in x and y and at its height
+ * in the stack, with its axial shift, its supports and the strip below.
+ *
+ * Rolls sharing a height in the end view (the two intermediates of a 6-high,
+ * a cluster's rings) cover one another here, so the ones furthest from the
+ * mill centre line are drawn first and the centre line's in front; a label
+ * is left out where one is already printed. Nothing is magnified: the
+ * deflection is the front view's, the loads the end view's.
+ */
+export class SideView {
+  constructor(private canvas: HTMLCanvasElement) {}
+
+  draw(stack: Stack, width: number): void {
+    const ctx = fit(this.canvas);
+    const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, W, H);
+    const rolls = stack.rolls;
+    if (!rolls.length) return;
+    const wr = rolls[stack.wr];
+    // a bearing block at each support, as wide as the neck is thick
+    const block = (r: Stack['rolls'][number]) => Math.max(r.Dn, 0.04);
+    let xmax = width / 2, top = 0;
+    for (const r of rolls) {
+      xmax = Math.max(xmax, Math.abs(r.shift) + r.Lb / 2, Math.abs(r.shift) + r.Ls / 2 + block(r) / 2);
+      top = Math.max(top, r.cy + r.D / 2);
+    }
+    const pass = wr.cy - wr.D / 2;
+    const bottom = pass - 0.03;
+    const pad = 14;
+    const scale = Math.min((W - 2 * pad) / (2 * xmax), (H - 2 * pad - 14) / (top - bottom));
+    const cx = W / 2, cy0 = pad + ((H - 2 * pad - 14) - (top - bottom) * scale) / 2 + top * scale;
+    const px = (x: number) => cx + x * scale;
+    const py = (y: number) => cy0 - y * scale;
+
+    // the mill centre line
+    ctx.strokeStyle = 'rgba(140,170,210,0.18)';
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath(); ctx.moveTo(px(0), py(top) - 4); ctx.lineTo(px(0), py(bottom) + 2); ctx.stroke();
+    ctx.setLineDash([]);
+
+    const order = rolls.map((_, i) => i).sort((a, b) => Math.abs(rolls[b].cz) - Math.abs(rolls[a].cz));
+    const labels: { x: number; y: number }[] = [];
+    ctx.font = FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const i of order) {
+      const r = rolls[i];
+      const color = ROLL_COLORS[i % ROLL_COLORS.length];
+      const x0 = r.shift - r.Lb / 2, x1 = r.shift + r.Lb / 2;
+      const ya = py(r.cy + r.D / 2), yb = py(r.cy - r.D / 2);
+      const na = py(r.cy + r.Dn / 2), nb = py(r.cy - r.Dn / 2);
+      const s0 = r.shift - r.Ls / 2, s1 = r.shift + r.Ls / 2;
+      // necks (a backing shaft: the shaft end to end) out to the bearing blocks;
+      // a cluster roll held only by its contacts has none
+      if (r.support !== 'free') {
+        ctx.fillStyle = 'rgba(140,170,210,0.16)';
+        const n0 = Math.min(x0, s0 - block(r) / 2), n1 = Math.max(x1, s1 + block(r) / 2);
+        ctx.fillRect(px(n0), na, px(n1) - px(n0), nb - na);
+      }
+      // the barrel, or a shaft's bearing rings with the shaft bare at each saddle
+      const spans: [number, number][] = [];
+      if (r.bearingGap > 0) {
+        const cuts = saddleXs(r).map((xs) => [xs - r.bearingGap / 2, xs + r.bearingGap / 2]).sort((a, b) => a[0] - b[0]);
+        let from = x0;
+        for (const [g0, g1] of cuts) {
+          if (g1 <= from || g0 >= x1) continue;
+          if (g0 > from) spans.push([from, g0]);
+          from = Math.max(from, g1);
+        }
+        if (from < x1) spans.push([from, x1]);
+      } else spans.push([x0, x1]);
+      for (const [a, b] of spans) {
+        ctx.fillStyle = 'rgba(17, 24, 38, 0.9)';
+        ctx.fillRect(px(a), ya, px(b) - px(a), yb - ya);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(px(a) + 0.5, ya + 0.5, px(b) - px(a) - 1, yb - ya - 1);
+      }
+      // supports: bearing blocks for chocks and the screw, marks at the saddles
+      if (r.support === 'chock' || r.support === 'screw') {
+        for (const xs of [s0, s1]) {
+          const bw = block(r) * scale, bh = Math.max(r.Dn * 1.3 * scale, 6);
+          ctx.strokeStyle = r.support === 'screw' ? '#ff6b81' : 'rgba(220,230,245,0.55)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(px(xs) - bw / 2, py(r.cy) - bh / 2, bw, bh);
+          if (r.support === 'screw') {
+            // the screw pushing down on the block
+            ctx.fillStyle = '#ff6b81';
+            const ty = py(r.cy) - bh / 2 - 2;
+            ctx.beginPath(); ctx.moveTo(px(xs) - 4, ty - 6); ctx.lineTo(px(xs) + 4, ty - 6); ctx.lineTo(px(xs), ty); ctx.closePath(); ctx.fill();
+          }
+          if (r.support === 'chock' && r.benderForce !== 0) {
+            // the bending force on the chock, + up
+            const up = r.benderForce > 0;
+            ctx.strokeStyle = '#96e6b4';
+            ctx.lineWidth = 1.5;
+            const y0 = up ? py(r.cy) + bh / 2 + 9 : py(r.cy) - bh / 2 - 9, y1 = up ? py(r.cy) + bh / 2 + 1 : py(r.cy) - bh / 2 - 1;
+            ctx.beginPath(); ctx.moveTo(px(xs), y0); ctx.lineTo(px(xs), y1); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(px(xs) - 3, y1 + (up ? 3 : -3)); ctx.lineTo(px(xs), y1); ctx.lineTo(px(xs) + 3, y1 + (up ? 3 : -3)); ctx.stroke();
+          }
+        }
+      } else if (r.support === 'saddle') {
+        ctx.fillStyle = '#ffc46b';
+        for (const xs of saddleXs(r)) {
+          ctx.beginPath(); ctx.arc(px(xs), py(r.cy), 3, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+    // the strip at the pass line, its width to scale
+    ctx.fillStyle = STRIP_COLOR;
+    ctx.fillRect(px(-width / 2), py(pass), width * scale, 3);
+    // names last, over everything: the front roll's where two would sit together
+    for (const i of [...order].reverse()) {
+      const r = rolls[i];
+      const lx = px(r.shift), ly = py(r.cy);
+      if (r.D * scale <= 11 || labels.some((l) => Math.abs(l.x - lx) < 28 && Math.abs(l.y - ly) < 12)) continue;
+      labels.push({ x: lx, y: ly });
+      ctx.fillStyle = 'rgba(7,10,18,0.75)';
+      const tw = ctx.measureText(r.id).width + 6;
+      ctx.fillRect(lx - tw / 2, ly - 7, tw, 14);
+      ctx.fillStyle = ROLL_COLORS[i % ROLL_COLORS.length];
+      ctx.fillText(r.id, lx, ly);
+    }
+
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    const shifted = rolls.filter((r) => Math.abs(r.shift) > 1e-6);
+    const shiftText = shifted.length ? ` ／ シフト ${shifted.map((r) => `${r.id} ${(r.shift * 1e3).toFixed(0)}`).join('・')} mm` : '';
+    const long = `板幅 ${(width * 1e3).toFixed(0)} mm ／ ${wr.id} 胴長 ${(wr.Lb * 1e3).toFixed(0)} mm${shiftText}`;
+    // the barrel length gives way first when the line is wider than the view
+    ctx.fillText(ctx.measureText(long).width <= W - 2 * pad ? long : `板幅 ${(width * 1e3).toFixed(0)} mm${shiftText}`, pad, H - 3);
   }
 }
 
