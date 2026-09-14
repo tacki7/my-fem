@@ -1,3 +1,11 @@
+// 202 cases pushed to the edges of every parameter, each solved to a frame cap.
+//   node tools/sim3d/stress.mjs [filter] ['mill tag;mill tag…']     FRAMES=<n> to change the cap (6 iterations a frame)
+// Each case prints ok or FAIL with what went wrong. Exit 1 when any case throws, produces a NaN or a
+// negative load, misses its gauge target while claiming convergence, or stops unconverged *without a
+// warning*: an unconverged case that says why (stone, stuck, target, …) is an expected outcome
+// (docs/validation.md, ストレステスト) and is listed but does not fail the run. Minutes: not in `npm run check`.
+// The cap is 1500 iterations, the one docs/validation.md measures at: the `stuck` warning needs that
+// long to be raised, and at 300 two cases (20Hi bb tiny, 12Hi ir huge) stopped unconverged before it was.
 import { StackSolver } from './build/solver.js';
 import { defaultParams } from './build/stack.js';
 const TONF = 9.80665e3;
@@ -70,7 +78,7 @@ add('2hi', { width: 1.6, wrD: 0.3 }, '2hi thin wide');
 
 const only = process.argv[2];
 const onlyList = process.argv[3] ? process.argv[3].split(';') : null;
-let bad = 0;
+let bad = 0, hard = 0;
 const hasNaN = (a) => { for (let i = 0; i < a.length; i++) if (Number.isNaN(a[i])) return true; return false; };
 for (const c of cases) {
   if (only && !(c.mill + ' ' + c.tag).includes(only)) continue;
@@ -79,7 +87,7 @@ for (const c of cases) {
   let sv, err = null, it = 0, t0 = performance.now();
   try {
     sv = new StackSolver(p);
-    for (let f = 0; f < (+process.env.FRAMES || 50); f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
+    for (let f = 0; f < (+process.env.FRAMES || 250); f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
   } catch (e) { err = e.message; }
   const ms = performance.now() - t0;
   const R = sv?.result;
@@ -96,8 +104,14 @@ for (const c of cases) {
     if (R.force < 0) problems.push('negative force');
     if (p.mode === 'gauge' && Math.abs(R.h1Mean / (p.h0 * (1 - p.reduction)) - 1) > 0.01) problems.push('gauge miss ' + (R.h1Mean * 1e6).toFixed(1));
   }
+  // what fails the run: everything except an unconverged solve that carries a warning (and the gauge it then misses)
+  const warned = R && R.warnings.length > 0;
+  const expected = (m) => warned && !R.converged && (m.startsWith('noconv') || m.startsWith('gauge miss'));
+  if (problems.some((m) => !expected(m))) hard++;
   const flag = problems.length ? 'FAIL' : 'ok  ';
   if (problems.length) bad++;
   console.log(`${flag} ${c.mill.padEnd(4)} ${c.tag.padEnd(20)} it=${String(it).padStart(4)} ${ms.toFixed(0).padStart(5)}ms` + (R ? ` F=${(R.force / TONF).toFixed(0).padStart(5)} S=${(R.screw * 1e3).toFixed(2).padStart(6)} cr=${(R.crown * 1e6).toFixed(0).padStart(5)} lat=${R.latentIU.toFixed(0).padStart(6)}` : '') + (problems.length ? '  ' + problems.join('; ') : '') + (R && R.warnings.length ? '  WARN[' + R.warnings.join(',') + ']' : ''));
 }
 console.log('FAILS', bad, '/', cases.length);
+console.log('of which fail the run (throw, NaN, negative load, a gauge miss when converged, unconverged without a warning):', hard);
+process.exit(hard ? 1 : 0);
