@@ -714,13 +714,25 @@ function scheduleRebuild(): void {
     // F, or the ⤢ button, refits on demand.
     refreshGeom();
     refreshMeshHint();
-    if (params.autoFit) {
-      params.windowIn = sim.winIn;
-      params.windowOut = sim.winOut;
-      params.biteGrade = sim.biteGradeEff;
-      sWinIn.set(sim.winIn); sWinOut.set(sim.winOut); sBite.set(sim.biteGradeEff);
-    }
+    syncWindowDials();
+    // the stand count may just have changed, and with it whether there are gaps
+    syncTensionUi();
   }, 160);
+}
+
+/**
+ * Under 自動, show the window the solver actually fitted - and hold it in
+ * `params`, so that turning 自動 off keeps this window rather than jumping to
+ * whatever the dials were first built with. Done after every rebuild and once
+ * at boot: before the first rebuild the dials used to read the literal
+ * -40 / 25 mm and 0.900 while the stand ran on its fitted -29 / 15 mm.
+ */
+function syncWindowDials(): void {
+  if (!params.autoFit) return;
+  params.windowIn = sim.winIn;
+  params.windowOut = sim.winOut;
+  params.biteGrade = sim.biteGradeEff;
+  sWinIn.set(sim.winIn); sWinOut.set(sim.winOut); sBite.set(sim.biteGradeEff);
 }
 
 const millLine = new MillLineView(
@@ -1488,7 +1500,7 @@ const sN = slider({
   onInput: (v) => { params.lmnN = v; },
 });
 const tElastic = toggle('入出側の弾性変形を考慮', params.elasticZones, (v) => {
-  params.elasticZones = v; sEstrip.setEnabled(v); sNuStrip.setEnabled(v);
+  params.elasticZones = v; sEstrip.setEnabled(v); sNuStrip.setEnabled(v); sIncomp.setEnabled(!v);
 },
   '接触弧の入口と出口に弾性域を置く。入口では板が塑性変形を始める前に弾性圧縮され、出口では除荷で弾性回復して板厚が数 µm 戻る（スプリングバック）'
       + '。ON で出側板厚がわずかに厚くなり、荷重は 1% 弱変わる。OFF は純粋な剛塑性で、教科書のスラブ法と比べるときはこちら。'
@@ -2016,6 +2028,19 @@ const skinHint = el('div', 'ctrl-hint');
 sSkinFactor.setEnabled(params.rollSkinAuto);
 sSkinThick.setEnabled(!params.rollSkinAuto);
 
+// Built here rather than inline in its panel so the elastic-zones toggle can
+// grey it out: with the elastic zones on the bulk term is the strip's own
+// bulk modulus and this dial is never read.
+const sIncomp = slider({
+  label: '非圧縮ペナルティ', min: 1e3, max: 1e6, log: true, value: params.incompPenalty,
+  format: (v) => v.toExponential(0),
+  hint: '板の体積項 p = −K div v の K を基準粘度の何倍にするか。「入出側の弾性変形を考慮」が OFF のときだけ使う — '
+    + 'ON（既定）では K は板の体積弾性率 × 噛み込み通過時間になり、この値は効かない（ON のあいだは無効表示）。'
+    + 'OFF で既定の 10 倍・100 倍にすると発散した（docs/validation.md）。既定 1e4。',
+  onInput: (v) => { params.incompPenalty = v; },
+});
+sIncomp.setEnabled(!params.elasticZones);
+
 const tAutoFit = toggle('解析窓とニップ集中度を自動', params.autoFit, (v) => {
   params.autoFit = v;
   sWinIn.setEnabled(!v); sWinOut.setEnabled(!v); sBite.setEnabled(!v);
@@ -2048,6 +2073,7 @@ const sBite = slider({
   hint: '0 = 周方向等分割。上げるほど接触弧に節点が集まる',
   onInput: (v) => { params.biteGrade = v; scheduleRebuild(); },
 });
+syncWindowDials();
 sWinIn.setEnabled(!params.autoFit);
 sWinOut.setEnabled(!params.autoFit);
 sBite.setEnabled(!params.autoFit);
@@ -2075,14 +2101,7 @@ sNum.body.append(
       + 'ロール扁平の「連成の緩和係数」（ミル弾性）とは別。既定 0.6。',
     onInput: (v) => { params.relax = v; },
   }).root,
-  slider({
-    label: '非圧縮ペナルティ', min: 1e3, max: 1e6, log: true, value: params.incompPenalty,
-    format: (v) => v.toExponential(0),
-    hint: '板の体積項 p = −K div v の K を基準粘度の何倍にするか。「入出側の弾性変形を考慮」が OFF のときだけ使う — '
-      + 'ON（既定）では K は板の体積弾性率 × 噛み込み通過時間になり、この値は効かない。'
-      + 'OFF で既定の 10 倍・100 倍にすると発散した（docs/validation.md）。既定 1e4。',
-    onInput: (v) => { params.incompPenalty = v; },
-  }).root,
+  sIncomp.root,
   slider({
     label: '法線ペナルティ', min: 1e3, max: 1e7, log: true, value: params.normalPenalty,
     format: (v) => v.toExponential(0),
@@ -2281,31 +2300,36 @@ sTension.body.append(selTension.root, tensionHint, sTScale.root, sTLen.root, sTF
 /** Enable what the model uses, and say why the rest is grey. */
 function syncTensionUi(): void {
   const reverse = view.lineMode === 'reverse';
-  const on = !reverse && params.tensionModel !== 'off';
+  // A tandem line of one stand has no gap either: `Mill.syncTension` runs it
+  // with no model (n > 1), so the select says so the same way as for reverse.
+  const single = !reverse && mill.count < 2;
+  const inactive = reverse || single;
+  const on = !inactive && params.tensionModel !== 'off';
   // The select shows the model the line runs, not the one it holds. A reverse
   // mill has no gaps, so `Mill.syncTension` runs it with none whatever was
   // picked, and a greyed-out select still reading 剛体 read as 剛体 in effect.
   // The pick stays in `params` and is back on the select with the tandem line.
   const sel = selTension.root.querySelector('select') as HTMLSelectElement;
-  sel.disabled = reverse;
+  sel.disabled = inactive;
   (sel.querySelector('option[value="off"]') as HTMLOptionElement).textContent =
-    reverse ? 'なし（リバースでは無効）' : TENSION_MODEL_LABEL.off;
-  selTension.set(reverse ? 'off' : params.tensionModel);
+    reverse ? 'なし（リバースでは無効）' : single ? 'なし（1 スタンドでは無効）' : TENSION_MODEL_LABEL.off;
+  selTension.set(inactive ? 'off' : params.tensionModel);
   for (const d of tensionDials) d.setEnabled(on);
   if (on) {
     sTFollow.setEnabled(params.tensionModel === 'rigid');
     for (const d of [sTKp, sTKi, sTLim]) d.setEnabled(params.tensionControl);
   }
+  const backTo = params.tensionModel !== 'off' ? `（選んであった「${TENSION_MODEL_LABEL[params.tensionModel]}」に戻る）。` : '。';
   tensionHint.textContent = reverse
-    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効'
-      + (params.tensionModel !== 'off' ? `（選んであった「${TENSION_MODEL_LABEL[params.tensionModel]}」に戻る）。` : '。')
+    ? 'リバース（可逆圧延）にはスタンド間がなく、張力は両端のコイラが毎パス張り直す。タンデムに切り替えると有効' + backTo
+    : single
+    ? 'スタンドが 1 つのあいだはスタンド間がなく、張力は表の入力値がそのまま境界条件。スタンド数を 2 以上にすると有効' + backTo
     : params.tensionModel === 'off'
       ? '張力は表の入力値がそのまま境界条件。下流スタンドの送り速度は自走で決まり、'
         + '残る不整合は上部の「流量ずれ」に出る（実機ならスタンド間張力が吸収する分）。'
       : `${TENSION_MODEL_LABEL[params.tensionModel]}: 下流スタンドの入側速度を上流の出側速度に拘束し、`
         + '張力は反力から求める。表の前方張力は目標、実績は表の「実績」行・ミルライン図・下のグラフに出る。'
         + (params.tensionControl ? '制御 ON。' : '制御 OFF: 実績は目標から離れたところに落ち着く。目標に合わせるには制御を ON にする。');
-  if (mill.count < 2 && !reverse) tensionHint.textContent += ' スタンドが 1 つのあいだはスタンド間がない。';
   refreshTensionChart();
 }
 
