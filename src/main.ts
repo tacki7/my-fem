@@ -384,6 +384,34 @@ function followWindowDials(): void {
     || shownWindow.winOut !== sim.winOut || shownWindow.bite !== sim.biteGradeEff) syncWindowDials();
 }
 
+/** each stand's window as it was last looked at, and how many times it had widened by then */
+const windowSeen = new WeakMap<RollingSim, { refits: number; winIn: number; winOut: number }>();
+/**
+ * Say so, once, when the stand on screen widens its window past what the
+ * camera shows.
+ *
+ * `widenWindow` can take the window to 2.5 times its length with no rebuild,
+ * and the camera is left where it is - refitting under someone zoomed in on
+ * a detail would throw their framing away, the reason a rebuild does not
+ * refit either. With the old window filling the stage, the new part of it is
+ * then simply off screen and nothing says it is there. Only when it is: a
+ * window that still fits the view needs no word. A stand is first seen
+ * without a notice, so selecting one that widened earlier does not announce it.
+ */
+function noticeWindowWidening(): void {
+  if (stageHidden()) return;
+  const seen = windowSeen.get(sim);
+  const now = { refits: sim.windowRefits, winIn: sim.winIn, winOut: sim.winOut };
+  windowSeen.set(sim, now);
+  if (!seen || now.refits === seen.refits) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const half = (canvas.clientWidth * dpr) / 2 / cam.zoom;
+  if (now.winIn >= cam.cx - half && now.winOut <= cam.cx + half) return;
+  const mm = (x: number) => (x * 1000).toFixed(1);
+  toast(`${standTag(view.stand)} の解析窓が広がった（入側 ${mm(seen.winIn)} → ${mm(now.winIn)} mm、`
+    + `出側 ${mm(seen.winOut)} → ${mm(now.winOut)} mm）。広がった部分は画面の外 — F で全体を表示`);
+}
+
 const millLine = new MillLineView(
   document.getElementById('millcanvas') as HTMLCanvasElement,
   (i) => selectStand(i));
@@ -3275,6 +3303,7 @@ function frameBody(now: number): void {
   if (view.running && view.showTracers) tracers.update(dt);
   if (solved && solveCount === Q.stopafter) setRunning(false);
   followWindowDials();
+  noticeWindowWidening();
 
   if (solved || fieldDirty) {
     lastRange = sim.computeField(view.field);
