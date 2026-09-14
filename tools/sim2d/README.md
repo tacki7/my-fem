@@ -18,6 +18,7 @@ node tools/sim2d/tension.mjs    # スタンド間の速度感度 dΔv/dT が正�
 node tools/sim2d/balance.mjs    # 面圧積分の荷重と、対称面・入側面の反力（離散系の荷重）の突き合わせ（約 25〜65 s — 下の注）
 node tools/sim2d/chain.mjs      # 保留・自動再計算・単独リビルドのスタンドが下流に渡すもの（3 スタンド、約 25〜65 s — 下の注）
 node tools/sim2d/feed.mjs       # 送り速度の自走が成り立たない状態の判定（diag.feedNotEstablished）が出る・出ない（混み具合で 55〜90 s）
+node tools/sim2d/queue.mjs [旧ビルド]  # スタンド間の搬送キュー: 長さ = スタンド間距離 L、Σℓ/h = スライスからの再集計（単体 20000 歩 ＋ 3 スタンド 'dist' 40 s、約 25 s。旧ビルドを渡すと修正前の FAIL を再現）
 ```
 
 所要時間（2026-09-14、Apple M2 8 コア・8 GB・Node 24、ほかのワーカーの計算と重なる中の `npm run check` の表から）:

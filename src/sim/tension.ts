@@ -59,12 +59,34 @@ export class StripQueue {
   private sumLoH = 0;
   private total = 0;
   private ops = 0;
+  /** the stand distance the queue spans [m] */
+  private span = 0;
 
   constructor(L: number, h: number) { this.reset(L, h); }
 
   reset(L: number, h: number): void {
-    this.slices = [{ len: Math.max(L, 1e-6), h: Math.max(h, 1e-9) }];
+    this.span = Math.max(L, 1e-6);
+    this.slices = [{ len: this.span, h: Math.max(h, 1e-9) }];
     this.recount();
+  }
+
+  /**
+   * One step of transport: `len` of strip at gauge `h` leaves the upstream
+   * stand, and the same length enters the downstream one - the gap is the
+   * stand distance long, always.
+   *
+   * It used to take what the downstream stand was fed with instead. That is
+   * last frame's upstream exit speed, so every frame's difference is the
+   * change in that speed over one frame, and they telescope: the gap ends up
+   * short by (settled exit speed − the speed it was seeded at) × dt, all of it
+   * from the first frames of the start-up. On the three-stand default that was
+   * 11.3 mm and 6.3 mm (4.4887 / 4.4937 m), exactly (0.9873 − 1.6638) / 60 and
+   * (1.2832 − 1.6638) / 60. What comes off is taken from the running total, so
+   * rounding cannot drift the length either.
+   */
+  advance(len: number, h: number): void {
+    this.push(len, h);
+    this.pop(this.total - this.span);
   }
 
   /** strip length in the gap [m] */
@@ -82,14 +104,16 @@ export class StripQueue {
     const last = this.slices[this.slices.length - 1];
     // Merge with the slice behind when the gauge has not moved: a steady
     // stand would otherwise add one slice per frame for as long as it runs.
-    if (last && Math.abs(last.h - h) <= 1e-4 * h) last.len += len;
-    else this.slices.push({ len, h });
-    // NB on a merge this adds len/h while the slice keeps its own h, so the
-    // sum and the slices part by up to 1e-4 a merge until the next recount:
-    // measured 4.8e-4 at worst on the three-stand default. Adding len/last.h
-    // instead moves the settled 'dist' tension by +0.04 % / -0.10 % but its
-    // start-up transient by up to 0.8 % at 20 s, against figures in
-    // docs/validation.md taken in the browser - so it is recorded, not changed.
+    // The merged slice takes the length-weighted harmonic mean of the two
+    // gauges, the one thickness whose ℓ/h is the sum of theirs - so Σ ℓ/h
+    // and the slices agree after a merge. Keeping the old slice's gauge
+    // parted them by up to 1e-4 a merge, 4.8e-4 before the next recount.
+    if (last && Math.abs(last.h - h) <= 1e-4 * h) {
+      last.h = (last.len + len) / (last.len / last.h + len / h);
+      last.len += len;
+    } else {
+      this.slices.push({ len, h });
+    }
     this.sumLoH += len / h;
     this.total += len;
     if (++this.ops % 4096 === 0) this.recount();

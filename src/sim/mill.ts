@@ -825,19 +825,10 @@ export class Mill {
       const up = this.stands[k], dn = this.stands[k + 1];
       const ud = up.diag, dd = dn.diag;
       const h1 = ud.exitThickness > 0 ? ud.exitThickness : up.params.h0 * (1 - up.params.reduction);
-      // Transport: what left the upstream stand goes in at the back, what the
-      // downstream stand took comes off the front. The two are meant to be
-      // equal - the feed is prescribed at the exit speed - but not in the same
-      // frame: push reads this frame's exit speed, pop the feed the downstream
-      // stand was given, and through the start-up transient they differ. On
-      // the three-stand default (tools/sim2d, 40 s, 'simple') the gaps settle
-      // 11 mm and 6 mm short of the 4.5 m stand distance, -0.25 % and -0.14 %.
-      // Popping exactly what was pushed moves the settled tension by +0.06 %
-      // and +0.09 % ('dist': -0.02 % / -0.10 %), so it is left, and recorded.
-      if (ud.exitSpeed > 0 && dtm > 0) {
-        g.queue.push(ud.exitSpeed * dtm, h1);
-        g.queue.pop((dn.params.feedSpeed > 0 ? dn.params.feedSpeed : ud.exitSpeed) * dtm);
-      }
+      // Transport: what left the upstream stand goes in at the back, and the
+      // gap, the stand distance long, hands the same length on at the front
+      // (`StripQueue.advance`, which says why it no longer pops the feed).
+      if (ud.exitSpeed > 0 && dtm > 0) g.queue.advance(ud.exitSpeed * dtm, h1);
       // The reaction means nothing until the gap is a gap: both stands biting,
       // the downstream mesh placed on its bite, both exit gauges steady, and
       // the strip at the front of the queue the strip the upstream stand is
