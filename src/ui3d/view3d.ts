@@ -220,7 +220,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const stats = new StatGrid();
   const loadSec = section('荷重・圧下', { open: true });
   const shapeSec = section('板形状', { open: true });
-  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
+  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
   const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
   const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
   const into = (g: HTMLElement, key: string, label: string, unit?: string) => {
@@ -232,6 +232,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
   into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
+  into(gNum, 'grid', '幅方向 節点 板上 / 全');
   const contactSec = section('接触力・支持反力', { open: true });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
@@ -477,8 +478,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       { value: 'slab', text: 'スラブ法（幅方向スライス）' },
     ], params.stripModel, (v) => { params.stripModel = v; apply(); buildLeft(); },
     '3 次元 FEM: 板厚の上半分（中央面対称）を六面体で分割した剛塑性 FEM。ロール面は法線速度拘束＋クーロン摩擦、圧力はその反力。板厚方向の速度分布・横流れ・摩擦丘が結果として出る。平面 FEM: 板厚方向を一様速度とした薄板近似（速い）。スラブ法: 幅方向スライスごとの Bland & Ford（最速）。いずれもロールの撓み・扁平と連成。').root);
+    stripSec.body.append(num('stripStations', '材料 幅方向 分割数', '', 0, 601, 1, 1, '板の上に置く節点（スライス）の数。0: ロールの節点に合わせる（「解析・表示 ▸ 幅方向 分割数」の等間隔の節点のうち板に掛かるもの。板端のセルは板幅しだいで欠ける）。1 以上: 板幅をこの数の等幅のセルでちょうど分け（奇数に丸める。中央に節点）、板の外はロールの分割数どおりの間隔。スラブ法のスライス、材料 FEM の幅方向の列、張力の再配分がこの点数で解ける。計算時間は板上の点数の 2〜3 乗で伸びる。実際の点数は右の「解析 ▸ 幅方向 節点」。'));
     if (params.stripModel === 'fem' || params.stripModel === 'fem3d') {
-      stripSec.body.append(num('stripNz', '材料 FEM 圧延方向 分割数', '', 4, 32, 1, 1, '噛み込み弧に沿った要素数。幅方向は「幅方向 分割数」の板上の点数に従う。'));
+      stripSec.body.append(num('stripNz', '材料 FEM 圧延方向 分割数', '', 4, 32, 1, 1, '噛み込み弧に沿った要素数。幅方向の列は板上の節点ごと（「材料 幅方向 分割数」）。'));
     }
     if (params.stripModel === 'fem3d') {
       stripSec.body.append(num('stripNy', '材料 FEM 板厚方向 分割数', '', 1, 6, 1, 1, '板厚の上半分の層数（中央面は対称面）。結果は 1〜3 でほぼ変わらない。計算時間は層数に比例。'));
@@ -493,7 +495,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stripSec.body.append(num('lmnM', 'M', '', 0, 0.2, 0.005, 1));
     stripSec.body.append(num('lmnN', 'N', '', 0, 0.6, 0.005, 1));
     stripSec.body.append(num('entryStrain', '入側予ひずみ', '', 0, 2, 0.05, 1));
-    stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。下限は幅方向の分割点間隔（それより短いと隣接スライスが結合されず、市松状の数値モードが出る）。'));
+    stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。下限は板上の節点間隔（それより短いと隣接スライスが結合されず、市松状の数値モードが出る）。'));
     stripSec.body.append(toggle('張力フィードバック', params.tensionFeedback, (v) => { params.tensionFeedback = v; apply(); },
       'ON: 板の長手張力が降伏条件（p = kf − σt）と塑性変形の開始点（弾性圧下量）を下げ、幅方向の伸び差で張力が再配分され、材料 FEM の入出側トラクションにも入る。これが荷重を通じて WR の撓み・扁平に返る。OFF: 張力なしで圧延したときの挙動（比較用）。').root);
     stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。'));
@@ -711,6 +713,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
+    stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
     stats.set('fem', R.fem ? `${params.stripModel === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];
