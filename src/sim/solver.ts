@@ -1398,14 +1398,27 @@ export class RollingSim {
     this.rollPre.factor(this.rollPat, this.rollVals, this.rollFree);
   }
 
-  resetState(): void {
+  /**
+   * Start the solve over from a seed.
+   *
+   * `keepScrews` leaves the screw command where it is instead of putting it
+   * back on the commanded reduction. A restart after a NaN is the numerics
+   * starting again, not the operator moving the screws, and without a gap loop
+   * nothing brings them back: `h1Command` reads the entry gauge the stand has
+   * now, while the screws were set against the one it had when they were last
+   * commanded - the schedule's, for every stand after the first on a line built
+   * from the dials. Measured on the default three-stand line under 'dist' and
+   * control, #2 restarting moved its screws by 0.22 mm and its exit gauge from
+   * 1.2197 to 1.2727 mm for good, #3 from 0.9358 to 0.9438 mm.
+   */
+  resetState(keepScrews = false): void {
     const p = this.params;
     this.shortfallFrames = 0;
     this.time = 0;
     this.phase = 0;
     this.stretch = 0;
     this.screwWarm = 0;
-    this.releaseGap();
+    if (keepScrews) this.resetAgc(); else this.releaseGap();
     this.snapScrew();
     this.rollU.fill(0);
     this.rollUrel.fill(0);
@@ -2113,7 +2126,7 @@ export class RollingSim {
     }
     this.restarts++;
     this.restartAt = now;
-    this.resetState();
+    this.resetState(true);
     this.resetAgc();
     return true;
   }
