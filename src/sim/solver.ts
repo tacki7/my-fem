@@ -182,6 +182,23 @@ const AGC_RELEASE = 1e-4;
  * confidently optimise against a velocity field that means nothing.
  */
 const FEED_SETTLED = 3;
+/**
+ * The feed counts as not established - no free-running speed exists, and the
+ * entry face is pushing the strip in - once the residual's floor has stayed
+ * above FEED_UNESTABLISHED x the deadband for FEED_UNESTABLISHED_SOLVES solves.
+ *
+ * Only a readout: nothing in the solve reads it. What it is for is that the
+ * load and the exit gauge go still all the same, so the stand looks settled.
+ * Measured with the screws parked (docs/validation.md, 締め込みと Stone の比):
+ * where the strip feeds itself the settled residual is at most 2.4x the
+ * deadband (0.63 mm and 0.05 mm strip, 25-98 %); past the bite continuation
+ * limit (8 mm plate from 45 %) it stays above 280x (0.085 after 2400 solves
+ * at 45 %), and the floor tracks it. 30x sits between the two. The floor, not the residual, and 300 solves:
+ * starting up, the residual is that large for a moment too, and the floor
+ * comes down with it inside 300 solves (8 mm at 35 %, the 2 mm default).
+ */
+const FEED_UNESTABLISHED = 30;
+const FEED_UNESTABLISHED_SOLVES = 300;
 
 export interface RollingParams {
   /* work roll */
@@ -752,6 +769,13 @@ export interface RollingDiagnostics {
    */
   feedFloor: number;
   /**
+   * The residual has stayed far outside the deadband long enough that no
+   * free-running feed speed exists: the entry face is pushing the strip in,
+   * and the still load and exit gauge are not a steady state. Always false
+   * with the feed speed prescribed. See FEED_UNESTABLISHED.
+   */
+  feedNotEstablished: boolean;
+  /**
    * Fraction of the *commanded* reduction actually achieved, h0*r being the
    * command. Well below 1 with the screws fixed means the barrel is flattening
    * faster than the gap closes - Stone's minimum rollable thickness, not a
@@ -1019,6 +1043,8 @@ export class RollingSim {
    * rather than pinning itself to one lucky sample.
    */
   private feedFloor = 0;
+  /** consecutive solves the floor has been above FEED_UNESTABLISHED x the deadband */
+  private feedStuck = 0;
   /** inside its deadband, and holding there until the residual clears the gate - see `updateFeedSpeed` */
   private feedHeld = false;
   /**
@@ -1381,6 +1407,7 @@ export class RollingSim {
     this.reactSeen = false;
     this.feedTick = 0;
     this.feedFloor = 0;
+    this.feedStuck = 0;
     this.feedHeld = false;
     this.strain.fill(this.entryStrain);
     this.temp.fill(this.entryTemp);
@@ -1835,6 +1862,7 @@ export class RollingSim {
     d.exitTemp = this.entryTemp;
     d.tempRise = 0;
     d.exitFlowStress = uniaxial(p, this.entryStrain, this.entryTemp);
+    d.feedNotEstablished = false;
     this.lastStepMs = 0;
   }
 
@@ -1953,6 +1981,8 @@ export class RollingSim {
 
     if (p.feedSpeed > 0) {
       this.vIn = p.feedSpeed;
+      this.feedStuck = 0;
+      this.diag.feedNotEstablished = false;
     } else {
       // Feed forward a barrel-speed change before the loop trims the rest.
       if (this.vInOmega > 0 && p.omega > 0 && p.omega !== this.vInOmega) {
@@ -2891,6 +2921,8 @@ export class RollingSim {
       ? Math.min(this.diag.feedResidual, this.feedFloor * 1.0005)
       : this.diag.feedResidual;
     this.diag.feedFloor = this.feedFloor;
+    this.feedStuck = this.feedFloor > FEED_UNESTABLISHED * this.params.feedDeadband ? this.feedStuck + 1 : 0;
+    this.diag.feedNotEstablished = this.feedStuck >= FEED_UNESTABLISHED_SOLVES;
 
     if (++this.feedTick < Math.max(1, this.params.feedEvery | 0)) return;
     this.feedTick = 0;
@@ -3626,7 +3658,7 @@ function emptyDiag(): RollingDiagnostics {
     rollPeakVm: 0, feedReaction: 0, feedFace: 0, loadReaction: 0, loadFreeSurface: 0, balanceX: 0, picardDelta: 0, cgIterations: 0, cgResidual: 0,
     rollCgIterations: 0, rollCgResidual: 0,
     couplingResidual: 0, relaxScale: 1, reductionRatio: 1,
-    feedResidual: 0, feedFloor: 0, meshResidual: 0, windowShortfall: 0,
+    feedResidual: 0, feedFloor: 0, feedNotEstablished: false, meshResidual: 0, windowShortfall: 0,
     elasticEntryLen: 0, elasticExitLen: 0, plasticArcLen: 0,
     elasticEntryTheory: 0, elasticEntryHertz: 0,
     springback: 0, exitThicknessGap: 0, elasticEntryCompression: 0,
