@@ -29,7 +29,7 @@ const VOCAB = {
 };
 const MAX = 8;
 const q = (s) => parseQuery(s, VOCAB, MAX);
-const FLAGS = { debug: false, nowire: false, notrace: false, nomirror: false, nosolve: false, nogrid: false, tab: null };
+const FLAGS = { debug: false, nowire: false, notrace: false, nomirror: false, nosolve: false, nogrid: false, fixeddt: false, tab: null };
 
 // --- 1 -----------------------------------------------------------------------
 const CASES = [
@@ -66,6 +66,16 @@ const CASES = [
   ['?stands=99', { stands: MAX }],
   ['?load=800', { load: 800 }],
   ['?load=-5', {}],
+  ['?fixeddt&stopafter=600', { fixeddt: true, stopafter: 600 }],
+  ['?fixeddt=0', { fixeddt: true }],
+  ['?stopafter=2.6', { stopafter: 3 }],
+  ['?stopafter=1.4', { stopafter: 1 }],
+  ['?stopafter=0.6', {}],
+  ['?stopafter=0', {}],
+  ['?stopafter=', {}],
+  ['?stopafter=-5', {}],
+  ['?stopafter=Infinity', {}],
+  ['?stopafter=abc', {}],
   ['?mill=4HI', { mill: '4hi' }],
   ['?mill=constructor', {}],
   ['?tab=3d', { tab: '3d' }],
