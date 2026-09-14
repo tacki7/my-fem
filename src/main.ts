@@ -4211,9 +4211,12 @@ function updateStats(): void {
     // whatever M is. What does move the achievable total load is the width the
     // per-unit-width result is multiplied by, and the material and geometry.
     // Pressed against the closing rail, the load being measured *is* the most
-    // this range can make - so say so, and say whether driving the screws past
-    // it would even help. Near Stone's limit it would not: the barrel flattens
-    // instead of the strip thinning, and the load has a ceiling of its own.
+    // this range can make - so say so, and say what driving the screws past it
+    // would buy. Below Stone's limit, less and less of the closing reaches the
+    // gauge: measured with the screws walked to the rail (docs/validation.md,
+    // 締め込みと Stone の比), d ln h1 / d ln gap is about 0.5 at h1/h_min = 1
+    // and 0.04 at 0.56 - while the load kept rising the whole way. It used to
+    // say the load would not rise below a ratio of 2; nothing measured that.
     const ratio = d.stoneHMin > 0 ? d.exitThickness / d.stoneHMin : Infinity;
     const ceiling = force
       ? `この範囲で出せるのは今の ${((d.rollForce * b) / TONF).toFixed(0)} tonf が上限`
@@ -4245,9 +4248,10 @@ function updateStats(): void {
           + `（バレル間隔 ${(params.sepFloorFrac * 100).toFixed(0)}·%h₀ ＝ 左パネル`
           + '「スクリュー下限 バレル間隔」）。'
           + `${ceiling}。`
-          + (ratio < 2
-            ? ` h₁/h_min = ${ratio.toFixed(2)} と Stone の最小圧延可能板厚に近く、`
-              + 'これ以上締めてもロールが扁平するだけで荷重は増えない。'
+          + (ratio < 1
+            ? ` h₁/h_min = ${ratio.toFixed(2)} と Stone の最小圧延可能板厚を下回っている。`
+              + '締めた量のうち出側板厚に効くのは半分程度以下で、残りはロールの扁平になる（荷重は増える）。'
+              + '下端より先は質量収支が崩れるため許していない。'
               + 'ロール径 R を小さくするか、板幅 b・μ・σ_Y0 を上げること。'
             : ` h₁/h_min = ${Number.isFinite(ratio) ? ratio.toFixed(2) : '—'}`
               + 'とまだ余裕はあるが、下端より先は質量収支が崩れるため許していない。'
