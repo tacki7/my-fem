@@ -212,6 +212,13 @@ export interface Params3D {
   stripNy: number;
   /** how a roll flattens at a contact: the Hertz/Johnson closed form, or the cross-section ring FEM */
   flatModel: 'hertz' | 'ring';
+  /**
+   * the work roll's flattening by the strip spread along the roll (see
+   * `flatnl.ts`): each slice is also pressed in by its neighbours' loads, and
+   * the unloaded barrel beyond the strip edge holds the edge up less. Off,
+   * each slice flattens under its own load alone.
+   */
+  flatNonlocal: boolean;
   /** ring FEM: circumferential divisions, rings through the wall, radial grading, hub radius as a fraction of R */
   ringNt: number;
   ringNr: number;
@@ -258,7 +265,7 @@ export function defaultParams(mill: MillType): Params3D {
     Eroll: 206e9, nuRoll: 0.3,
     stations: 301, stripStations: 0,
     stripModel: 'fem', stripNz: 8, stripNy: 2,
-    flatModel: 'hertz', ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
+    flatModel: 'hertz', flatNonlocal: false, ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
   };
   switch (mill) {
     case '2hi':
