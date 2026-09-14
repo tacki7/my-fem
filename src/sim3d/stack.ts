@@ -138,6 +138,28 @@ export interface Params3D {
   leveling: number;
   /** housing stiffness per support point - a bearing chock or a saddle [N/m] */
   housingK: number;
+  /**
+   * Housing deformation mode (2Hi / 4Hi / 6Hi; see `housing.ts`): the screw
+   * roll's chocks sit on a housing frame per side - posts and crossheads, its
+   * compliance from the dimensions below, top and bottom halves tied through
+   * the posts - instead of on the independent springs of `housingK`, and on a
+   * 6Hi the intermediate roll's chocks can seat on the backup roll's.
+   */
+  housingMode: boolean;
+  /** per side: cross-section of one post [m²], posts, post length between the crossheads [m] */
+  housingPostArea: number;
+  housingPostCount: number;
+  housingPostLength: number;
+  /** each crosshead: span between the post centres [m], second moment of area [m⁴], shear area [m²] */
+  housingCrossSpan: number;
+  housingCrossI: number;
+  housingCrossShearArea: number;
+  /** Young's modulus of the housing [Pa] */
+  housingE: number;
+  /** in the housing mode, a 6Hi intermediate roll's chocks seat on the backup roll's (compression only) */
+  irSeat: boolean;
+  /** stiffness of that seat: bearing, chock and liners in series [N/m] */
+  irSeatK: number;
   /** roll geometry, by type [m] */
   wrD: number; wrLb: number; wrLs: number; wrDn: number;
   irD: number; irLb: number; irLs: number; irDn: number;
@@ -202,6 +224,15 @@ export function defaultParams(mill: MillType): Params3D {
     lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true,
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
+    // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long,
+    // crossheads spanning 1.8 m with I = 4.5e-3 m⁴ (a 700 × 420 mm section) and
+    // 0.3 m² of shear area - chosen so that a mirror's chock sees 6.04e9 N/m,
+    // the `housingK` above (see docs/validation.md「ハウジング変形考慮モード」).
+    housingMode: false,
+    housingPostArea: 0.35, housingPostCount: 2, housingPostLength: 4.5,
+    housingCrossSpan: 1.8, housingCrossI: 4.5e-3, housingCrossShearArea: 0.3,
+    housingE: 206e9,
+    irSeat: true, irSeatK: 3e9,
     wrD: 0.5, wrLb: 1.6, wrLs: 2.1, wrDn: 0.3,
     irD: 0.5, irLb: 1.7, irLs: 2.2, irDn: 0.3,
     ir2D: 0.175, ir2Lb: 1.5,

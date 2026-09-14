@@ -31,6 +31,7 @@
  */
 
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
+import { housingCompliance, halfStiffness, sideStiffness } from './housing';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, atNodes, type StripFemResult } from './stripfem';
@@ -205,7 +206,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -218,6 +219,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   fem: '材料 FEM が反復上限で打ち切り（結果は近似）',
   wrTouch: '板の外で上下のワークロール同士が接触している（対称モデルは考慮しない — 荷重配分が実機と変わる）',
   stripWide: '板幅が WR 胴長より長い（胴からはみ出した板は圧延されず、計算にも入らない）',
+  housingScope: 'ハウジング変形考慮モードは 2Hi・4Hi・6Hi だけ（このミルは今の支持のまま解いている）',
 };
 
 export interface Result3D {
@@ -272,6 +274,31 @@ export interface Result3D {
   solveMs: number;
   dof: number;
   bandwidth: number;
+  /** the housing deformation mode's frame and seats (see `housing.ts`); null with the mode off or out of its scope */
+  housing: HousingResult | null;
+}
+
+export interface HousingSide {
+  /** the load on this side's housing: the mean of its top and bottom chock loads [N] */
+  force: number;
+  /** stretch of the posts [m] */
+  post: number;
+  /** mid-span deflection of the top and the bottom crosshead [m] */
+  crossheadTop: number;
+  crossheadBottom: number;
+  /** how far the window opens between the two chock seats: posts plus both crossheads [m] */
+  stretch: number;
+}
+
+export interface HousingResult {
+  /** operator side (−x), drive side (+x) */
+  sides: HousingSide[];
+  /** the intermediate chock seats, compression [N]: upper −x, upper +x, lower −x, lower +x (on a mirror the lower two repeat the upper); empty when there are none */
+  seatForces: number[];
+  /** the upper screw roll's supports, +x minus −x vertical displacement [m] */
+  burTilt: number;
+  /** rolling force over the mean window opening [N/m] */
+  millModulus: number;
 }
 
 interface SliceState {
@@ -317,6 +344,10 @@ export class StackSolver {
   contacts: ContactState[] = [];
   /** how many of `rolls` are the upper half; the results show only those */
   upper = 0;
+  /** housing mode: each side's top and bottom chock loads from the last assembly [N] */
+  private housingLoads: [number, number][] = [];
+  /** housing mode: the intermediate chock seats, from the last assembly (see `assembleHousing`) */
+  private seats: { iv: number; ib: number; k: number; active: boolean; force: number }[] = [];
   /** the lower work roll in `rolls`, or -1 when the lower half is the upper one's mirror image */
   wrLower = -1;
   /** rolls whose supports the screw moves, both halves */
@@ -700,6 +731,7 @@ export class StackSolver {
 
     // ── supports ──
     const lev = p.leveling;
+    const housing = this.housingActive();
     if (withK) this.bScrew.fill(0);
     for (let r = 0; r < nr; r++) {
       const R = rolls[r];
@@ -719,7 +751,8 @@ export class StackSolver {
         }
         let ky = 0, kz = 0, fy = 0;
         switch (d.support) {
-          case 'screw': ky = p.housingK; kz = K_GUIDE; break;
+          // in the housing mode the frame below carries the screw roll's vertical load
+          case 'screw': ky = housing ? 0 : p.housingK; kz = K_GUIDE; break;
           case 'saddle': ky = p.housingK; kz = p.housingK; break;
           case 'chock': ky = K_CHOCK_Y; kz = K_GUIDE; fy = d.benderForce; break;
           case 'free': return;
@@ -734,6 +767,7 @@ export class StackSolver {
         fScale = Math.max(fScale, Math.abs(ry));
       });
     }
+    if (housing) fScale = Math.max(fScale, this.assembleHousing(withK));
 
     // ── roll-roll contacts ──
     for (const c of this.contacts) {
@@ -859,6 +893,8 @@ export class StackSolver {
     K.solve(rhs, du);
     const wb = USE_WOODBURY && this.tensionLive && this.slices.length > 0 ? this.prepareWoodbury() : null;
     if (wb) this.applyWoodbury(wb, du);
+    const sw = this.seats.length > 0 ? this.prepareSeats(wb) : null;
+    if (sw) this.applySeats(sw, du);
 
     let dS = 0;
     // the plain step (screw held) is kept: it is the fallback when the
@@ -871,6 +907,7 @@ export class StackSolver {
       x2.set(this.bScrew);
       K.solveLeading(x2, 0, this.vEnd);
       if (wb) this.applyWoodbury(wb, x2);
+      if (sw) this.applySeats(sw, x2);
       const m = this.slices.length;
       const a = this.targetGradient();
       let ax1 = 0, ax2 = 0;
@@ -1667,6 +1704,134 @@ export class StackSolver {
     return moved;
   }
 
+  /** the housing deformation mode is on and this mill is inside its scope (2Hi / 4Hi / 6Hi) */
+  private housingActive(): boolean {
+    const m = this.p.mill;
+    return this.p.housingMode && (m === '2hi' || m === '4hi' || m === '6hi');
+  }
+
+  /**
+   * The housing deformation mode's part of the assembly: the screw roll's
+   * chocks on the housing frame, and a 6Hi intermediate roll's chocks seated
+   * on the backup roll's (see `housing.ts`). Returns the largest force it put
+   * into the residual, for the residual's scale.
+   *
+   * The frame. Each side's top and bottom chock loads R = K (u − t) through
+   * the side's 2×2 stiffness, t the screw's (and the leveling's) target as
+   * for the independent springs; on a mirror the lower chock is the upper
+   * one's image and each half sees `halfStiffness`. The two chocks of a side
+   * are the same station on the two halves' screw rolls, a few unknowns
+   * apart, so the coupling stays in the band.
+   *
+   * The seat. Between an intermediate chock and the backup chock on the same
+   * side: compression δ = v_IR − v_BUR > 0 (the chock pressed towards the
+   * backup roll's; both are zero unloaded, so the seat touches with no load)
+   * gives k δ, pushing the two apart; a seat that opens carries nothing. The
+   * two chocks sit at different stations - the intermediate roll is shifted -
+   * so the seat's stiffness is kept out of the band: `iterate` applies it as
+   * a Woodbury update over the seats in contact (`prepareSeats`).
+   */
+  private assembleHousing(withK: boolean): number {
+    const p = this.p;
+    const { K, rhs, u, rolls } = this;
+    const c = housingCompliance(p);
+    const lev = p.leveling;
+    const top = this.screwRolls[0];
+    const bot = this.wrLower >= 0 ? this.screwRolls[1] : -1;
+    const T = rolls[top];
+    const target = (r: number, s: number) => -this.screw - (lev * this.x[s]) / Math.max(rolls[r].def.Ls, 1e-9);
+    let scale = 0;
+    const chockLoads: [number, number][] = [];
+    for (let k = 0; k < 2; k++) {
+      const sT = T.supports[k], iT = this.idx(sT, top, 0);
+      const eT = u[iT] - target(top, sT);
+      if (bot < 0) {
+        const kh = halfStiffness(c);
+        const f = kh * eT;
+        rhs[iT] -= f;
+        if (withK) { K.add(iT, iT, kh); this.bScrew[iT] += kh; }
+        T.reactions[k] = f;
+        chockLoads.push([f, f]);
+        scale = Math.max(scale, Math.abs(f));
+      } else {
+        const B = rolls[bot];
+        const sB = B.supports[k], iB = this.idx(sB, bot, 0);
+        const eB = u[iB] - target(bot, sB);
+        const [k11, k12, k22] = sideStiffness(c);
+        const fT = k11 * eT + k12 * eB, fB = k12 * eT + k22 * eB;
+        rhs[iT] -= fT; rhs[iB] -= fB;
+        if (withK) {
+          K.add(iT, iT, k11); K.add(iB, iB, k22); K.add(iT, iB, k12);
+          this.bScrew[iT] += k11 + k12; this.bScrew[iB] += k12 + k22;
+        }
+        T.reactions[k] = fT; B.reactions[k] = fB;
+        chockLoads.push([fT, fB]);
+        scale = Math.max(scale, Math.abs(fT), Math.abs(fB));
+      }
+    }
+    this.housingLoads = chockLoads;
+
+    // the intermediate chocks' seats
+    this.seats.length = 0;
+    if (p.mill === '6hi' && p.irSeat) {
+      const halves = bot < 0 ? [[0, top]] : [[0, top], [this.upper, bot]];
+      for (const [base, bur] of halves) {
+        const ir = base + 1, IR = rolls[ir], BUR = rolls[bur];
+        if (IR.def.support !== 'chock') continue;
+        for (let k = 0; k < 2; k++) {
+          const iv = this.idx(IR.supports[k], ir, 0), ib = this.idx(BUR.supports[k], bur, 0);
+          const delta = u[iv] - u[ib];
+          const active = delta > 0;
+          const f = active ? p.irSeatK * delta : 0;
+          rhs[iv] -= f; rhs[ib] += f;
+          this.seats.push({ iv, ib, k: p.irSeatK, active, force: f });
+          scale = Math.max(scale, f);
+        }
+      }
+    }
+    return scale;
+  }
+
+  /**
+   * The Woodbury pieces for the seats in contact: K_full = K' + A D Aᵀ with
+   * K' the band and the tension coupling (`wb`), A's columns e_IR − e_BUR,
+   * D their stiffnesses. Z = K'⁻¹A (one banded solve a seat), and
+   * G = D⁻¹ + AᵀZ factored; `applySeats` then turns K'⁻¹v into K_full⁻¹v.
+   */
+  private prepareSeats(wb: ReturnType<StackSolver['prepareWoodbury']>): { Z: Float64Array[]; G: Float64Array; piv: Int32Array; on: { iv: number; ib: number }[] } | null {
+    const on = this.seats.filter((q) => q.active);
+    const m = on.length;
+    if (m === 0) return null;
+    const n = this.u.length;
+    const Z: Float64Array[] = [];
+    for (const q of on) {
+      const z = new Float64Array(n);
+      z[q.iv] = 1; z[q.ib] = -1;
+      this.K.solveLeading(z, 0, this.vEnd);
+      if (wb) this.applyWoodbury(wb, z);
+      Z.push(z);
+    }
+    const G = new Float64Array(m * m);
+    for (let i = 0; i < m; i++) {
+      for (let j = 0; j < m; j++) G[i * m + j] = Z[j][on[i].iv] - Z[j][on[i].ib] + (i === j ? 1 / this.seats.find((q) => q === on[i])!.k : 0);
+    }
+    const piv = new Int32Array(m);
+    if (!luFactor(G, m, piv)) return null;
+    return { Z, G, piv, on };
+  }
+
+  private applySeats(sw: { Z: Float64Array[]; G: Float64Array; piv: Int32Array; on: { iv: number; ib: number }[] }, v: Float64Array): void {
+    const m = sw.on.length;
+    const y = new Float64Array(m);
+    for (let i = 0; i < m; i++) y[i] = v[sw.on[i].iv] - v[sw.on[i].ib];
+    luSolve(sw.G, m, sw.piv, y);
+    for (let j = 0; j < m; j++) {
+      const z = sw.Z[j], yj = y[j];
+      if (yj === 0) continue;
+      for (let i = 0; i < v.length; i++) v[i] -= z[i] * yj;
+    }
+  }
+
   private emptyResult(): Result3D {
     const ns = this.ns;
     const nan = () => new Float64Array(ns).fill(NaN);
@@ -1678,6 +1843,7 @@ export class StackSolver {
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
       iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      housing: null,
     };
   }
 
@@ -1805,6 +1971,7 @@ export class StackSolver {
         R.wrGap[s] = this.gapAt(s);
       }
     }
+    R.housing = this.housingActive() ? this.housingResult() : null;
     R.warnings = this.diagnose();
     R.notes = [...this.stack.issues];
     {
@@ -1882,6 +2049,7 @@ export class StackSolver {
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
     if (this.stripOverhang() > 0) w.push('stripWide');
+    if (p.housingMode && !this.housingActive()) w.push('housingScope');
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
     if ((p.stripModel === 'fem' || p.stripModel === 'fem3d') && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the
@@ -1892,6 +2060,21 @@ export class StackSolver {
     if (p.mode !== 'screw' && this.iterations > stuckAt && !this.screwSettled()
       && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');
     return w;
+  }
+
+  private housingResult(): HousingResult {
+    const c = housingCompliance(this.p);
+    const sides = this.housingLoads.map(([ft, fb]) => {
+      const post = (c.post * (ft + fb)) / 2, crossheadTop = c.crosshead * ft, crossheadBottom = c.crosshead * fb;
+      return { force: (ft + fb) / 2, post, crossheadTop, crossheadBottom, stretch: post + crossheadTop + crossheadBottom };
+    });
+    const mirror = this.wrLower < 0;
+    const seatForces = this.seats.map((q) => q.force);
+    if (mirror && seatForces.length) seatForces.push(...seatForces);
+    const T = this.rolls[this.screwRolls[0]];
+    const burTilt = this.u[this.idx(T.supports[1], this.screwRolls[0], 0)] - this.u[this.idx(T.supports[0], this.screwRolls[0], 0)];
+    const meanStretch = sides.length ? sides.reduce((a, b) => a + b.stretch, 0) / sides.length : 0;
+    return { sides, seatForces, burTilt, millModulus: meanStretch > 0 ? this.forceTotal / meanStretch : 0 };
   }
 
   /** exit thickness at x by linear interpolation between slices */
