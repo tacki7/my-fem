@@ -67,3 +67,33 @@ export function sideStiffness(c: HousingCompliance): [number, number, number] {
 export function halfStiffness(c: HousingCompliance): number {
   return 1 / (c.crosshead + c.post / 2);
 }
+
+/**
+ * Where the two housings stand across the mill. Each side's posts are
+ * centred on the screw roll's chock and `housingPostWidth` wide along the
+ * roll axis, so the strip passes between their inner faces. The crosshead is
+ * taken as wide as the posts (one frame), which with its second moment of
+ * area gives its depth, I = b h³ / 12. For the side view and the clearance
+ * check only: the stiffness above takes the areas and I as they are.
+ */
+export interface HousingPlan {
+  /** post centres, operator side (−x) then drive side (+x) [m] */
+  centres: [number, number];
+  /** the posts' inner faces [m] */
+  inner: [number, number];
+  /** post width along the roll axis [m] */
+  width: number;
+  /** crosshead depth [m] */
+  crossDepth: number;
+  /** how far the strip reaches past an inner face, the worse side [m]; 0 when it passes clear */
+  stripOverlap: number;
+}
+
+export function housingPlan(p: Params3D, screwRoll: { shift: number; Ls: number }): HousingPlan {
+  const b = Math.max(p.housingPostWidth, 0);
+  const centres: [number, number] = [screwRoll.shift - screwRoll.Ls / 2, screwRoll.shift + screwRoll.Ls / 2];
+  const inner: [number, number] = [centres[0] + b / 2, centres[1] - b / 2];
+  const crossDepth = b > 0 ? Math.cbrt((12 * p.housingCrossI) / b) : 0;
+  const over = Math.max(inner[0] + p.width / 2, p.width / 2 - inner[1]);
+  return { centres, inner, width: b, crossDepth, stripOverlap: over > 1e-9 ? over : 0 };
+}

@@ -31,7 +31,7 @@
  */
 
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
-import { housingCompliance, halfStiffness, sideStiffness } from './housing';
+import { housingCompliance, halfStiffness, sideStiffness, housingPlan } from './housing';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, atNodes, type StripFemResult } from './stripfem';
@@ -206,7 +206,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope' | 'housingStrip';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -220,6 +220,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   wrTouch: '板の外で上下のワークロール同士が接触している（対称モデルは考慮しない — 荷重配分が実機と変わる）',
   stripWide: '板幅が WR 胴長より長い（胴からはみ出した板は圧延されず、計算にも入らない）',
   housingScope: 'ハウジング変形考慮モードは 2Hi・4Hi・6Hi だけ（このミルは今の支持のまま解いている）',
+  housingStrip: '板幅がハウジングのポスト内面の間隔（操作側–駆動側）より広い — 板がポストに当たる（側面図の赤いポスト）',
 };
 
 export interface Result3D {
@@ -2050,6 +2051,7 @@ export class StackSolver {
     if (this.stack.issues.length) w.push('layout');
     if (this.stripOverhang() > 0) w.push('stripWide');
     if (p.housingMode && !this.housingActive()) w.push('housingScope');
+    if (this.housingActive() && housingPlan(p, this.rolls[this.screwRolls[0]].def).stripOverlap > 0) w.push('housingStrip');
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
     if ((p.stripModel === 'fem' || p.stripModel === 'fem3d') && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the

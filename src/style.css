@@ -977,6 +977,8 @@ body.resizing * { cursor: inherit !important; }
 }
 #v3-end { width: 100%; height: 240px; display: block; border-radius: 6px; }
 #v3-side { width: 100%; height: 200px; display: block; border-radius: 6px; }
+/* the housing mode stacks a frame and its numbers over the rolls: the rolls keep their size */
+#v3-side.with-housing { height: 300px; }
 #v3-section { width: 100%; height: 230px; display: block; border-radius: 6px; }
 .v3-asu { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .v3-asu .num-field { width: 100%; min-width: 0; padding: 3px 2px; text-align: center; font-size: 10.5px; }

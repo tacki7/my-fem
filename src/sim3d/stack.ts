@@ -150,6 +150,12 @@ export interface Params3D {
   housingPostArea: number;
   housingPostCount: number;
   housingPostLength: number;
+  /**
+   * the posts' width along the roll axis [m]: where the housings' inner faces
+   * stand across the mill, for the side view and the strip clearance warning
+   * (see `housingPlan`). Not part of the stiffness, which takes the area.
+   */
+  housingPostWidth: number;
   /** each crosshead: span between the post centres [m], second moment of area [m⁴], shear area [m²] */
   housingCrossSpan: number;
   housingCrossI: number;
@@ -224,12 +230,13 @@ export function defaultParams(mill: MillType): Params3D {
     lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true,
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
-    // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long,
-    // crossheads spanning 1.8 m with I = 4.5e-3 m⁴ (a 700 × 420 mm section) and
-    // 0.3 m² of shear area - chosen so that a mirror's chock sees 6.04e9 N/m,
-    // the `housingK` above (see docs/validation.md「ハウジング変形考慮モード」).
+    // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long
+    // (700 mm along the roll axis), crossheads spanning 1.8 m with
+    // I = 4.5e-3 m⁴ (a 700 × 420 mm section) and 0.3 m² of shear area -
+    // chosen so that a mirror's chock sees 6.04e9 N/m, the `housingK` above
+    // (see docs/validation.md「ハウジング変形考慮モード」).
     housingMode: false,
-    housingPostArea: 0.35, housingPostCount: 2, housingPostLength: 4.5,
+    housingPostArea: 0.35, housingPostCount: 2, housingPostLength: 4.5, housingPostWidth: 0.7,
     housingCrossSpan: 1.8, housingCrossI: 4.5e-3, housingCrossShearArea: 0.3,
     housingE: 206e9,
     irSeat: true, irSeatK: 3e9,

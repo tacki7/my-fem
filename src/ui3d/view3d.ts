@@ -17,7 +17,7 @@ import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, hel
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
-import { housingCompliance, halfStiffness } from '../sim3d/housing';
+import { housingCompliance, halfStiffness, housingPlan } from '../sim3d/housing';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
@@ -166,7 +166,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cDefl = cell('v3-defl', 'ロール撓み', '各ロール軸の鉛直たわみ v(x)（支持点基準ではなく絶対値：スクリュー分の沈み込みを含む）');
   const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
   const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
-  const cGauge = cell('v3-gauge', '板厚プロファイル', '出側 h₁（実線）と入側 h₀（破線）の平均からの偏差');
+  const cGauge = cell('v3-gauge', '板厚プロファイル', '板幅中央を 0 とした偏差');
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
@@ -434,6 +434,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
       hSec.body.append(num('housingPostCount', 'ポスト 本数（片側）', '本', 1, 4, 1, 1, '片側のハウジングの窓を作るポストの数。ふつうは 2 本（入側・出側）。'));
       hSec.body.append(num('housingPostLength', 'ポスト 長さ', 'm', 1, 8, 0.1, 1, '上下のクロスヘッドの間のポストの長さ。既定 4.5 m（仮定）。'));
+      hSec.body.append(num('housingPostWidth', 'ポスト 幅（ロール軸方向）', 'm', 0.1, 1.5, 0.01, 1, '操作側・駆動側それぞれのポストの、ロール軸方向の幅。ポストは圧下ロールのチョックを中心に立つので、板が通るポスト内面の間隔 = チョック間隔 − この幅。側面図の描画と、板幅がこの間隔を超えたときの警告だけに使い、剛性には使わない（剛性は断面積から）。既定 0.7 m（500 × 700 mm の 700 側を仮定）。'));
       hSec.body.append(num('housingCrossSpan', 'クロスヘッド スパン', 'm', 0.5, 4, 0.05, 1, 'ポスト中心の間隔（クロスヘッドはこの 2 点で支えられ、中央にチョック荷重を受ける梁）。既定 1.8 m（仮定）。'));
       hSec.body.append(num('housingCrossI', 'クロスヘッド 断面二次モーメント', 'm⁴', 1e-4, 5e-2, 1e-4, 1, '曲げのたわみ F S³ / (48 E I)。既定 4.5×10⁻³ m⁴（700 × 420 mm の断面を仮定）。', true, (v) => v.toExponential(2)));
       hSec.body.append(num('housingCrossShearArea', 'クロスヘッド せん断断面積', 'm²', 0.05, 1.5, 0.01, 1, 'せん断のたわみ F S / (4 G A_s)。既定 0.3 m²（仮定）。'));
@@ -442,9 +443,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       refreshHousingHint = () => {
         const c = housingCompliance(params);
         const k = halfStiffness(c);
+        const screwRoll = solver.stack.rolls.find((r) => r.support === 'screw');
+        const plan = screwRoll ? housingPlan(params, screwRoll) : null;
         derived.textContent = `片側の鉛直剛性（上下対称なときの 1 チョック）: ${(k / 1e9).toFixed(2)} MN/mm ／ `
           + `ポスト ${(c.post * 1e12).toFixed(2)} µm/MN・クロスヘッド ${(c.crosshead * 1e12).toFixed(2)} µm/MN（荷重あたりの伸び・たわみ）。`
-          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。';
+          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。'
+          + (plan ? ` ポスト内面の間隔 ${((plan.inner[1] - plan.inner[0]) * 1e3).toFixed(0)} mm（板幅 ${(params.width * 1e3).toFixed(0)} mm${plan.stripOverlap > 0 ? '、⚠ 板がポストに当たる' : ''}）。` : '');
       };
       refreshHousingHint();
       hSec.body.append(derived);
@@ -559,7 +563,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // the housing frame's dimensions only mean something with the mode on, and
     // with it on the screw roll no longer sits on the per-support stiffness
     const housingOn = params.housingMode && (params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi');
-    for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
+    for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingPostWidth', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
     on('irSeatK', params.housingMode && params.irSeat);
     on('housingK', !housingOn);
   };
@@ -599,7 +603,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
-    sideView.draw(st, params.width, R.housing);
+    sideCanvas.classList.toggle('with-housing', R.housing !== null);
+    sideView.draw(st, params, R.housing);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
     charts.defl.draw(R.rolls.map((r, i): XYSeries => ({
@@ -624,15 +629,23 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: onBarrels(c) })),
     ], { unit: 'kN/mm', halfWidth, strip, zero: true });
 
-    const dev = (a: Float64Array) => {
-      let s = 0, n = 0;
-      for (let i = 0; i < a.length; i++) if (Number.isFinite(a[i])) { s += a[i]; n++; }
-      const m = n ? s / n : 0;
-      return Float64Array.from(a, (v) => (v - m) * 1e6);
+    // Entry and exit, each against its own thickness at the strip centre: the two
+    // shapes on one scale, the entry crown the pass was given and the exit profile
+    // it produced, and an edge reads as its crown with the sign turned.
+    const centred = (a: Float64Array) => {
+      let c = NaN;
+      for (let i = 1; i < a.length; i++) {
+        const x0 = R.x[i - 1], x1 = R.x[i];
+        if (x0 <= 0 && x1 >= 0 && Number.isFinite(a[i - 1]) && Number.isFinite(a[i])) {
+          c = a[i - 1] + (a[i] - a[i - 1]) * (-x0 / (x1 - x0));
+          break;
+        }
+      }
+      return Float64Array.from(a, (v) => (v - c) * 1e6);
     };
     charts.gauge.draw([
-      { label: `h₁ − 平均 (${(R.h1Mean * 1e3).toFixed(4)} mm)`, color: STRIP_COLOR, x: R.x, y: dev(R.h1), width: 2 },
-      { label: 'h₀ − 平均', color: '#8ea0bd', x: R.x, y: dev(R.h0), dash: true },
+      { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: centred(R.h0), dash: true, width: 2 },
+      { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: centred(R.h1), width: 2 },
     ], { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true });
 
     // Each curve shifted so its smallest value across the strip reads zero:
