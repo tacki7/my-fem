@@ -1,7 +1,7 @@
 // What a stand hands down the line when it is not rolling normally: parked
 // (target at or above its entry gauge), restarted after a NaN, or rebuilt.
 //
-//   node tools/sim2d/chain.mjs      (exit 1 on FAIL; about 60 s)
+//   node tools/sim2d/chain.mjs      (exit 1 on FAIL; 25-65 s depending on load)
 //
 // The chain reads each stand's diagnostics from the previous frame, so a value
 // needs one frame per stand to travel: stand #3's entry after frame f is what

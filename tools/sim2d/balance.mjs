@@ -2,7 +2,7 @@
 // integrates a pressure recovered from element stresses, the reactions on the
 // symmetry plane and the entry face are the discrete system's own.
 //
-//   node tools/sim2d/balance.mjs      (exit 1 on FAIL; about 30 s)
+//   node tools/sim2d/balance.mjs      (exit 1 on FAIL; 25-65 s depending on load)
 //
 // 1. Calibration: a flat strip with no roll, pulled at both ends. The entry
 //    face has to supply exactly (σb − σf)·h/2, and nothing holds it vertically.
