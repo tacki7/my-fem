@@ -268,6 +268,8 @@ const tracers = new Tracers(() => sim);
 
 const left = document.getElementById('left')!;
 let rebuildTimer = 0;
+/** a line rebuild is waiting out its debounce; the line is not solved meanwhile (see `frameBody`) */
+let rebuildPending = false;
 let standRebuildTimer = 0;
 /** stands queued for a local rebuild while the debounce runs */
 const standRebuildQueue = new Set<number>();
@@ -324,7 +326,9 @@ function recommandStand(k: number, reduction: number): void {
 
 function scheduleRebuild(): void {
   clearTimeout(rebuildTimer);
+  rebuildPending = true;
   rebuildTimer = window.setTimeout(() => {
+    rebuildPending = false;
     mill.build(params, activeSetups());
     buildStandGrid();
     selectStand(view.stand);
@@ -3248,7 +3252,15 @@ function frameBody(now: number): void {
   const dt = FIXED_DT ?? wall / 1000;
 
   let solved = false;
-  if (view.running && ++frameCount % Math.max(1, view.solveEvery) === 0) {
+  // Not while a line rebuild is waiting out its debounce. Whatever scheduled
+  // it has already changed what the line reads - `params.h0`, a preset's
+  // radius and reduction - but the meshes, the windows and the screws are
+  // still the old line's, and the rebuild throws that state away anyway.
+  // Solving the gap in between put the first stand's 2 mm gap on 1.5 mm strip
+  // when h0 was dialled down: the exit came out thicker than the entry, the
+  // flattening ran away, and in 160 ms the stand restarted five times and gave
+  // up, with a toast for each, just before the rebuild reset the count.
+  if (view.running && !rebuildPending && ++frameCount % Math.max(1, view.solveEvery) === 0) {
     // The setups of the line that exists, not of the one the stand-count
     // select asks for: that rebuild is still waiting on `scheduleRebuild`, and
     // until it runs a shorter slice leaves the last stands without a setup.
