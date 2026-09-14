@@ -505,7 +505,24 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     'スライスの荷重式で後方張力 σb と前方張力 σf をどう効かせるか。前後の平均（既定）: (σb + σf)/2 を噛み込み弧全体の変形抵抗 k̄f から引く。前後を分ける: 前方張力は出口から中立点まで、後方張力は中立点から入口までにだけ効き、それぞれ摩擦の丘 e^{2μ√(R′/h₁)·θ} で増幅される（降伏応力一定の Kármán 方程式の Nádai の解の張力項。中立点は Bland & Ford の圧力の形で決める）。4Hi 既定のパス（R′ 250 mm 固定）で荷重の張力感度 −∂q/∂σf・−∂q/∂σb は、平均 0.56 L・0.56 L、前後を分ける 0.36 L・0.90 L（L は接触弧長。2D タブのスラブ法 Orowan 0.34 L・0.91 L、2D FEM 0.27 L・0.92 L）。前方張力の幅方向の分布が荷重に返る強さ（張力帰還）が弱くなる。材料 FEM のときは荷重そのものは FEM が決め、この式は補正の基準と接線に効く。張力フィードバック OFF では効かない。docs/validation.md「スラブ法の張力 — 平均と前後別」。');
     slabTensionSel.root.dataset.key = 'slabTension';
     stripSec.body.append(slabTensionSel.root);
-    stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。'));
+    stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。座屈した後もいくらか圧縮を持たせるには下の「座屈後の剛性」。'));
+    const postBucklingSel = select<'linear' | 'effectiveWidth'>('座屈後の構成則', [
+      { value: 'linear', text: '一定の剛性比 β' },
+      { value: 'effectiveWidth', text: '有効幅（von Kármán）' },
+    ], params.postBucklingModel, (v) => {
+      // keep the stiffness right after buckling: β = k/2
+      const s = params.postBucklingStiffness;
+      params.postBucklingStiffness = v === params.postBucklingModel ? s : v === 'effectiveWidth' ? Math.min(2, 2 * s) : s / 2;
+      params.postBucklingModel = v; apply(); buildLeft();
+    },
+    '座屈限界に達したスライス（波の出る部分）が、その先の伸び差 ΔD をどれだけ圧縮応力として持つか。一定の剛性比: σ = −σcr − β·E′·ΔD。有効幅: |σ| = √(σcr² + k·σcr·E′·ΔD)（両縁を支えた板の von Kármán の有効幅から。座屈直後の傾きは E′ の k/2 で、波が深いほど寝る。片側が自由縁の板端の帯には余力を多めに見ている可能性がある）。持てなかった分が波（顕在形状）。切り替えると座屈直後の傾きが同じになるよう β = k/2 で換算する。');
+    postBucklingSel.root.dataset.key = 'postBucklingModel';
+    stripSec.body.append(postBucklingSel.root);
+    if (params.postBucklingModel === 'effectiveWidth') {
+      stripSec.body.append(num('postBucklingStiffness', '座屈後の剛性 有効幅の係数 k', '', 0, 2, 0.05, 1, '0 で座屈限界の頭打ち（従来どおり、超過した伸びは全部波）。1 で両縁を支えた板の有効幅（座屈直後の傾きが E′ の 1/2）。両縁支持の値なので、片側が自由縁の板端の帯では余力を多めに見ている可能性がある（1 より小さいはずだが、どこまでかは未確認）。4Hi 既定（301 点）で潜在形状 1481 → k 0.5: 918、1: 774 I-unit。'));
+    } else {
+      stripSec.body.append(num('postBucklingStiffness', '座屈後の剛性比 β', '', 0, 1, 0.01, 1, '0 で座屈限界の頭打ち（従来どおり、超過した伸びは全部波）。1 で座屈しない板と同じ。目安 0.01〜0.1（有効幅の式 ½√(σcr/σ) からの概算。片側が自由縁の板端ではさらに小さいはずで、実測との照合はしていない）。4Hi 既定（301 点）で潜在形状 1481 → β 0.02: 972、0.05: 681、0.1: 478 I-unit、壁（座屈域の立ち上がり）1375 → 883 / 590 / 383。'));
+    }
     left.append(stripSec.root);
 
     // roll geometry
@@ -582,6 +599,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     on('irSeatK', params.housingMode && params.irSeat);
     // the load formula's tension only acts with the tension feedback on
     on('slabTension', params.tensionFeedback);
+    // without the feedback no slice buckles (the tension is the set one everywhere)
+    on('postBucklingModel', params.tensionFeedback);
+    on('postBucklingStiffness', params.tensionFeedback);
     on('housingK', !housingOn);
   };
 

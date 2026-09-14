@@ -124,6 +124,17 @@ export interface Params3D {
   /** buckling stress the strip can carry in compression before it waves [Pa] */
   sigmaCr: number;
   /**
+   * Post-buckling stiffness: how much more compression a slice carries once
+   * it has buckled (see `stripSolve`). 0 holds it at −sigmaCr and the waves
+   * take all of its excess length. With `postBucklingModel` 'linear' it is
+   * the ratio β of the elastic stiffness E′ the buckled slice keeps
+   * (0 ≤ β ≤ 1); with 'effectiveWidth' it is the k of von Kármán's effective
+   * width, |σ| = √(σcr² + k·σcr·E′·ΔD), whose initial slope is k/2 and which
+   * softens as the wave deepens (0 ≤ k ≤ 2).
+   */
+  postBucklingStiffness: number;
+  postBucklingModel: 'linear' | 'effectiveWidth';
+  /**
    * Tension feedback: the longitudinal tension in the strip lowers the roll
    * pressure at which it yields (p = kf − σt), brings the onset of plastic
    * deformation forward, and is itself redistributed by the elongation
@@ -246,7 +257,7 @@ export function defaultParams(mill: MillType): Params3D {
     backTension: 50e6, frontTension: 80e6,
     lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, entryStrain: 0,
     mu: 0.06, Estrip: 206e9, nuStrip: 0.3,
-    lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true, slabTension: 'mean',
+    lateralLen: 0.02, sigmaCr: 2e6, postBucklingStiffness: 0, postBucklingModel: 'linear', tensionFeedback: true, slabTension: 'mean',
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
     // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long

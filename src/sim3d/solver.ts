@@ -156,6 +156,18 @@ const TENSION_COUPLING = 'full' as 'none' | 'diag' | 'full';
 const Y_REUSE = 3;
 const USE_WOODBURY = TENSION_COUPLING === 'full';
 
+/**
+ * The stress of a buckled strip slice at a free stress f below the buckling limit −σcr (see
+ * `stripSolve`), and the law's slope: −σcr + k(f + σcr) on the linear law, −√(σcr² + k·σcr·(−σcr − f))
+ * on the effective width's, never below −hi. k = 0 is the clamp at −σcr.
+ */
+function postBuckled(f: number, sigmaCr: number, hi: number, k: number, effectiveWidth: boolean): { stress: number; slope: number } {
+  const lo = -sigmaCr;
+  const v = effectiveWidth ? -Math.sqrt(lo * lo + k * sigmaCr * Math.max(0, lo - f)) : lo + k * (f - lo);
+  if (v <= -hi) return { stress: -hi, slope: 0 };
+  return { stress: v, slope: effectiveWidth ? (v < 0 ? (k * sigmaCr) / (2 * -v) : 0) : k };
+}
+
 export interface RollState {
   def: RollDef;
   /** first and last station the roll spans */
@@ -1253,9 +1265,9 @@ export class StackSolver {
   /**
    * What the shown elongation profile is evaluated from, as the last strip solve left it: each
    * slice's elongation less the weighted mean, the smoothing length, and the free stress's
-   * offset λ, E′ and the buckling limit, which place the wave (see `collect`)
+   * offset λ, E′, the buckling limit and the post-buckling law, which place the wave (see `collect`)
    */
-  private shown = { e: new Float64Array(0), sig: 0, lambda: 0, Eeff: 0, lo: 0 };
+  private shown = { e: new Float64Array(0), sig: 0, lambda: 0, Eeff: 0, lo: 0, hi: Infinity, kPost: 0, effectiveWidth: false };
   private femEps: Float64Array | null = null;
 
   /**
@@ -1488,6 +1500,18 @@ export class StackSolver {
    * free stress has come back inside the band is released. A handful of
    * rounds settles it.
    *
+   * A slice held at the buckling limit may keep a post-buckling stiffness
+   * (`postBucklingStiffness`, 0 by default). It is then not pinned at −σcr:
+   * its stress follows σ = b(free) below the limit, with b(lo) = lo and a
+   * slope b′ of β on the linear law, σ = lo + β(free − lo) = −σcr − βE′(D − D_cr),
+   * or k·σcr/(2|σ|) on the effective width's |σ| = √(σcr² + k·σcr·(lo − free)),
+   * D_cr being the D at which the free stress reaches the limit. It stays in
+   * the held set - the revision above is unchanged - but moves with the
+   * Newton: its row is σ − b(free), and its stress, no longer a constant,
+   * enters λ through the mean. What it cannot carry is the wave: the
+   * manifest elongation (σ − free)/E′, which on the linear law is
+   * (1 − β)(D − D_cr).
+   *
    * The outer Newton then takes dσ/dv = J⁻¹ F_h h_v on the settled set.
    */
   private stripSolve(withJacobian: boolean): void {
@@ -1524,12 +1548,24 @@ export class StackSolver {
     const hi = TENSION_CAP * kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - p.reduction)));
     const lo = -p.sigmaCr;
     const dDde = (i: number, j: number) => S[i * n + j] - w[j] / ws;
+    // the post-buckling law b(free) of a held-slack slice and its slope (see above);
+    // with no stiffness every path below is the clamp's, bit for bit. Nor does a
+    // buckled slice carry more compression than the tension it may carry (−hi):
+    // on a 2Hi's 15 000 I-unit edge wave β = 0.05 asked for −504 MPa against a cap of 518
+    const effectiveWidth = p.postBucklingModel === 'effectiveWidth';
+    const kPost = p.postBucklingStiffness > 0 ? Math.min(p.postBucklingStiffness, effectiveWidth ? 2 : 1) : 0;
+    const soft = kPost > 0;
+    const buckled = (f: number) => postBuckled(f, p.sigmaCr, hi, kPost, effectiveWidth).stress;
+    const buckledSlope = (f: number) => postBuckled(f, p.sigmaCr, hi, kPost, effectiveWidth).slope;
 
     const sigma = new Float64Array(n);
     /** 0 = live, -1 = held at lo, +1 = held at hi */
     const held = new Int8Array(n);
+    /** whether a slice's tension is an unknown of the Newton: a live one, or a held-slack one with a post-buckling stiffness */
+    const moves = (i: number) => held[i] === 0 || (soft && held[i] < 0);
     this.slices.forEach((sl, i) => {
-      sigma[i] = Math.max(lo, Math.min(hi, this.sigmaF[sl.s]));
+      // a buckled slice may sit below the limit from the last solve
+      sigma[i] = soft ? Math.min(hi, this.sigmaF[sl.s]) : Math.max(lo, Math.min(hi, this.sigmaF[sl.s]));
       held[i] = sigma[i] <= lo ? -1 : sigma[i] >= hi ? 1 : 0;
     });
     const eps = new Float64Array(n), D = new Float64Array(n), free = new Float64Array(n);
@@ -1550,7 +1586,7 @@ export class StackSolver {
     const evalSlices = (onlyLive: boolean) => {
       const ratio = this.femRatio, off = this.femEps;
       this.slices.forEach((sl, i) => {
-        if (onlyLive && held[i] !== 0) return;
+        if (onlyLive && !moves(i)) return;
         const g = this.gapAt(sl.s);
         const out = this.solveSlice(sl, g, sigma[i], ratio ? ratio[i] : 1);
         sl.g = g; sl.q = out.q; sl.h1 = out.h1; sl.flat = out.flat; sl.arc = out.arc; sl.runaway = out.runaway;
@@ -1592,7 +1628,10 @@ export class StackSolver {
         for (let k = 0; k < 80 && a1 - a0 > 1e-6 * Math.max(1, Math.abs(a0), Math.abs(a1)); k++) {
           const mid = 0.5 * (a0 + a1);
           let acc = 0;
-          for (let i = 0; i < n; i++) acc += w[i] * Math.max(lo, Math.min(hi, p.frontTension - Eeff * D[i] + mid));
+          for (let i = 0; i < n; i++) {
+            const f = p.frontTension - Eeff * D[i] + mid;
+            acc += w[i] * (soft && f < lo ? buckled(f) : Math.max(lo, Math.min(hi, f)));
+          }
           if (acc < ws * p.frontTension) a0 = mid; else a1 = mid;
         }
         lambda = 0.5 * (a0 + a1);
@@ -1612,17 +1651,28 @@ export class StackSolver {
         for (let j = 0; j < n; j++) {
           const sl = this.slices[j];
           const dedh = sl.q > 0 ? -1 / sl.h1 : 0;
-          Fh[i * n + j] = held[i] === 0 ? Eeff * (colTerm[j] - dDde(i, j)) * dedh : 0;
+          Fh[i * n + j] = held[i] === 0 ? Eeff * (colTerm[j] - dDde(i, j)) * dedh
+            : soft && held[i] < 0 ? buckledSlope(free[i]) * (Eeff * (colTerm[j] - dDde(i, j)) * dedh) : 0;
         }
       }
       return wL;
     };
     const buildJ = () => {
+      // a buckled slice that moves puts its stress into λ through the mean:
+      // ∂λ/∂σ_j = −w_j / w_L, carried into every row by that row's slope (1 live, b′ buckled)
+      let wL = 0;
+      const rowSlope = soft ? new Float64Array(n) : null;
+      if (rowSlope) {
+        for (let k = 0; k < n; k++) if (held[k] === 0) wL += w[k];
+        for (let i = 0; i < n; i++) rowSlope[i] = held[i] === 0 ? 1 : held[i] < 0 ? buckledSlope(free[i]) : 0;
+      }
       for (let i = 0; i < n; i++) {
         for (let j = 0; j < n; j++) {
           // a held slice does not move: identity row and no column influence
-          const jj = held[j] === 0 ? this.slices[j].dh1ds : 0;
-          J[i * n + j] = (i === j ? 1 : 0) - Fh[i * n + j] * jj;
+          const jj = moves(j) ? this.slices[j].dh1ds : 0;
+          let v = (i === j ? 1 : 0) - Fh[i * n + j] * jj;
+          if (rowSlope && held[j] < 0 && wL > 0) v += rowSlope[i] * (w[j] / wL);
+          J[i * n + j] = v;
         }
       }
     };
@@ -1637,14 +1687,17 @@ export class StackSolver {
         if (this.counters) this.counters.inner++;
         evalFree();
         let rn = 0;
-        for (let i = 0; i < n; i++) { r[i] = held[i] === 0 ? sigma[i] - free[i] : 0; rn = Math.max(rn, Math.abs(r[i])); }
+        for (let i = 0; i < n; i++) {
+          r[i] = held[i] === 0 ? sigma[i] - free[i] : soft && held[i] < 0 ? sigma[i] - buckled(free[i]) : 0;
+          rn = Math.max(rn, Math.abs(r[i]));
+        }
         if (rn < 5e4) break;
         buildFh();
         buildJ();
         const step = new Float64Array(n);
         for (let i = 0; i < n; i++) step[i] = -r[i];
         if (!denseSolve(J, n, step)) break;
-        for (let i = 0; i < n; i++) if (held[i] === 0) sigma[i] += Math.max(-4e8, Math.min(4e8, step[i]));
+        for (let i = 0; i < n; i++) if (moves(i)) sigma[i] += Math.max(-4e8, Math.min(4e8, step[i]));
         evalSlices(true);
       }
       evalFree();
@@ -1676,13 +1729,14 @@ export class StackSolver {
       const mean = ws > 0 ? es / ws : 0;
       const e = this.shown.e.length === n ? this.shown.e : new Float64Array(n);
       for (let i = 0; i < n; i++) e[i] = eps[i] - mean;
-      this.shown = { e, sig, lambda, Eeff, lo };
+      this.shown = { e, sig, lambda, Eeff, lo, hi, kPost, effectiveWidth };
     }
     this.slices.forEach((sl, i) => {
       this.sigmaF[sl.s] = sigma[i];
       sl.clipped = held[i] !== 0;
       this.dEps[sl.s] = D[i];
-      // a held-slack slice's excess elongation is a wave; past the yield cap it is stretch, not a wave
+      // a held-slack slice's excess elongation is a wave - less what a post-buckling
+      // stiffness carries as compression; past the yield cap it is stretch, not a wave
       this.manifest[sl.s] = held[i] < 0 ? Math.max(0, (sigma[i] - free[i]) / Eeff) : 0;
     });
     if (!withJacobian) return;
@@ -1956,11 +2010,13 @@ export class StackSolver {
    * (e^-32), so no slice enters it with a step either. The wave is the part of that elongation
    * past the one at which the free stress reaches the buckling limit, D_cr = (σ̄ + λ − lo)/E′ -
    * which at every slice is the solver's own `manifest` (held slack: D − D_cr; live and held
-   * taut: below D_cr).
+   * taut: below D_cr). With a post-buckling stiffness the buckled strip carries part of that as
+   * compression, and the wave is what is left, (b(free) − free)/E′ as in `stripSolve`:
+   * (1 − β)(D − D_cr) on the linear law.
    */
   private elongationProfile(): Result3D['profile'] {
     const sl = this.slices, n = sl.length;
-    const { e, sig, lambda, Eeff, lo } = this.shown;
+    const { e, sig, lambda, Eeff, lo, hi, kPost, effectiveWidth } = this.shown;
     if (n === 0 || e.length !== n || !(sig > 0)) return { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) };
     const { cellL, cellR } = this.grid;
     const half = this.p.width / 2;
@@ -1982,7 +2038,10 @@ export class StackSolver {
         a += g * e[j]; b += g;
       }
       latent[k] = b > 0 ? a / b : 0;
-      wave[k] = Math.max(0, latent[k] - Dcr);
+      if (kPost > 0 && latent[k] > Dcr) {
+        const free = this.p.frontTension + lambda - Eeff * latent[k];
+        wave[k] = Math.max(0, (postBuckled(free, -lo, hi, kPost, effectiveWidth).stress - free) / Eeff);
+      } else wave[k] = Math.max(0, latent[k] - Dcr);
     }
     return { x, latent, wave };
   }

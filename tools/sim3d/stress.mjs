@@ -1,5 +1,6 @@
 // 202 cases pushed to the edges of every parameter, each solved to a frame cap.
 //   node tools/sim3d/stress.mjs [filter] ['mill tag;mill tag…']     FRAMES=<n> to change the cap (6 iterations a frame)
+//   PATCH='{"postBucklingStiffness":0.05}' lays the same parameters over every case (the case's own patch last)
 // Each case prints ok or FAIL with what went wrong. Exit 1 when any case throws, produces a NaN or a
 // negative load, misses its gauge target while claiming convergence, or stops unconverged *without a
 // warning*: an unconverged case that says why (stone, stuck, target, …) is an expected outcome
@@ -83,7 +84,7 @@ const hasNaN = (a) => { for (let i = 0; i < a.length; i++) if (Number.isNaN(a[i]
 for (const c of cases) {
   if (only && !(c.mill + ' ' + c.tag).includes(only)) continue;
   if (onlyList && !onlyList.includes(c.mill + ' ' + c.tag)) continue;
-  const p = defaultParams(c.mill); Object.assign(p, c.patch);
+  const p = defaultParams(c.mill); Object.assign(p, JSON.parse(process.env.PATCH || '{}'), c.patch);
   let sv, err = null, it = 0, t0 = performance.now();
   try {
     sv = new StackSolver(p);
