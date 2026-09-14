@@ -134,9 +134,11 @@ gh pr create --fill                # main へのマージは PR 経由
 ```bash
 npx tsc --noEmit     # 型だけ
 npm run build        # tsc + vite
-npm run check        # tsc → 2D を node 用にビルド → 2D の回帰チェック一式（直列、約 1 分。どれか FAIL で非 0）
+npm run check        # tsc → 2D を node 用にビルド → 2D の回帰チェック一式（直列、約 2〜5 分。どれか FAIL で非 0）
 ```
 
+所要時間は負荷しだい（2026-09-14、Apple M2・8 GB・Node 24）: 手元で 130 s（負荷平均 8→4）〜284 s（ほかの計算と重なる中）、CI（ubuntu-latest）の
+`npm run check` ステップで 140〜174 s（ジョブ全体 2 分 18 秒〜3 分 35 秒）。チェックごとの秒数は終わりに出る表を見る。
 `check` は `tools/check.mjs` が `tools/` 以下の `.mjs` から印の付いたものを集めて回す。チェックを足すときは
 そのスクリプトの import の上に `// @check` と、要るビルドごとに `// @check-build sim2d`（`build-esm.mjs` の引数）を書くだけ
 （`package.json` や一覧は触らない）。ビルドは `tools/build-esm.mjs`（node だけで動くので Linux でも同じ）。
