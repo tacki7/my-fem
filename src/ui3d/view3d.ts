@@ -543,6 +543,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       { value: 'ring', text: '断面 FEM（リングメッシュ nt × nr）' },
     ], params.flatModel, (v) => { params.flatModel = v; apply(); buildLeft(); },
     'ロールが接触で扁平する量の求め方。Hertz 式は半無限体の閉形式、断面 FEM は剛体ハブと胴の間の平面ひずみリングを Q4 要素で解いた影響関数（2D タブと同じ要素）。').root);
+    numSec.body.append(toggle('扁平の幅方向の広がり（非局所）', params.flatNonlocal, (v) => { params.flatNonlocal = v; apply(); },
+      'ON: WR と板の扁平を、そのスライスの荷重だけでなく隣のスライスの荷重によるへこみも足して求める。半無限体の表面変位（Boussinesq、Johnson "Contact Mechanics" §3.2。板プロフィルの理論の戸澤・上田 1970 と同じ積分）をロール軸方向に重ね、一様な荷重では上の扁平モデルの値に戻るように |s| = 0.446 R で打ち切る。'
+      + '板の外の胴は荷重を受けないので、板端から約 0.45 R の範囲で扁平が小さくなり、エッジドロップと板端の伸びが増える（4Hi 既定・301 点でエッジドロップ 40 → 94 µm、C25 54 → 86 µm、潜在形状 1481 → 2847 I-unit。板の中央部は変わらない）。'
+      + 'OFF（既定）: 各スライスが自分の荷重だけで扁平する。ON では外側の反復が 3〜5 割増える。ロール間の接触（WR–BUR など）の扁平はどちらでもスライスごと。').root);
     if (params.flatModel === 'ring') {
       numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。接触半幅（数 mm）を数節点で解像するには 400 以上。'));
       numSec.body.append(num('ringNr', 'ロール 半径方向 分割 nr', '', 2, 24, 1, 1));

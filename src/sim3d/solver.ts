@@ -34,6 +34,7 @@
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
 import { stationGrid, nearestStation, type StationGrid } from './grid';
 import { housingCompliance, halfStiffness, sideStiffness, housingPlan } from './housing';
+import { nonlocalOffsets } from './flatnl';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, atNodes, type StripFemResult } from './stripfem';
@@ -333,6 +334,8 @@ interface Slice {
   g: number;
   /** the pass at this slice has no steady solution (Stone's limit) */
   runaway: boolean;
+  /** the non-local flattening mode's offset on this slice's own flattening [m], refreshed once per outer iteration */
+  nlOff?: number;
 }
 
 export class StackSolver {
@@ -384,6 +387,9 @@ export class StackSolver {
   private T!: Float64Array;
   /** any slice carrying tension feedback at all */
   private tensionLive = false;
+  /** the non-local flattening offsets are on the slices, and how far they moved at the last refresh [m] */
+  private nlLive = false;
+  private nlChange = 0;
   /** the stack's response to a unit screw move, −∂(residual)/∂S, built with the tangent */
   private bScrew!: Float64Array;
   private x2!: Float64Array;
@@ -901,6 +907,7 @@ export class StackSolver {
     const bordered = p.mode !== 'screw';
     // the screw dial takes effect at once in screw mode (it used to wait for a rebuild)
     if (!bordered) this.screw = p.screw;
+    this.updateNonlocalFlattening();
     this.stripSolve(TENSION_COUPLING !== 'none');
     const res0 = this.assemble(true);
     const c0 = this.targetValue();
@@ -1091,6 +1098,45 @@ export class StackSolver {
   }
 
   /**
+   * The non-local flattening mode (`flatNonlocal`, see `flatnl.ts`): each
+   * slice's flattening offset from the loads the slices carry now, refreshed
+   * once per outer iteration and held through it, as the arc is. The slice's
+   * own fixed point and tangents keep its local law; the neighbours' share
+   * follows one iteration late, and `advance` does not call the solve settled
+   * until the offsets have stopped moving. Off, nothing on the slices changes.
+   */
+  private updateNonlocalFlattening(): void {
+    const sl = this.slices, n = sl.length;
+    if (!this.p.flatNonlocal) {
+      if (this.nlLive) { for (const s of sl) s.nlOff = 0; this.nlLive = false; this.nlChange = 0; }
+      return;
+    }
+    if (n === 0) return;
+    const ws = this.wsLaw;
+    const half = this.p.width / 2;
+    const { cellL, cellR } = this.grid;
+    const x = new Float64Array(n), c0 = new Float64Array(n), c1 = new Float64Array(n);
+    const q = new Float64Array(n), b = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const s = sl[i];
+      x[i] = s.x;
+      c0[i] = Math.max(cellL[s.s], -half);
+      c1[i] = Math.min(cellR[s.s], half);
+      q[i] = s.q;
+      // the half-width the contact law takes for this load (see `approach`)
+      b[i] = Math.max(Math.sqrt(ws.bCoef * Math.max(s.q, 0)), s.arc / 2, 1e-9);
+    }
+    const off = nonlocalOffsets(x, c0, c1, q, b, ws.A1, this.stack.rolls[this.stack.wr].D / 2);
+    let change = this.nlLive ? 0 : Infinity;
+    for (let i = 0; i < n; i++) {
+      change = Math.max(change, Math.abs(off[i] - (sl[i].nlOff ?? 0)));
+      sl[i].nlOff = off[i];
+    }
+    this.nlChange = change;
+    this.nlLive = true;
+  }
+
+  /**
    * The slice's load at a rigid gap g: q = k P(h1), h1 = g + 2 δ_ws(q) + springback.
    *
    * k is the strip FEM's load correction for this slice (1 with the slab
@@ -1127,6 +1173,8 @@ export class StackSolver {
     // near the root; doubling up from nothing took a dozen rounds
     if (q <= 0 && g < sl.h0) q = P(g, 0).q;
     let h1 = sl.h0, flat = 0, arc = sl.arc, runaway = false;
+    // the non-local mode's offset, held for this call like the arc (see `updateNonlocalFlattening`)
+    const off = sl.nlOff ?? 0;
     const hMin = H_MIN_FRAC * sl.h0;
     const dh = 1e-3 * sl.h0;
     let lo = 0, hi = Infinity;
@@ -1134,8 +1182,8 @@ export class StackSolver {
     for (let it = 0; it < 25; it++) {
       itDone = it + 1;
       const [d, dd] = approach(ws, q);
-      flat = d;
-      const hRigid = Math.max(g + 2 * d, hMin);
+      flat = off === 0 ? d : d + off;
+      const hRigid = Math.max(g + 2 * flat, hMin);
       h1 = hRigid + springback(law, Math.min(hRigid, sl.h0), kfExitOf(law, sl.h0, hRigid), sigmaF);
       const open = h1 >= sl.h0;
       const r = open ? NO_LOAD : P(h1, q);
@@ -1704,7 +1752,9 @@ export class StackSolver {
           femSettled = change <= FEM_FIXED_TOL || this.femLooseRuns >= FEM_LOOSE_RUNS;
         }
         const onTarget = this.screwSettled();
-        if (settled && onTarget && femSettled) { this.converged = true; break; }
+        // the non-local flattening follows the loads one iteration late: settled once it has stopped moving
+        const nlSettled = !this.nlLive || this.nlChange <= SETTLED_STEP;
+        if (settled && onTarget && femSettled && nlSettled) { this.converged = true; break; }
         // off target with the Newton settled: the screw at a limit, or no
         // contact yet - the secant step as a fallback
         if (settled && !onTarget && this.p.mode !== 'screw') {
