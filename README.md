@@ -1558,6 +1558,15 @@ WebGL の描画も止まるので、フレームが軽くなる（3 スタンド
 
 ## 計測用クエリパラメータ
 
+起動時の条件を URL で作る。UI を操作して状態を作るより再現性が高い。読み取りは `src/app/query.ts`
+（DOM に触らない純関数、`node tools/app/query.mjs` が表駆動で検査）。
+
+- 一覧に無い値・範囲外の数値は**黙って無視**して既定のまま起動する（`?mesh=constructor` のような
+  プロトタイプのキー名も含む。以前はこれがプリセットとして通り、起動時に落ちていた）
+- 設定ファイルの「↑ 読込」（ページを読み直して復元する）と同時に効いている場合は、**URL に書いた
+  パラメータだけ URL が勝ち**、書いていない項目はファイルの値になる。ファイルに入っている選択中の
+  スタンドも復元される（`?stands=` がそれより少なければ最後のスタンド）
+
 `mesh=fast|balanced|fine|ultra|extreme|insane` はメッシュ品質プリセット。
 長らくドキュメントにだけあって読まれていなかった（`?mesh=` を変えても 100×8 のまま）。
 
@@ -1571,11 +1580,22 @@ WebGL の描画も止まるので、フレームが軽くなる（3 スタンド
 `?agc=gauge`（板厚一定）/ `?agc=force&load=800`（荷重一定、総荷重 tonf）で、ループを閉じた状態から
 起動できる。開ループとの比較を撮るときに使う。
 
-`?agc=ratio|gauge|force` で制御モード、`?h1=1.2` で出側板厚一定の目標 [mm]、
-`?stands=5`（1〜8）で段数、`?mode=reverse`（既定 `tandem`）でライン形式を指定して起動できる。
+`?agc=off|ratio|gauge|force` で全スタンドの制御モード、`?stands=5`（1〜8、小数は四捨五入）で段数、
+`?mode=reverse`（既定 `tandem`）でライン形式を指定して起動できる。
 形式は組み立て前に読むので、最初のフレームから正しい結合で回る。
 
-`?tension=rigid|simple|dist` でスタンド間張力モデル、`&tctl=1` で張力制御 ON、`&tscale=0.05` で
+`?h1=1.2` は **#1 の出側板厚の目標** [mm]（スタンド表「出側板厚 目標」の #1）。#2 以降の目標は、既定の
+スケジュールと同じく各スタンドの圧下率ずつ下る: `?stands=3&h1=1.2`（圧下率 25%）で 1.2 / 0.9 / 0.675 mm。
+既定の目標 h₀(1−r)^(k+1) は h1 = h₀(1−r) としたときのこれと同じなので、下流の目標が入側より厚くなる
+ことはない。目標は制御モードが「出側板厚一定」のときに使われる（`?agc=gauge&h1=1.2`）。
+
+`?field=` で表示する場（`strain` `strainRate` `flowStress` `temperature` `pressure` `vonMises` `shear`
+`speed` `rollDisp` `rollRadial`。`temperature` と `rollRadial` はカラーマップも `coolwarm` になる）、
+`?cmap=turbo|viridis|inferno|magma|plasma|coolwarm|ember|steel` でカラーマップ（`field` より後に効く）。
+`?loadmodel=fem|slab` で荷重の出どころ（上部の FEM ／スラブ法）、`?slab=karman|blandford|orowan` で
+スラブ法の式、`?flat=hitchcock|roberts` でロール扁平の式。
+
+`?tension=off|rigid|simple|dist` でスタンド間張力モデル、`&tctl=1` で張力制御 ON、`&tscale=0.05` で
 時間倍率（§12）。`?debug` の `__lab.tension()` がスタンド間ごとの 目標／実績／反力／トリム／τ を返す。
 
 `?tab=3d&mill=2hi|4hi|6hi|12hi|20hi` で 3D 解析タブをその形式で開く。`window.__v3` に

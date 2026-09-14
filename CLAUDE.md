@@ -98,7 +98,10 @@ npm run dev -- --port 5177 --strictPort &
 ## クエリパラメータ（測定用）
 
 `?stands=3&agc=ratio|gauge|force&load=700&h1=1.2&field=temperature&mesh=insane&tension=rigid|simple|dist&tctl=1&tscale=0.05`
-— 起動時点で条件を作れるので、UI を操作して状態を作るより再現性が高い。
+`&mode=reverse&loadmodel=slab&slab=orowan&flat=roberts&cmap=turbo`
+— 起動時点で条件を作れるので、UI を操作して状態を作るより再現性が高い。`h1` は #1 の出側板厚目標 [mm]
+（#2 以降は各段の圧下率で下る）。不正な値は黙って無視される — 効いたかは `__lab.stands()` で確かめる。
+一覧と意味は README「計測用クエリパラメータ」。
 
 ## Git 運用
 
@@ -132,7 +135,7 @@ gh pr create --fill                # main へのマージは PR 経由
 ```bash
 npx tsc --noEmit     # 型だけ
 npm run build        # tsc + vite
-npm run check        # tsc → 2D を node 用にビルド → 回帰チェック 8 本（直列、約 1 分。どれか FAIL で非 0）
+npm run check        # tsc → 2D を node 用にビルド → 回帰チェック 9 本（直列、約 1 分。どれか FAIL で非 0）
 ```
 
 `check` の中身は `package.json` の 1 行。ビルドは `tools/build-esm.mjs`（node だけで動くので Linux でも同じ）。
