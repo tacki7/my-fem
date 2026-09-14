@@ -40,7 +40,7 @@ import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, atNodes, type StripFemResult } from './stripfem';
 import { StripFem3D } from './stripfem3d';
 import {
-  sliceLoad, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
+  sliceLoad, sliceTension, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
   buildStack, solvedRolls, radiusProfile, onBarrel, saddleXs, type Params3D, type Stack, type RollDef,
@@ -253,7 +253,7 @@ export interface Result3D {
   wedge: number;
   edgeDropL: number;
   edgeDropR: number;
-  /** how much the tension lowers the yield pressure: σ̄t / k̄f over the loaded slices (0 with the feedback off) */
+  /** how much the tension lowers the yield pressure: σ̄t / k̄f over the loaded slices (0 with the feedback off; the equivalent tension with the tensions split) */
   yieldRelief: number;
   /**
    * The elongation profile as shown and summarised: at the stations on the strip and at the
@@ -606,6 +606,7 @@ export class StackSolver {
     this.law = {
       lmnL: p.lmnL, lmnM: p.lmnM, lmnN: p.lmnN, E: p.Estrip, nu: p.nuStrip,
       entryStrain: p.entryStrain, mu: p.mu, tensionFeedback: p.tensionFeedback, R: wr.D / 2, Eroll: wr.E, nuRoll: wr.nu,
+      slabTension: p.slabTension,
     };
     this.wsLaw = makeContactLaw(wr.E, wr.nu, wr.D / 2, p.Estrip, p.nuStrip, Infinity, { ring1: this.ringFor(wr) });
     // strip slices: stations whose cell overlaps the strip
@@ -2096,7 +2097,10 @@ export class StackSolver {
         for (const sl of this.slices) {
           if (sl.q <= 0) continue;
           const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(sl.h0 / Math.max(sl.h1, 1e-9)));
-          rel += Math.min(0.5 * (p_.backTension + this.sigmaF[sl.s]), TENSION_CAP * kf) / kf; n++;
+          rel += (p_.slabTension === 'split'
+            ? sliceTension(this.law, sl.h0, sl.h1, p_.backTension, this.sigmaF[sl.s], sl.arc)
+            : Math.min(0.5 * (p_.backTension + this.sigmaF[sl.s]), TENSION_CAP * kf)) / kf;
+          n++;
         }
       }
       R.yieldRelief = n ? rel / n : 0;

@@ -496,8 +496,15 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stripSec.body.append(num('lmnN', 'N', '', 0, 0.6, 0.005, 1));
     stripSec.body.append(num('entryStrain', '入側予ひずみ', '', 0, 2, 0.05, 1));
     stripSec.body.append(num('lateralLen', '横流れ 平滑長', 'mm', 0, 100, 1, 1e-3, '幅方向の伸び差を均す距離（板厚の数倍）。下限は板上の節点間隔（それより短いと隣接スライスが結合されず、市松状の数値モードが出る）。'));
-    stripSec.body.append(toggle('張力フィードバック', params.tensionFeedback, (v) => { params.tensionFeedback = v; apply(); },
+    stripSec.body.append(toggle('張力フィードバック', params.tensionFeedback, (v) => { params.tensionFeedback = v; apply(); syncModeDials(); },
       'ON: 板の長手張力が降伏条件（p = kf − σt）と塑性変形の開始点（弾性圧下量）を下げ、幅方向の伸び差で張力が再配分され、材料 FEM の入出側トラクションにも入る。これが荷重を通じて WR の撓み・扁平に返る。OFF: 張力なしで圧延したときの挙動（比較用）。').root);
+    const slabTensionSel = select<'mean' | 'split'>('荷重式の張力', [
+      { value: 'mean', text: '前後の平均（Kármán・Siebel 型）' },
+      { value: 'split', text: '前後を分ける（Nádai の解）' },
+    ], params.slabTension, (v) => { params.slabTension = v; apply(); },
+    'スライスの荷重式で後方張力 σb と前方張力 σf をどう効かせるか。前後の平均（既定）: (σb + σf)/2 を噛み込み弧全体の変形抵抗 k̄f から引く。前後を分ける: 前方張力は出口から中立点まで、後方張力は中立点から入口までにだけ効き、それぞれ摩擦の丘 e^{2μ√(R′/h₁)·θ} で増幅される（降伏応力一定の Kármán 方程式の Nádai の解の張力項。中立点は Bland & Ford の圧力の形で決める）。4Hi 既定のパス（R′ 250 mm 固定）で荷重の張力感度 −∂q/∂σf・−∂q/∂σb は、平均 0.56 L・0.56 L、前後を分ける 0.36 L・0.90 L（L は接触弧長。2D タブのスラブ法 Orowan 0.34 L・0.91 L、2D FEM 0.27 L・0.92 L）。前方張力の幅方向の分布が荷重に返る強さ（張力帰還）が弱くなる。材料 FEM のときは荷重そのものは FEM が決め、この式は補正の基準と接線に効く。張力フィードバック OFF では効かない。docs/validation.md「スラブ法の張力 — 平均と前後別」。');
+    slabTensionSel.root.dataset.key = 'slabTension';
+    stripSec.body.append(slabTensionSel.root);
     stripSec.body.append(num('sigmaCr', '座屈限界（圧縮）', 'MPa', 0, 20, 0.5, 1e6, 'これ以上の圧縮を板は張力として支えられず、波（顕在形状）になる。'));
     left.append(stripSec.root);
 
@@ -573,6 +580,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const housingOn = params.housingMode && (params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi');
     for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingPostWidth', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
     on('irSeatK', params.housingMode && params.irSeat);
+    // the load formula's tension only acts with the tension feedback on
+    on('slabTension', params.tensionFeedback);
     on('housingK', !housingOn);
   };
 
@@ -809,7 +818,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   let eta: Eta = { kind: 'estimating' };
   let etaClock = 0;
   let lastSolveEnd = 0;
-  const etaKey = () => `${params.stripModel}|${params.stripNz}|${params.stripNy}|${solver.result.dof}|${solver.slices.length}`;
+  const etaKey = () => `${params.stripModel}|${params.stripNz}|${params.stripNy}|${params.slabTension}|${solver.result.dof}|${solver.slices.length}`;
   const tick = () => {
     raf = 0;
     if (!active) return;

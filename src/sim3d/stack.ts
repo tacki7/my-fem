@@ -131,6 +131,16 @@ export interface Params3D {
    * roll and so its deflection. Off, the strip is rolled as if untensioned.
    */
   tensionFeedback: boolean;
+  /**
+   * How the back and front tension enter the slab load (with the feedback
+   * on): 'mean' takes their mean off the resistance over the whole arc
+   * (Kármán, Siebel); 'split' lets the front tension act from the exit to
+   * the neutral point and the back tension from there to the entry, each
+   * amplified by its side of the friction hill (Nádai's solution, see
+   * `splitDecrement` in strip.ts). The front tension then moves the load
+   * about 0.36 L per Pa instead of 0.56 L.
+   */
+  slabTension: 'mean' | 'split';
   /** control */
   mode: 'gauge' | 'force' | 'screw';
   targetForce: number;
@@ -236,7 +246,7 @@ export function defaultParams(mill: MillType): Params3D {
     backTension: 50e6, frontTension: 80e6,
     lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, entryStrain: 0,
     mu: 0.06, Estrip: 206e9, nuStrip: 0.3,
-    lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true,
+    lateralLen: 0.02, sigmaCr: 2e6, tensionFeedback: true, slabTension: 'mean',
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
     // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long
