@@ -16,10 +16,15 @@
 //    the entry's scaled by h₁/h₀ - the pass does not carry the drop over in proportion, so
 //    the edge is rolled less than the centre and its latent elongation against the
 //    centre falls; the body (|x| ≤ 300 mm, against the centre) keeps its profile.
+// 4. The floor: a foil (the 20Hi foil preset, h₀ 0.1 mm, crown 30 µm) with a 100 µm drop over 50 mm
+//    takes the formula below zero at the edges, where it used to solve to NaNs. The profile is
+//    max(formula, a quarter of h₀) - the floor itself to the bit where it holds - and flags where
+//    it is held; the pass (the gate's grid) converges with every reading finite and warns
+//    `entryThin`, and every slice takes the floored formula at its station.
 //
 // @check
 // @check-build sim3d
-import { StackSolver, entryThickness } from './build/solver.js';
+import { StackSolver, entryThickness, entryFloored } from './build/solver.js';
 import { defaultParams } from './build/stack.js';
 
 let failed = 0;
@@ -120,6 +125,40 @@ function expected(p, x) {
   for (let i = 0; i <= last; i++) if (Math.abs(RA.profile.x[i]) <= 0.3) body = Math.max(body, Math.abs((RB.profile.latent[i] - cB) - (RA.profile.latent[i] - cA)));
   report(edgeB < edgeA - 20e-5 && body < 5e-5, 'pass: the edge elongates less, the body as it was',
     `edge − centre latent ${(edgeA * 1e5).toFixed(0)} → ${(edgeB * 1e5).toFixed(0)} I-units; |x| ≤ 300 mm moves by ${(body * 1e5).toFixed(2)} I-units at most against the centre; flatness ${RA.latentIU.toFixed(0)} → ${RB.latentIU.toFixed(0)} I-units`);
+}
+
+// ── 4. the floor ─────────────────────────────────────────────────────────────
+{
+  const FLOOR = 0.25;
+  const p = {
+    ...defaultParams('20hi'), stations: 81, stripStations: 0, stripNz: 8,
+    h0: 0.0001, reduction: 0.2, wrD: 0.04, wrDn: 0.034, entryEdgeDrop: 100e-6, entryEdgeDropWidth: 0.05,
+  };
+  const floor = FLOOR * p.h0;
+  // the floored formula: the floor to the bit where the formula is under it, the formula elsewhere
+  const floored = (h, x) => (expected(p, x) < floor ? Object.is(h, floor) : Math.abs(h - expected(p, x)) < 1e-12);
+  let profileSame = true, flagSame = true, below = 0;
+  for (let k = 0; k <= 1000; k++) {
+    const x = -p.width / 2 + (k * p.width) / 1000;
+    profileSame &&= floored(entryThickness(p, x), x);
+    flagSame &&= entryFloored(p, x) === (expected(p, x) < floor);
+    if (expected(p, x) < floor) below++;
+  }
+  report(below > 0 && profileSame && flagSame, 'floor: the profile',
+    `max(formula, ${FLOOR}·h₀): ${profileSame}; flagged exactly where the formula is under it: ${flagSame}; ${below} of 1001 points under (edge formula ${um(expected(p, p.width / 2))} µm)`);
+
+  // capped: before the floor this case never settled (NaN residual)
+  const sv = new StackSolver(p);
+  let it = 0;
+  for (let f = 0; f < 300; f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
+  const R = sv.result;
+  const finite = [R.force, R.h1Mean, R.crown, R.crown0, R.edgeDropL, R.edgeDropR, R.edgeDrop0, R.latentIU, R.manifestIU, R.residual].every(Number.isFinite)
+    && sv.slices.every((sl) => Number.isFinite(sl.h1) && Number.isFinite(sl.q));
+  report(R.converged && finite && R.warnings.includes('entryThin'), 'floor: the pass converges and warns',
+    `converged ${R.converged} in ${it} iterations; readings finite: ${finite} (h₁ mean ${um(R.h1Mean)} µm, C25 ${um(R.crown)} µm); warnings [${R.warnings}]`);
+  let sliceSame = true, held = 0;
+  for (const sl of sv.slices) { sliceSame &&= floored(sl.h0, sl.x) && sl.entryFloored === (expected(p, sl.x) < floor); if (sl.entryFloored) held++; }
+  report(sliceSame && held > 0, 'floor: slices take the floored formula', `${held} of ${sv.slices.length} slices held at ${um(floor)} µm; every slice max(formula, floor) and flagged where held: ${sliceSame}`);
 }
 
 if (failed) { console.log(`${failed} FAIL`); process.exit(1); }
