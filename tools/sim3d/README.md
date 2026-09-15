@@ -9,6 +9,7 @@ node tools/sim3d/table.mjs '{"flatModel":"ring"}' 4hi,20hi
 node tools/sim3d/stress.mjs          # 202 ケースのストレステスト（上限 1500 反復で数分、npm run check には入れない）。例外・NaN・警告なしの未収束で exit 1
 node tools/sim3d/stress.mjs foil     # タグに一致するものだけ
 PATCH='{"postBucklingStiffness":0.05}' node tools/sim3d/stress.mjs   # 全ケースに同じパラメータを重ねる（ケース自身の設定が後）
+node tools/sim3d/paramspath.mjs      # 入力を変える経路: 既定から setParams で変えた解と、最初からその条件で作った解が一致するか（npm run check に入る。約 50 s）
 node tools/sim3d/postbuckling.mjs    # 座屈した後の板の剛性: 剛性 0 のビット一致・構成則の読み戻し・1/(1+βG)（npm run check に入る。約 5〜10 s）
 node tools/sim3d/audit.mjs 4hi       # 接触の釣り合い・幾何・板の検算を印字（検算の式は audit-lib.mjs、check.mjs と共通）
 node tools/sim3d/bench.mjs [out.json] # 速度と結果のベンチマーク（数値解法を変えたら前後で比べる）
