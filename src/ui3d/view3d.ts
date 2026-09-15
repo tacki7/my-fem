@@ -913,7 +913,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('latent', dash(R.latentIU.toFixed(0)), none ? undefined : R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
     stats.set('manifest', dash(R.manifestIU.toFixed(0)), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
     stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
-    stats.set('iter', dash(`${solver.progress().iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
+    // both from the result on show: after a change that keeps the mesh it is the last solve's, faded
+    stats.set('iter', dash(`${R.solveIterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
     stats.set('ms', dash(R.solveMs.toFixed(1)));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
     stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
@@ -1110,13 +1111,18 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   };
 
   // keyboard: Space starts or stops the solve, R starts over, 1-5 pick the mill. A field that takes
-  // typed text keeps its keys (Space, R and the digits are characters there), and a button takes
-  // Space as its own press. A toggle or a slider clicked last keeps the focus but types nothing: the
-  // keys work there too, with the browser's own action - flipping the toggle - held back (it used to
-  // flip the toggle back instead of starting the solve).
+  // typed text keeps its keys (Space, R and the digits are characters there). A button or a toggle
+  // reached with Tab keeps them too - Space is how one presses or flips it from the keyboard - but
+  // one the pointer clicked last only holds the focus Chrome leaves there: the keys are the view's,
+  // with the browser's own action held back (Space used to flip a clicked toggle back instead of
+  // starting the solve). The origin of the focus is tracked as on the 2D tab (`focusByPointer` in
+  // src/main.ts): a pointer press sets it, Tab clears it, both in the capture phase.
+  let focusByPointer = false;
+  window.addEventListener('pointerdown', () => { focusByPointer = true; }, true);
+  window.addEventListener('keydown', (e) => { if (e.key === 'Tab') focusByPointer = false; }, true);
   window.addEventListener('keydown', (e) => {
     if (!active || e.metaKey || e.ctrlKey || e.altKey || takesTyping(e.target)) return;
-    if (e.target instanceof HTMLButtonElement) return;
+    if (!focusByPointer && pressable(e.target)) return;
     if (e.code === 'Space') {
       e.preventDefault();
       if (running) stopSolve(); else startSolve();
@@ -1141,6 +1147,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
 
 /** the input types a key press does not type into: the view's keys still work with one of these focused */
 const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']);
+
+/** a control whose own key is Space: a button, a toggle, a radio */
+function pressable(t: EventTarget | null): boolean {
+  return t instanceof HTMLButtonElement || (t instanceof HTMLInputElement && (t.type === 'checkbox' || t.type === 'radio'));
+}
 
 /** a field that takes typed text (a text or number box, a textarea, a select, an editable element) */
 function takesTyping(t: EventTarget | null): boolean {

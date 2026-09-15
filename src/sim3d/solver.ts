@@ -329,7 +329,10 @@ export interface Result3D {
   /** the last Newton step's residual norm and largest displacement update */
   residual: number;
   stepMax: number;
+  /** outer Newton iterations in the last `advance` (the frame) */
   iterations: number;
+  /** outer Newton iterations of the solve this result belongs to, so far (see `SolveProgress.iterations`) */
+  solveIterations: number;
   converged: boolean;
   /** what is wrong with this pass, if anything - keys, see `WARNING_TEXT` */
   warnings: Warning3D[];
@@ -2042,7 +2045,7 @@ export class StackSolver {
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0, crown0: 0, edgeDrop0: 0,
       profile: { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) },
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, warnings: [], warningDetails: {}, notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, solveIterations: 0, converged: false, warnings: [], warningDetails: {}, notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
       housing: null,
     };
   }
@@ -2254,6 +2257,7 @@ export class StackSolver {
     R.residual = this.residual;
     R.stepMax = this.stepMax;
     R.iterations = iters;
+    R.solveIterations = this.iterations;
     R.converged = this.converged;
     R.solveMs = ms;
     R.dof = u.length;
