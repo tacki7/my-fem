@@ -135,6 +135,8 @@ export interface StripFemResult {
   massRatio: number;
   iterations: number;
   converged: boolean;
+  /** which FEM solved it: the plane one or the layered 3D one */
+  model: 'fem' | 'fem3d';
   /** per element: s_y, s_z, σ_m, div(hu)/h, ε̇_eq - for checking the recovery */
   debug: { sy: Float64Array; sz: Float64Array; sm: Float64Array; div: Float64Array; eq: Float64Array };
 }
@@ -435,7 +437,7 @@ export class StripFem {
     }
     return {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
-      massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, debug: this.dbg,
+      massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, model: 'fem', debug: this.dbg,
     };
   }
 
