@@ -917,6 +917,19 @@ body.resizing * { cursor: inherit !important; }
    with a short label in front of the number */
 .v3-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
 .v3-status .badge { padding: 3px 8px; }
+.v3-status .v3-run { padding: 4px 14px; font-weight: 600; white-space: nowrap; }
+.v3-status .v3-run.running {
+  background: linear-gradient(180deg, rgba(255, 196, 107, .22), rgba(255, 196, 107, .08));
+  border-color: rgba(255, 196, 107, .5); color: var(--amber);
+}
+.v3-status .v3-run:disabled { cursor: default; opacity: .6; transform: none; }
+/* results that are not the current settings' solution: faded until 計算開始 */
+#view3d .v3-stale { opacity: .45; transition: opacity .15s; }
+#view3d .v3-stale-tag {
+  position: absolute; top: 8px; right: 10px; z-index: 2; pointer-events: none;
+  font-family: var(--sans); font-size: 11px; color: var(--amber);
+  background: rgba(7, 10, 18, .72); border: 1px solid rgba(255, 196, 107, .35); border-radius: 5px; padding: 3px 8px;
+}
 .v3-status .badge i { font-style: normal; color: var(--fg-dim); font-size: 10px; margin-right: 2px; }
 .v3-status .v3-dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); align-self: center;
