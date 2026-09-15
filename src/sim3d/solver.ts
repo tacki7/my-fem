@@ -63,6 +63,14 @@ const KT_FLOOR = 1e9;
 const SLICE_TOL = 1e-9;
 /** the thinnest exit a slice may report, as a fraction of its entry thickness */
 const H_MIN_FRAC = 0.05;
+/**
+ * The thinnest the incoming strip is taken to be anywhere across it, as a fraction of h₀. The
+ * crown and the edge drop are dials in µm, independent of h₀, so on a foil they can take the edge
+ * below zero, where the slice's elongation ln(h₀/h₁) is a NaN that runs through the whole solve.
+ * A band under a quarter of the strip's thickness is outside what the slab and FEM slices assume
+ * anyway; the profile is floored here and `entryThin` says so.
+ */
+const ENTRY_FLOOR_FRAC = 0.25;
 /** the residual is measured against the largest force in play, but never against less than this [N] */
 const F_SCALE_FLOOR = 1e4;
 /** the screw's travel [m]: negative is opened past the touching position */
@@ -160,10 +168,21 @@ const USE_WOODBURY = TENSION_COUPLING === 'full';
  * The incoming strip's thickness at x, |x| ≤ width/2 [m]: the crown's parabola, h₀ − C·(2x/W)²,
  * less the edge drop D, which runs over a band b = `entryEdgeDropWidth` in from each edge (b at
  * most half the width) and at a distance d from the nearer edge is D·(1 − d/b)² - all of D at
- * the edge, falling off to nothing at the band's inner end with no kink there. A slice takes the
- * value at its station, as it always took the parabola's.
+ * the edge, falling off to nothing at the band's inner end with no kink there - and never under
+ * `ENTRY_FLOOR_FRAC`·h₀ (see `entryFloored`). A slice takes the value at its station, as it
+ * always took the parabola's.
  */
 export function entryThickness(p: Params3D, x: number): number {
+  return Math.max(entryProfile(p, x), ENTRY_FLOOR_FRAC * p.h0);
+}
+
+/** whether the entry profile at x is below the floor `entryThickness` holds it at */
+export function entryFloored(p: Params3D, x: number): boolean {
+  return entryProfile(p, x) < ENTRY_FLOOR_FRAC * p.h0;
+}
+
+/** the entry profile's formula, before the floor */
+function entryProfile(p: Params3D, x: number): number {
   const t = (2 * x) / p.width;
   const h = p.h0 - p.entryCrown * t * t;
   const band = Math.min(p.entryEdgeDropWidth, p.width / 2);
@@ -237,7 +256,7 @@ export interface ContactState {
   total: number;
 }
 
-export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope' | 'housingStrip';
+export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope' | 'housingStrip' | 'entryThin';
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
@@ -252,6 +271,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   stripWide: '板幅が WR 胴長より長い（胴からはみ出した板は圧延されず、計算にも入らない）',
   housingScope: 'ハウジング変形考慮モードは 2Hi・4Hi・6Hi だけ（このミルは今の支持のまま解いている）',
   housingStrip: '板幅がハウジングのポスト内面の間隔（操作側–駆動側）より広い — 板がポストに当たる（側面図の赤いポスト）',
+  entryThin: `入側の板厚プロファイルが板端で h₀ の ${ENTRY_FLOOR_FRAC * 100} % を下回る（その分は ${ENTRY_FLOOR_FRAC * 100} % で頭打ちにして解いている）`,
 };
 
 export interface Result3D {
@@ -373,6 +393,8 @@ interface Slice {
   g: number;
   /** the pass at this slice has no steady solution (Stone's limit) */
   runaway: boolean;
+  /** the entry profile at this slice is held at its floor (see `entryThickness`) */
+  entryFloored: boolean;
   /** the non-local flattening mode's offset on this slice's own flattening [m], refreshed once per outer iteration */
   nlOff?: number;
 }
@@ -659,7 +681,7 @@ export class StackSolver {
       this.slices.push({
         s, x: xc, weight: w, h0,
         q: prev?.q ?? 0, h1: prev?.h1 ?? h0 * (1 - p.reduction), flat: prev?.flat ?? 0,
-        arc: prev?.arc ?? 0, clipped: prev?.clipped ?? false, dh1dg: prev?.dh1dg ?? 1, dh1ds: prev?.dh1ds ?? 0, dqdg: prev?.dqdg ?? 0, dqds: prev?.dqds ?? 0, g: prev?.g ?? h0, runaway: false,
+        arc: prev?.arc ?? 0, clipped: prev?.clipped ?? false, dh1dg: prev?.dh1dg ?? 1, dh1ds: prev?.dh1ds ?? 0, dqdg: prev?.dqdg ?? 0, dqds: prev?.dqds ?? 0, g: prev?.g ?? h0, runaway: false, entryFloored: entryFloored(p, xc),
       });
       this.sliceW[s] = w;
     }
@@ -2281,6 +2303,8 @@ export class StackSolver {
     if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
     if (this.stack.issues.length) w.push('layout');
     if (this.stripOverhang() > 0) w.push('stripWide');
+    // every slice, loaded or not: a floored edge carries no load while the gap is open
+    if (this.slices.some((sl) => sl.entryFloored)) w.push('entryThin');
     if (p.housingMode && !this.housingActive()) w.push('housingScope');
     if (this.housingActive() && housingPlan(p, this.rolls[this.screwRolls[0]].def).stripOverlap > 0) w.push('housingStrip');
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
