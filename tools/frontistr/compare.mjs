@@ -48,8 +48,14 @@ if (ref.mill === '2hi') {
     let f = 0; for (const n of here) { const cf = res.node.get(n).CONTACT_NFORCE; if (cf) f += Math.abs(cf[1]); }
     return (2 * f) / W.dx[i];
   });
+  // The exit profile the strip sees: half the exit gauge against its centre value, Δh₁/2. The
+  // work roll's bottom surface is the axis less the barrel radius plus the indentation, so the
+  // FEM's reading is its bottom node's displacement against the centre's, less the barrel's
+  // radius deviation (geometry, which the displacement leaves out). The strip load sits on one
+  // node ring per station here (cells 29 mm long, the contact patch 8 mm wide), so the FEM's
+  // surface under a ring is a local dimple: read this column as a rough check only.
   const wb0 = disp(W.nodes.bottom[0])[1];
-  console.log('    x [mm] | WR axis v − v(BUR bearing) [µm]: model    FEM    diff | BUR axis: model    FEM    diff | WR–BUR q [kN/mm]: model    FEM    diff | exit profile −Δh₁/2 [µm]: model    FEM    diff');
+  console.log('    x [mm] | WR axis v − v(BUR bearing) [µm]: model    FEM    diff | BUR axis: model    FEM    diff | WR–BUR q [kN/mm]: model    FEM    diff | exit profile Δh₁/2 [µm]: model    FEM    diff');
   let worst = { wr: 0, bur: 0, q: 0, prof: 0 };
   for (let i = 0; i < Math.max(W.x.length, Bk.x.length); i++) {
     const cols = [mm(i < W.x.length ? W.x[i] : Bk.x[i])];
@@ -67,7 +73,7 @@ if (ref.mill === '2hi') {
       const qM = C.q[i], f = qF[i];
       cols.push(`| ${kn(qM)} ${kn(f)} ${qM === null || f === null ? '       —' : kn(f - qM)}`);
       if (qM !== null && f !== null && W.x[i] < ref.rolls.WR.Lb / 2) worst.q = Math.max(worst.q, Math.abs(f - qM));
-      const h1 = W.h1[i], pM = h1 === null ? null : -(h1 - W.h1[0]) / 2, pF = disp(W.nodes.bottom[i])[1] - wb0;
+      const h1 = W.h1[i], pM = h1 === null ? null : (h1 - W.h1[0]) / 2, pF = disp(W.nodes.bottom[i])[1] - wb0 - (W.prof[i] - W.prof[0]);
       cols.push(`| ${um(pM)} ${um(pF)} ${pM === null ? '       —' : um(pF - pM)}`);
       if (pM !== null) worst.prof = Math.max(worst.prof, Math.abs(pF - pM));
     }

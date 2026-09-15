@@ -187,6 +187,8 @@ const ref = {
     flat: W.station.map((s) => at(R.flat, s)), q: W.station.map((s) => at(R.q, s)),
     b: W.station.map((s) => (s >= 0 && Number.isFinite(R.q[s]) && R.q[s] > 0 ? bAt(R.q[s], R.arc[s]) : null)),
     h1: W.station.map((s) => at(R.h1, s)),
+    // the barrel's radius deviation (ground and thermal crown) at each station: geometry the FEM's displacements leave out
+    prof: W.xs.map((x) => (x <= wrDef.Lb / 2 + 1e-9 ? radiusProfile(wrDef, x) : 0)),
     dx: W.xs.map((x, i) => (i === 0 ? 0.5 * W.xs[1] : i + 1 < W.xs.length ? 0.5 * (W.xs[i + 1] - W.xs[i - 1]) : W.xs[i] - W.xs[i - 1])),
   },
   ...(bur ? {
