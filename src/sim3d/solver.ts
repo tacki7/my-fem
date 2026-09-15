@@ -2374,10 +2374,17 @@ export class StackSolver {
   wake(): void { this.converged = false; }
 }
 
-/** the inputs whose change means a new mesh */
+/**
+ * The inputs whose change means a new mesh - and the ones only `rebuild` reads: the contacts'
+ * normals come from the end-view layout (the diameters, `angle1` and the cluster's `clearance`)
+ * and their elastic law from the roll material (`Eroll`, `nuRoll`), both made once per mesh.
+ * Everything else is refreshed in place by `refreshProfiles`. Left out, a changed modulus or
+ * clearance went unseen until some other change rebuilt the mesh (tools/sim3d/paramspath.mjs).
+ */
 function geometryKey(p: Params3D): string {
   return [
     p.mill, p.stations, p.stripStations, p.wrLb, p.wrLs, p.irLb, p.irLs, p.ir2Lb, p.burLb, p.burLs, p.bbLb,
     p.width, p.irShift, p.wrD, p.irD, p.ir2D, p.burD, p.bbD, p.angle1, p.mode,
+    p.clearance, p.Eroll, p.nuRoll,
   ].join('|');
 }
