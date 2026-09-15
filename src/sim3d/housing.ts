@@ -42,6 +42,11 @@ export interface HousingCompliance {
 /** Poisson's ratio of the housing steel, for the shear modulus */
 const NU_HOUSING = 0.3;
 
+/** the housing deformation mode is on and the mill is inside its scope: 2Hi, 4Hi, 6Hi */
+export function housingInScope(p: Pick<Params3D, 'housingMode' | 'mill'>): boolean {
+  return p.housingMode && (p.mill === '2hi' || p.mill === '4hi' || p.mill === '6hi');
+}
+
 export function housingCompliance(p: Params3D): HousingCompliance {
   const E = p.housingE;
   const G = E / (2 * (1 + NU_HOUSING));

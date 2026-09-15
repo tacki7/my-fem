@@ -33,7 +33,7 @@
 
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
 import { stationGrid, nearestStation, type StationGrid } from './grid';
-import { housingCompliance, halfStiffness, sideStiffness, housingPlan } from './housing';
+import { housingCompliance, halfStiffness, sideStiffness, housingPlan, housingInScope } from './housing';
 import { nonlocalOffsets } from './flatnl';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
@@ -1869,8 +1869,7 @@ export class StackSolver {
 
   /** the housing deformation mode is on and this mill is inside its scope (2Hi / 4Hi / 6Hi) */
   private housingActive(): boolean {
-    const m = this.p.mill;
-    return this.p.housingMode && (m === '2hi' || m === '4hi' || m === '6hi');
+    return housingInScope(this.p);
   }
 
   /**

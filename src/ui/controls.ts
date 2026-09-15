@@ -158,6 +158,12 @@ export interface SliderHandle {
   set(v: number): void;
   get(): number;
   setEnabled(on: boolean): void;
+  /**
+   * Move the ends of the travel, for a dial bounded by another setting (a neck
+   * no thicker than its roll): dragging, typing and the arrows all stop at the
+   * new ends. Keeping the value itself inside them is the owner's job.
+   */
+  setRange(min: number, max: number): void;
 }
 
 export function slider(o: SliderOpts): SliderHandle {
@@ -325,6 +331,13 @@ export function slider(o: SliderOpts): SliderHandle {
     root,
     get: () => value,
     set(v: number) { value = v; input.value = String(toPos(v)); paint(v); },
+    setRange(min: number, max: number) {
+      // the travel (`toPos` / `toVal` read o) and the typed-value rails (dial) alike
+      o.min = min; o.max = max;
+      dial.min = min; dial.max = max;
+      input.value = String(toPos(value));
+      paint(value);
+    },
     setEnabled(on: boolean) {
       input.disabled = !on; out.disabled = !on;
       spinUp.disabled = !on; spinDown.disabled = !on;
