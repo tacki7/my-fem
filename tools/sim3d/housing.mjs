@@ -29,8 +29,8 @@ function report(ok, name, detail) {
   if (!ok) failed++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`);
 }
-/** a mill's defaults at 81 stations: what these checks hold does not depend on the grid, and the default 301 takes ten times as long */
-const defaults81 = (mill) => ({ ...defaultParams(mill), stations: 81 });
+/** a mill's defaults at 81 stations, the strip on the same even grid with 8 rows: what these checks hold does not depend on the grid, and the defaults' 301 stations with 281 strip cells × 16 rows take a hundred times as long */
+const defaults81 = (mill) => ({ ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8 });
 function solve(p) {
   const sv = new StackSolver(p);
   let it = 0;

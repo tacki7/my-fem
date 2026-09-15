@@ -77,8 +77,11 @@ const results = {};
 const t0 = performance.now();
 for (const [label, patch, millArg] of CASES) {
   const mill = millArg ?? label;
-  // at the 81 stations the baseline was taken on: the default grew to 301, and with it the run time about tenfold
-  const p = { ...defaultParams(mill), stations: 81, ...patch };
+  // at the 81 stations the baseline was taken on: the default grew to 301, and with it the run time about tenfold.
+  // The strip's own grid likewise: the defaults tile the strip with 281 cells × 16 rows (561 on the 12Hi and
+  // 20Hi), which takes the gate from 6 s to over 4 minutes. The model (non-local flattening, split tension,
+  // post-buckling stiffness, ring divisions) is the default one; only the discretisation is the quick one.
+  const p = { ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8, ...patch };
   const tc = performance.now();
   const { sv, iterations } = solve(p, 400);
   const R = sv.result;

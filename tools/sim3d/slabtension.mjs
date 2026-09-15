@@ -41,7 +41,8 @@ function report(ok, name, detail) {
   if (!ok) failed++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`);
 }
-const defaults81 = (mill) => ({ ...defaultParams(mill), stations: 81 });
+// the quick grid: 81 stations, the strip on the same even grid with 8 rows (the defaults' 281 cells × 16 rows take minutes)
+const defaults81 = (mill) => ({ ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8 });
 function solve(p) {
   const sv = new StackSolver(p);
   let it = 0;
@@ -157,13 +158,14 @@ const PASSES = [
 {
   for (const mill of ['2hi', '4hi', '6hi', '12hi', '20hi']) {
     const p = defaults81(mill);
-    const mean = solve(p), split = solve({ ...p, slabTension: 'split' });
+    const mean = solve({ ...p, slabTension: 'mean' }), split = solve({ ...p, slabTension: 'split' });
     const cons = stripConsistency(split.sv, split.sv.p);
     report(split.R.converged && cons.qRelMismatch < 2e-3 && split.it <= 1.5 * mean.it + 10,
       `${mill}: split converges`,
       `${split.it} iterations (mean ${mean.it}), force ${(split.R.force / 9.80665e3).toFixed(1)} tonf (mean ${(mean.R.force / 9.80665e3).toFixed(1)}), latent ${split.R.latentIU.toFixed(0)} I (mean ${mean.R.latentIU.toFixed(0)}), strip load consistency ${cons.qRelMismatch.toExponential(1)}`);
   }
-  const p = { ...defaults81('4hi'), stripModel: 'slab', slabTension: 'split' };
+  // local flattening and the clamp at the buckling limit, so the slab load is the slice's whole state
+  const p = { ...defaults81('4hi'), stripModel: 'slab', slabTension: 'split', flatNonlocal: false, postBucklingModel: 'linear', postBucklingStiffness: 0 };
   const split = solve(p);
   const cons = stripConsistency(split.sv, split.sv.p);
   // the tangent the solve takes, against the law's: at each loaded slice's own state, the

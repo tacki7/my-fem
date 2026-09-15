@@ -31,7 +31,8 @@ for (const [label, mill, patch, w0, step, count] of [
   const rows = [];
   for (let i = 0; i < count; i++) {
     const width = +(w0 + i * step).toFixed(7);
-    const { sv } = solve({ ...defaultParams(mill), ...patch, width }, 3000);
+    // on the even grid, where the edge slice is born as the strip widens (the defaults tile the strip with its own cells)
+    const { sv } = solve({ ...defaultParams(mill), stripStations: 0, stripNz: 8, ...patch, width }, 3000);
     const R = sv.result;
     const edge = R.profile ? R.profile.latent[R.profile.latent.length - 1] : R.dEps[sv.slices[sv.slices.length - 1].s];
     rows.push({ width, n: sv.slices.length, lat: R.latentIU, man: R.manifestIU, edge: edge * 1e5, conv: R.converged });
@@ -50,7 +51,7 @@ for (const [label, mill, patch, w0, step, count] of [
 
 // ── 2. the profile is the slices' smoothing ────────────────────────────────
 {
-  const p = { ...defaultParams('4hi'), stations: 81, stripStations: 141 };
+  const p = { ...defaultParams('4hi'), stations: 81, stripStations: 141, stripNz: 8 };
   const { sv } = solve(p, 3000);
   const R = sv.result, P = R.profile;
   let dLat = 0, dWave = 0, matched = 0;

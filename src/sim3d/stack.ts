@@ -257,7 +257,7 @@ export function defaultParams(mill: MillType): Params3D {
     backTension: 50e6, frontTension: 80e6,
     lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, entryStrain: 0,
     mu: 0.06, Estrip: 206e9, nuStrip: 0.3,
-    lateralLen: 0.02, sigmaCr: 2e6, postBucklingStiffness: 0, postBucklingModel: 'linear', tensionFeedback: true, slabTension: 'mean',
+    lateralLen: 0.02, sigmaCr: 2e6, postBucklingStiffness: 1, postBucklingModel: 'effectiveWidth', tensionFeedback: true, slabTension: 'split',
     mode: 'gauge', targetForce: 1000 * 9.80665e3, screw: 0.5e-3, leveling: 0,
     housingK: 6e9,
     // Assumed dimensions, not a drawing: two 500 × 700 mm posts 4.5 m long
@@ -284,21 +284,27 @@ export function defaultParams(mill: MillType): Params3D {
     angle1: (24 * Math.PI) / 180,
     clearance: 3e-3,
     Eroll: 206e9, nuRoll: 0.3,
-    stations: 301, stripStations: 0,
-    stripModel: 'fem', stripNz: 8, stripNy: 2,
-    flatModel: 'hertz', flatNonlocal: false, ringNt: 400, ringNr: 8, ringGrade: 2.5, ringHub: 0.3,
+    // The strip's own grid: with the non-local flattening, the split tension and the post-buckling
+    // stiffness on, the lightest grid whose crown, edge drop, latent flatness and wall stay within
+    // 2 % of 561 cells × 64 rows, and stay there on every finer setting (README, 分割の既定).
+    // The mills below override it where they need more.
+    stations: 301, stripStations: 281,
+    stripModel: 'fem', stripNz: 16, stripNy: 2,
+    flatModel: 'hertz', flatNonlocal: true, ringNt: 800, ringNr: 12, ringGrade: 2.5, ringHub: 0.3,
   };
   switch (mill) {
     case '2hi':
       return { ...base, wrD: 0.6, wrLb: 1.6, wrLs: 2.1, wrDn: 0.36 };
     case '6hi':
-      return { ...base, wrD: 0.42, wrDn: 0.26, irD: 0.5, irDn: 0.3 };
+      return { ...base, wrD: 0.42, wrDn: 0.26, irD: 0.5, irDn: 0.3, stripNz: 32 };
     case '12hi':
       return {
         ...base, wrD: 0.1, wrLb: 1.4, wrLs: 1.5, wrDn: 0.08,
         irD: 0.18, irLb: 1.45, irLs: 1.55, irDn: 0.14,
         bbD: 0.3, bbShaft: 0.17, bbLb: 1.5,
         h0: 0.001, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (41 * Math.PI) / 180,
+        // 281 cells leave the latent flatness 4 % off: the thin strip's edge band wants 561
+        stripStations: 561,
       };
     case '20hi':
       return {
@@ -307,6 +313,11 @@ export function defaultParams(mill: MillType): Params3D {
         ir2D: 0.175, ir2Lb: 1.45,
         bbD: 0.3, bbShaft: 0.16, bbLb: 1.5,
         h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, angle1: (40 * Math.PI) / 180,
+        // the ring section's flattening on a 65 mm work roll: the latent flatness at the default grid is
+        // 7 % off the 3200 × 32 value at 400 × 8 and 2.6 % at 800 × 12, within 0.5 % from 1600 × 16
+        ringNt: 1600, ringNr: 16,
+        // as the 12Hi: 281 cells leave the latent flatness 4 % off
+        stripStations: 561,
       };
     default:
       return base;

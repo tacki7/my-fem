@@ -3,7 +3,7 @@
 //   node tools/sim3d/postbuckling.mjs              exit 1 on any FAIL
 //   node tools/sim3d/postbuckling.mjs --measure    print every margin, hold nothing
 //
-// 1. Stiffness 0 is the clamp: an explicit 0, on either law, solves bit for bit as the defaults do.
+// 1. Stiffness 0 is the clamp: an explicit 0, on either law, solves bit for bit as the clamp (`MODEL`) does.
 // 2. With a stiffness the 4Hi and 20Hi defaults converge, without warnings, on both laws, and some
 //    slices are buckled (so the checks below are not empty).
 // 3. The solve holds the law it was given, read back from its result alone. On a live slice
@@ -25,7 +25,12 @@ import { TENSION_CAP, kfMean } from './build/strip.js';
 
 const MEASURE = process.argv.includes('--measure');
 // a coarse roll grid with the strip on a finer one of its own: the buckled zone is some 170 mm
-const GRID = { stations: 81, stripStations: 101 };
+const GRID = { stations: 81, stripStations: 101, stripNz: 8 };
+// The model this check was written against: local flattening, the mean tension in the load and the
+// clamp at the buckling limit. The defaults have the non-local flattening, the split tension and the
+// effective width on; 1/(1 + βG) below is derived for the local slab loop, and "the defaults" in
+// section 1 means the clamp.
+const MODEL = { flatNonlocal: false, slabTension: 'mean', postBucklingModel: 'linear', postBucklingStiffness: 0 };
 const TOL = {
   // the tension Newton stops at a residual of 5e4 Pa (`stripSolve`); after it the slices and D are
   // evaluated once more at the final stresses, which moves the free stress by about as much again
@@ -48,7 +53,7 @@ function truth(name, ok, detail = '') {
 }
 
 function solve(mill, patch) {
-  const p = { ...defaultParams(mill), ...GRID, ...patch };
+  const p = { ...defaultParams(mill), ...GRID, ...MODEL, ...patch };
   const sv = new StackSolver(p);
   let iterations = 0;
   for (let f = 0; f < 500; f++) { sv.advance(1e9, 6); iterations += sv.result.iterations; if (sv.isConverged) break; }
@@ -143,7 +148,7 @@ for (const mill of ['4hi', '20hi']) {
   const baseFp = fingerprint(base.sv, base.iterations);
   for (const model of ['linear', 'effectiveWidth']) {
     const zero = solve(mill, { postBucklingModel: model, postBucklingStiffness: 0 });
-    truth(`${mill}: stiffness 0 on the ${model} law solves bit for bit as the defaults`, fingerprint(zero.sv, zero.iterations) === baseFp);
+    truth(`${mill}: stiffness 0 on the ${model} law solves bit for bit as the clamp`, fingerprint(zero.sv, zero.iterations) === baseFp);
   }
   readBack(`${mill} clamp`, base.sv, base.p);
   const clamp = heldGradient(base.sv, base.p);

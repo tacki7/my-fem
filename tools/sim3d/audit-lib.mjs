@@ -78,7 +78,10 @@ export function stripConsistency(sv, p) {
     const k = ratio ? ratio[i] : 1;
     const sigma = sv.sigmaF[sl.s];
     const g = sv.gapAt(sl.s);
-    const [flat] = approach({ ...sv.wsLaw, bFloor: Math.max(0, sl.arc / 2) }, sl.q);
+    const [local] = approach({ ...sv.wsLaw, bFloor: Math.max(0, sl.arc / 2) }, sl.q);
+    // the non-local flattening mode's offset, as the slice solve adds it (0 with the mode off)
+    const off = sl.nlOff ?? 0;
+    const flat = off === 0 ? local : local + off;
     const hRigid = Math.max(g + 2 * flat, H_MIN_FRAC * sl.h0);
     const h1 = hRigid + springback(sv.law, Math.min(hRigid, sl.h0), kfExitOf(sv.law, sl.h0, hRigid), sigma);
     const q = k * sliceLoad(sv.law, sl.h0, sl.h1, p.backTension, sigma, sl.q / k).q;

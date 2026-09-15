@@ -69,7 +69,9 @@ const sameBits = (a, b) => a.length === b.length && a.every((x, i) => Object.is(
 }
 
 // ── 3. off is off ────────────────────────────────────────────────────────────
-for (const [label, mill, patch] of [['4Hi', '4hi', { stations: 81 }], ['6Hi shifted −50 mm', '6hi', { stations: 81, irShift: -0.05 }]]) {
+// the quick grid throughout: 81 stations, the strip on the same even grid with 8 rows (the defaults' 281 cells × 16 rows take minutes)
+const QUICK = { stations: 81, stripStations: 0, stripNz: 8 };
+for (const [label, mill, patch] of [['4Hi', '4hi', QUICK], ['6Hi shifted −50 mm', '6hi', { ...QUICK, irShift: -0.05 }]]) {
   const base = { ...defaultParams(mill), ...patch };
   delete base.flatNonlocal;
   const a = solve(base), b = solve({ ...base, flatNonlocal: false });
@@ -82,15 +84,16 @@ for (const [label, mill, patch] of [['4Hi', '4hi', { stations: 81 }], ['6Hi shif
   const rows = [];
   let allConv = true;
   for (const [mill, patch] of [['2hi', {}], ['4hi', {}], ['6hi', {}], ['6hi', { irShift: 0.1 }], ['12hi', {}], ['20hi', {}]]) {
-    const p = { ...defaultParams(mill), stations: 81, ...patch, flatNonlocal: true };
+    const p = { ...defaultParams(mill), ...QUICK, ...patch, flatNonlocal: true };
     const { R, it } = solve(p);
     allConv &&= R.converged;
     rows.push(`${mill}${patch.irShift ? ' shift' : ''} ${R.converged ? 'conv' : 'NOT CONVERGED'} ${it} it, latent ${R.latentIU.toFixed(0)} IU`);
   }
   report(allConv, 'on: every mill converges (81 stations)', rows.join(' | '));
 
-  const p = { ...defaultParams('4hi'), stations: 81 };
-  const off = solve(p), on = solve({ ...p, flatNonlocal: true });
+  // against the model the mode was measured on: the mean tension in the load and the clamp at the buckling limit
+  const p = { ...defaultParams('4hi'), ...QUICK, slabTension: 'mean', postBucklingModel: 'linear', postBucklingStiffness: 0 };
+  const off = solve({ ...p, flatNonlocal: false }), on = solve({ ...p, flatNonlocal: true });
   const sl = on.sv.slices, n = sl.length;
   let asym = 0;
   for (let i = 0; i < n; i++) asym = Math.max(asym, Math.abs(on.R.dEps[sl[i].s] - on.R.dEps[sl[n - 1 - i].s]));
