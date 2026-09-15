@@ -449,7 +449,7 @@ export class StripFem3D {
     }
     return {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
-      massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged,
+      massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, model: 'fem3d',
       debug: { sy: new Float64Array(0), sz: new Float64Array(0), sm: new Float64Array(0), div: new Float64Array(0), eq: new Float64Array(0) },
     };
   }

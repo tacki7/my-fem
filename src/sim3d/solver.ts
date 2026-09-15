@@ -506,6 +506,11 @@ export class StackSolver {
     const p = this.p;
     const previousType = this.stack?.type;
     this.geomKey = geometryKey(p);
+    // A new mesh starts the strip FEM over (see `setParams`): its last solution is the old
+    // mesh's - it used to be reported, and drawn on the new mesh's axes, until the first
+    // correction round of the new solve replaced it.
+    this.femResult = null;
+    this.femLastChange = 0;
     this.stack = buildStack(p);
     const full = solvedRolls(this.stack);
     const rolls = full.rolls;

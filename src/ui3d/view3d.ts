@@ -814,8 +814,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
         charts.press.draw(f.p, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05 });
         charts.flow.draw(f.ux, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: '%', scale: 100, halfWidth: strip * 1.05, symmetric: true });
       } else {
-        charts.press.draw(null, 0, 0, R.x, R.arc, { unit: 'MPa', scale: 1, halfWidth: strip });
-        charts.flow.draw(null, 0, 0, R.x, R.arc, { unit: '%', scale: 1, halfWidth: strip });
+        // no field to draw: the slab model has none; a FEM has none until a solve has run its first correction round
+        const note = params.stripModel === 'slab' ? '材料モデルが平面 FEM／3 次元 FEM のときに表示' : '「計算開始」で解くと表示';
+        charts.press.draw(null, 0, 0, R.x, R.arc, { unit: 'MPa', scale: 1, halfWidth: strip, note });
+        charts.flow.draw(null, 0, 0, R.x, R.arc, { unit: '%', scale: 1, halfWidth: strip, note });
       }
     }
 
@@ -844,7 +846,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       if (gridRoll.textContent !== rollText) gridRoll.textContent = rollText;
       if (gridStrip.textContent !== stripText) gridStrip.textContent = stripText;
     }
-    stats.set('fem', R.fem ? `${params.stripModel === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
+    // the prefix says which FEM the result came from, not which one is now selected
+    stats.set('fem', R.fem ? `${R.fem.model === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : params.stripModel === 'slab' ? '—（スラブ法）' : '—', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];
       const inf = solver.ringFor(wr);
