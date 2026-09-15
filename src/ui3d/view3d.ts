@@ -21,6 +21,8 @@ import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '.
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
+/** the screw dial's travel [m]; the solver itself allows −10 to 20 mm */
+const SCREW_DIAL: [number, number] = [-2e-3, 8e-3];
 /** the hints of the dials another dimension bounds (see `BOUNDS`) */
 const NECK_HINT = 'ロール直径まで（スライダーの上限がロール直径。直径を細くするとネック径も追従する）。';
 const SPAN_HINT = '軸受の中心間の距離。胴長より短くできない（スライダーの下限が胴長。胴長を支持スパンより長くすると支持スパンも伸びる）。';
@@ -430,10 +432,20 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const ctlSec = section('制御・目標', { remember: false, open: false });
     ctlSec.body.append(select<'gauge' | 'force' | 'screw'>('制御モード', [
       { value: 'gauge', text: '出側板厚（圧下率）一定' }, { value: 'force', text: '圧延荷重一定' }, { value: 'screw', text: '圧下位置 手動' },
-    ], params.mode, (v) => { params.mode = v; apply(); syncModeDials(); }, 'スクリュー位置は目標に合うようフレームごとに割線法で追い込む。').root);
+    ], params.mode, (v) => {
+      // Bumpless into the manual mode: the screw dial takes the position the solve reached,
+      // held to the dial's travel. It used to jump to whatever the dial last said (0.5 mm
+      // against a solved 2.2 mm on the 4Hi defaults), and the load collapsed with it.
+      if (v === 'screw' && params.mode !== 'screw' && Number.isFinite(solver.screw)) {
+        params.screw = Math.max(SCREW_DIAL[0], Math.min(SCREW_DIAL[1], solver.screw));
+        dials.get('screw')?.set(params.screw);
+      }
+      params.mode = v; apply(); syncModeDials();
+    }, 'スクリュー位置 S は目標に乗るように Newton の中で一緒に解く（接触がまだ無い間だけ割線法）。「圧下位置 手動」に切り替えると、解いた S を圧下位置ダイヤルに引き継ぐ。').root);
     ctlSec.body.append(num('reduction', '圧下率', '%', 2, 60, 0.5, 0.01));
     ctlSec.body.append(num('targetForce', '目標荷重', 'tonf', 20, 4000, 10, TONF));
-    ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。'));
+    // the travel is written out: tools/ui/typed.mjs reads the dials from the source (SCREW_DIAL is the same numbers)
+    ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。出側板厚一定／荷重一定のときは解いた S を表示し（灰色）、「圧下位置 手動」に切り替えるとその値から始まる（ダイヤルの範囲 −2〜8 mm に丸める）。'));
     ctlSec.body.append(num('leveling', 'レベリング ΔS', 'µm', -300, 300, 5, 1e-6, '駆動側と作業側のスクリュー差。正で +x 側が締まる。'));
     ctlSec.body.append(num('housingK', 'ハウジング剛性', 'MN/mm', 1, 30, 0.5, 1e9, '支持点（チョックまたはサドル）1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
     left.append(ctlSec.root);
@@ -484,8 +496,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
         actSec.body.append(asuWrap);
       }
       if (params.mill === '20hi') {
+        // the arrow reads as the copy goes: from the first rack into the second, and back
         actSec.body.append(buttonRow([
-          { text: '2 → 1 にコピー', title: 'AS-U 2 を AS-U 1 と同じにする', onClick: () => { params.asu2 = [...params.asu]; apply(); buildLeft(); } },
+          { text: '1 → 2 にコピー', title: 'AS-U 1 の値を AS-U 2 に入れる', onClick: () => { params.asu2 = [...params.asu]; apply(); buildLeft(); } },
+          { text: '2 → 1 にコピー', title: 'AS-U 2 の値を AS-U 1 に入れる', onClick: () => { params.asu = [...params.asu2]; apply(); buildLeft(); } },
         ]));
       }
     }
@@ -693,6 +707,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   buildLeft();
 
   /* ── drawing ── */
+  /** the screw position the greyed dial last showed [m] */
+  let screwShown = NaN;
   const drawAll = () => {
     const R = solver.result;
     const st = solver.stack;
@@ -824,6 +840,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // stats
     stats.set('force', (R.force / TONF).toFixed(1));
     stats.set('screw', (R.screw * 1e3).toFixed(3));
+    // the greyed screw dial reads the position the solve is at, so a switch to the manual
+    // mode starts from it (only rewritten when it moved: a DOM write a frame is not free)
+    if (params.mode !== 'screw' && Number.isFinite(R.screw) && !(Math.abs(R.screw - screwShown) <= 1e-9)) {
+      screwShown = R.screw;
+      dials.get('screw')?.set(R.screw);
+    }
     stats.set('relief', params.tensionFeedback ? (R.yieldRelief * 100).toFixed(1) : 'OFF');
     stats.set('h1', `${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`);
     stats.set('crown', (R.crown * 1e6).toFixed(1));
