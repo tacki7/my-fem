@@ -926,7 +926,7 @@ body.resizing * { cursor: inherit !important; }
 /* results that are not the current settings' solution: faded until 計算開始 */
 #view3d .v3-stale { opacity: .45; transition: opacity .15s; }
 #view3d .v3-stale-tag {
-  position: absolute; top: 8px; right: 10px; z-index: 2; pointer-events: none;
+  margin-left: auto;
   font-family: var(--sans); font-size: 11px; color: var(--amber);
   background: rgba(7, 10, 18, .72); border: 1px solid rgba(255, 196, 107, .35); border-radius: 5px; padding: 3px 8px;
 }
@@ -966,6 +966,17 @@ body.resizing * { cursor: inherit !important; }
   font-family: var(--mono); font-size: 9.5px; line-height: 1.25; color: #dce6f5; white-space: pre; text-align: center;
   background: rgba(7, 10, 18, .78); border: 1px solid rgba(140, 170, 210, .18); border-radius: 4px; padding: 1px 6px;
 }
+/* along the stack's top edge: the grid counts on the left, the stale note on the right */
+#view3d .v3-stage-top {
+  position: absolute; top: 8px; left: 10px; right: 10px; z-index: 2; pointer-events: none;
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px;
+}
+#view3d .v3-grid-tag {
+  display: grid; grid-template-columns: auto auto; column-gap: 8px; row-gap: 1px;
+  font-family: var(--mono); font-size: 10px; line-height: 1.35; color: #b7c4d8;
+  background: rgba(7, 10, 18, .72); border: 1px solid rgba(140, 170, 210, .18); border-radius: 5px; padding: 3px 8px;
+}
+#view3d .v3-grid-title { grid-column: 1 / -1; color: var(--fg-dim); font-size: 9.5px; }
 #view3d .v3-front-mode { flex: none; gap: 3px; }
 #view3d .chart-head .v3-front-mode:first-of-type { margin-left: auto; }
 #view3d .v3-legend {
