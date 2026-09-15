@@ -20,8 +20,8 @@
 
 import { el } from './controls';
 
-export type Theme = 'classic' | 'modern' | 'chic';
-export const THEMES: Theme[] = ['classic', 'modern', 'chic'];
+export type Theme = 'classic' | 'modern' | 'chic' | 'hmi';
+export const THEMES: Theme[] = ['classic', 'modern', 'chic', 'hmi'];
 
 type Prop = '--col-left' | '--col-right' | '--row-line' | '--row-charts' | '--chart-nip' | '--chart-agc' | '--v3-front';
 /** the properties written as a share of the chart band rather than in pixels */
@@ -52,12 +52,14 @@ interface Gutter {
  * The sizes each look ships with. The modern look keeps the mill line as a
  * band along the bottom, which wants less height than a panel above the
  * stage; the chic look mirrors the columns, so the wider stats panel is the
- * first column there.
+ * first column there. The hmi look runs the line full width like chic, with
+ * the classic columns under it.
  */
 const DEFAULTS: Record<Theme, Record<Prop, number>> = {
   classic: { '--col-left': 292, '--col-right': 332, '--row-line': 460, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16, '--v3-front': 360 },
   modern:  { '--col-left': 300, '--col-right': 320, '--row-line': 380, '--row-charts': 340, '--chart-nip': 38, '--chart-agc': 16, '--v3-front': 360 },
   chic:    { '--col-left': 332, '--col-right': 300, '--row-line': 440, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16, '--v3-front': 360 },
+  hmi:     { '--col-left': 292, '--col-right': 332, '--row-line': 440, '--row-charts': 330, '--chart-nip': 40, '--chart-agc': 16, '--v3-front': 360 },
 };
 
 const GAP = 10;
@@ -82,7 +84,7 @@ export interface LayoutHandle {
 /** The look the document is in, read off the root - the switch writes it there. */
 export function currentTheme(): Theme {
   const t = document.documentElement.dataset.theme;
-  return t === 'modern' || t === 'chic' ? t : 'classic';
+  return t === 'modern' || t === 'chic' || t === 'hmi' ? t : 'classic';
 }
 
 /**
