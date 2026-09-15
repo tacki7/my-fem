@@ -444,7 +444,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }, 'スクリュー位置 S は目標に乗るように Newton の中で一緒に解く（接触がまだ無い間だけ割線法）。「圧下位置 手動」に切り替えると、解いた S を圧下位置ダイヤルに引き継ぐ。').root);
     ctlSec.body.append(num('reduction', '圧下率', '%', 2, 60, 0.5, 0.01));
     ctlSec.body.append(num('targetForce', '目標荷重', 'tonf', 20, 4000, 10, TONF));
-    ctlSec.body.append(num('screw', '圧下位置 S', 'mm', SCREW_DIAL[0] * 1e3, SCREW_DIAL[1] * 1e3, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。出側板厚一定／荷重一定のときは解いた S を表示し（灰色）、「圧下位置 手動」に切り替えるとその値から始まる（ダイヤルの範囲 −2〜8 mm に丸める）。'));
+    // the travel is written out: tools/ui/typed.mjs reads the dials from the source (SCREW_DIAL is the same numbers)
+    ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。出側板厚一定／荷重一定のときは解いた S を表示し（灰色）、「圧下位置 手動」に切り替えるとその値から始まる（ダイヤルの範囲 −2〜8 mm に丸める）。'));
     ctlSec.body.append(num('leveling', 'レベリング ΔS', 'µm', -300, 300, 5, 1e-6, '駆動側と作業側のスクリュー差。正で +x 側が締まる。'));
     ctlSec.body.append(num('housingK', 'ハウジング剛性', 'MN/mm', 1, 30, 0.5, 1e9, '支持点（チョックまたはサドル）1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
     left.append(ctlSec.root);
