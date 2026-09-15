@@ -27,7 +27,12 @@ const SCREW_DIAL: [number, number] = [-2e-3, 8e-3];
 const NECK_HINT = 'ロール直径まで（スライダーの上限がロール直径。直径を細くするとネック径も追従する）。';
 const SPAN_HINT = '軸受の中心間の距離。胴長より短くできない（スライダーの下限が胴長。胴長を支持スパンより長くすると支持スパンも伸びる）。';
 
-/** ready-made setups, one click each; every one starts from its mill's defaults */
+/**
+ * Ready-made setups, one click each; every one starts from its mill's defaults. The entry crown
+ * is set in the 4Hi default's proportion, 1.5 % of h₀ (on the dial's 2 µm grid): the default's
+ * 30 µm on a 0.1 mm foil was a 30 % crown, and since the gauge target is h₁ mean = (1 − r)·h₀ at
+ * the centre, the strip's mean reduction came out 11 % against the dial's 20 %.
+ */
 interface Preset3D { name: string; note: string; mill: MillType; patch: Partial<Params3D> }
 const PRESETS: Preset3D[] = [
   {
@@ -38,18 +43,18 @@ const PRESETS: Preset3D[] = [
   {
     name: '薄板 6Hi', mill: '6hi',
     note: '1.0 mm → 20% ／ IR 胴端 = 板端',
-    patch: { h0: 0.001, reduction: 0.2, irShift: 0 },
+    patch: { h0: 0.001, reduction: 0.2, irShift: 0, entryCrown: 16e-6 },
   },
   {
     name: 'ステンレス 20Hi', mill: '20hi',
     note: '0.5 mm → 20% ／ 張力 100/120 MPa ／ テーパ −50 mm',
-    patch: { h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, taperShift: -0.05 },
+    patch: { h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, taperShift: -0.05, entryCrown: 8e-6 },
   },
   {
     name: '箔 20Hi', mill: '20hi',
     note: '0.1 mm → 20% ／ WR 径 40 mm',
     // the neck in the 20Hi default's proportion (55 of 65 mm): left at 55 mm it was thicker than the roll
-    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04, wrDn: 0.034 },
+    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04, wrDn: 0.034, entryCrown: 2e-6 },
   },
 ];
 /** solve time allowed per frame [ms] */
@@ -272,6 +277,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     g.append(row);
   };
   into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
+  into(gLoad, 'reduction', '圧下率 実績 中央 / 平均', '%');
   into(gLoad, 'relief', '張力による降伏緩和 σ̄t/k̄f', '%');
   into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
   into(gShape, 'shape0', '入側 C25 / エッジドロップ', 'µm');
@@ -478,7 +484,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
       params.mode = v; apply(); syncModeDials();
     }, 'スクリュー位置 S は目標に乗るように Newton の中で一緒に解く（接触がまだ無い間だけ割線法）。「圧下位置 手動」に切り替えると、解いた S を圧下位置ダイヤルに引き継ぐ。').root);
-    ctlSec.body.append(num('reduction', '圧下率', '%', 2, 60, 0.5, 0.01));
+    ctlSec.body.append(num('reduction', '圧下率', '%', 2, 60, 0.5, 0.01, '出側板厚一定の目標: 出側の幅平均の板厚 = (1 − 圧下率) × h₀（板幅中央の入側板厚）。入側クラウンがあると幅平均の入側は h₀ より薄いので、平均で見た圧下率は少し小さい（右の「荷重・圧下 ▸ 圧下率 実績」）。'));
     ctlSec.body.append(num('targetForce', '目標荷重', 'tonf', 20, 4000, 10, TONF));
     // the travel is written out: tools/ui/typed.mjs reads the dials from the source (SCREW_DIAL is the same numbers)
     ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。出側板厚一定／荷重一定のときは解いた S を表示し（灰色）、「圧下位置 手動」に切り替えるとその値から始まる（ダイヤルの範囲 −2〜8 mm に丸める）。'));
@@ -888,6 +894,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
     stats.set('relief', params.tensionFeedback ? dash((R.yieldRelief * 100).toFixed(1)) : 'OFF');
     stats.set('h1', dash(`${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`));
+    {
+      // the reduction the pass actually made: at the centre, h₁ centre against h₀ centre; across the
+      // width, the means of both. The dial's r sets h₁ mean = (1 − r)·h₀ centre, so with an entry
+      // crown the mean reduction reads a little under the dial (30 µm on a 0.1 mm foil: 11 % for 20 %)
+      const entry = solver.entryReadings();
+      const centre = 1 - R.h1Centre / entry.h0Centre, mean = 1 - R.h1Mean / entry.h0Mean;
+      stats.set('reduction', dash(`${(centre * 100).toFixed(1)} / ${(mean * 100).toFixed(1)}`));
+    }
     stats.set('crown', dash((R.crown * 1e6).toFixed(1)));
     stats.set('wedge', dash((R.wedge * 1e6).toFixed(1)));
     stats.set('edge', dash(`${(R.edgeDropL * 1e6).toFixed(1)} / ${(R.edgeDropR * 1e6).toFixed(1)}`));

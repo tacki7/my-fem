@@ -2308,12 +2308,17 @@ export class StackSolver {
    * h at 100 mm − h at 15 mm from the edges, linearly between slices). The entry profile is a
    * setting, so this is valid before any solve; `collect` puts it into the result.
    */
-  entryReadings(): { crown0: number; edgeDrop0: number } {
+  entryReadings(): { crown0: number; edgeDrop0: number; h0Centre: number; h0Mean: number } {
     const W = this.p.width;
     const in0 = (x: number) => this.sliceAt(x, (sl) => sl.h0);
+    // the entry thickness across the strip, weighted as the exit's mean is (each slice by its cell on the strip)
+    let hw = 0, wsum = 0;
+    for (const sl of this.slices) { hw += sl.h0 * sl.weight; wsum += sl.weight; }
     return {
       crown0: in0(0) - 0.5 * (in0(-W / 2 + 0.025) + in0(W / 2 - 0.025)),
       edgeDrop0: 0.5 * (in0(-W / 2 + 0.1) - in0(-W / 2 + 0.015) + in0(W / 2 - 0.1) - in0(W / 2 - 0.015)),
+      h0Centre: in0(0),
+      h0Mean: wsum > 0 ? hw / wsum : this.p.h0,
     };
   }
 
