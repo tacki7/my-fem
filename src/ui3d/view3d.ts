@@ -113,7 +113,7 @@ type GeometryKey = typeof GEOMETRY_KEYS[number];
 const pickGeometry = (p: Params3D): Pick<Params3D, GeometryKey> =>
   Object.fromEntries(GEOMETRY_KEYS.map((k) => [k, p[k]])) as Pick<Params3D, GeometryKey>;
 
-export function installView3D(root: HTMLElement, opts: { initialMill?: MillType } = {}): View3DHandle {
+export function installView3D(root: HTMLElement, opts: { initialMill?: MillType; onMesh?: (text: string, detail: string) => void } = {}): View3DHandle {
   let params: Params3D = defaultParams(opts.initialMill ?? '4hi');
   const solver = new StackSolver(params);
   let active = false;
@@ -929,8 +929,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       const stripText = `幅 ${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）`
         + (params.stripModel === 'slab' ? '' : ` × 圧延 ${Math.round(params.stripNz)}`)
         + (params.stripModel === 'fem3d' ? ` × 板厚 ${Math.round(params.stripNy)}` : '');
-      if (gridRoll.textContent !== rollText) gridRoll.textContent = rollText;
-      if (gridStrip.textContent !== stripText) gridStrip.textContent = stripText;
+      if (gridRoll.textContent !== rollText || gridStrip.textContent !== stripText) {
+        gridRoll.textContent = rollText; gridStrip.textContent = stripText;
+        // the same counts for the top bar's mesh readout, shorter
+        opts.onMesh?.(`ロール ${solver.ns} ／ 材料 ${solver.slices.length}${params.stripModel === 'slab' ? '' : `×${Math.round(params.stripNz)}`}${params.stripModel === 'fem3d' ? `×${Math.round(params.stripNy)}` : ''}`,
+          `3D: ロール ${rollText}（幅方向の節点${ring ? '、断面リングの周方向 × 半径方向' : ''}）／ 材料 ${stripText}`);
+      }
     }
     // the prefix says which FEM the result came from, not which one is now selected
     stats.set('fem', R.fem ? `${R.fem.model === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : params.stripModel === 'slab' ? '—（スラブ法）' : '—', R.fem && !R.fem.converged ? 'warn' : undefined);

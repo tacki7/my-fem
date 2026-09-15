@@ -324,6 +324,16 @@ body.resizing * { cursor: inherit !important; }
 #topbar-actions .topbar-select { width: auto; padding: 4px 6px; font-size: 11px; }
 #topbar-actions .topbar-select:disabled { opacity: .4; cursor: not-allowed; }
 #topbar-badges  { display: flex; gap: 8px; align-items: center; flex: none; }
+/* The mesh now in use, top right. On the 3D tab it is a badge at the bar's right end (the
+   2D actions are hidden there). On the 2D tab the bar is full at a laptop's width - the
+   brand and the presets already give way - so the readout sits at the right end of the
+   mill line's heading instead, the top right of the content. */
+#topbar-mesh { display: none; margin-left: auto; flex: none; font-family: var(--mono); font-size: 11px; padding: 3px 8px; }
+#topbar-mesh i { font-style: normal; color: var(--fg-dim); font-size: 10px; margin-right: 4px; }
+#app.mode-3d #topbar-mesh { display: block; }
+#millline-mesh { margin-left: auto; flex: none; white-space: nowrap; font-family: var(--mono); }
+#millline-mesh::before { content: 'メッシュ '; font-family: var(--sans); color: var(--fg-faint); }
+#millline-mesh:empty { display: none; }
 #topbar .btn { white-space: nowrap; }
 .badge { white-space: nowrap; }
 

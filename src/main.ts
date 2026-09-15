@@ -2999,6 +2999,9 @@ function refreshMeshHint(): void {
     + ` ／ 全自由度 ${(2 * ((params.stripNx + 1) * (params.stripNy + 1) + params.rollNt * (params.rollNr + 1))).toLocaleString()}`
     + ` ／ 解析窓 ${(sim.winIn * 1000).toFixed(2)} 〜 ${(sim.winOut * 1000).toFixed(2)} mm`
     + ` ／ 接触弧に 板 ${Math.round(arc / dx)} 列・ロール ${Math.round(arc / nipPitch)} 節点`;
+  // the top bar's readout: the same mesh, per stand, in a few characters
+  mesh2d = [`板 ${params.stripNx}×${params.stripNy}・ロール ${params.rollNt}×${params.rollNr}（${(params.stripNx * params.stripNy + params.rollNt * params.rollNr).toLocaleString()} 要素／スタンド）`, meshHint.textContent];
+  refreshTopMesh();
   const skinT = sim.skinThicknessEff;
   skinHint.textContent = skinT > 0 && params.rollSkinRings > 0
     ? `ロール表層 ${(skinT * 1000).toFixed(3)} mm を ${params.rollSkinRings} 分割`
@@ -3164,10 +3167,23 @@ window.addEventListener('resize', () => { layout.refresh(); relayout(); view3d?.
 
 /* ── the 2D / 3D tabs ────────────────────────────────────────────────────── */
 
+/* ── the mesh readouts, top right: the 3D tab's in the bar, the 2D tab's on the mill line's heading ── */
+const topMesh = document.getElementById('topbar-mesh') as HTMLElement;
+const topMeshText = topMesh.querySelector('span') as HTMLElement;
+const millMesh = document.getElementById('millline-mesh') as HTMLElement;
+let mesh2d: [string, string] = ['', ''], mesh3d: [string, string] = ['', ''];
+const refreshTopMesh = () => {
+  if (topMeshText.textContent !== mesh3d[0]) topMeshText.textContent = mesh3d[0];
+  topMesh.title = mesh3d[1];
+  if (millMesh.textContent !== mesh2d[0]) millMesh.textContent = mesh2d[0];
+  millMesh.title = mesh2d[1];
+};
 const view3d: View3DHandle = installView3D(document.getElementById('view3d') as HTMLElement, {
   initialMill: Q.mill as MillType | undefined,
+  onMesh: (text, detail) => { mesh3d = [text, detail]; refreshTopMesh(); },
 });
 view3dRef = view3d;
+refreshTopMesh();
 {
   const appEl = document.getElementById('app') as HTMLElement;
   const tabs = document.getElementById('mode-tabs') as HTMLElement;
@@ -3175,6 +3191,7 @@ view3dRef = view3d;
     appEl.classList.toggle('mode-3d', mode === '3d');
     [...tabs.children].forEach((b) => b.classList.toggle('active', (b as HTMLElement).dataset.mode === mode));
     view3d.setActive(mode === '3d');
+    refreshTopMesh();
     if (mode === '2d') { layout.refresh(); relayout(); }
     // the handles measure the panels, which have just changed; after the
     // browser has laid the new ones out
