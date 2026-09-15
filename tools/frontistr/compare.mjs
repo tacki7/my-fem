@@ -9,34 +9,28 @@
 // Indentation is read as the bottom surface's rise against the top surface's: in a solid the
 // bending's transverse (Poisson) strain, −ν κ R²/2, moves both surfaces against the axis by the
 // same amount, and that reading cancels it (the roll model's flattening is the local part only).
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { readResult, compare2hi, TONF } from './lib.mjs';
 const dir = process.argv[2] ?? new URL('run/2hi', import.meta.url).pathname;
 const ref = JSON.parse(readFileSync(`${dir}/reference.json`, 'utf8'));
-const resFile = readdirSync(dir).filter((f) => /^roll\.res\.0\.\d+$/.test(f)).sort((a, b) => Number(a.split('.').pop()) - Number(b.split('.').pop())).pop();
-const res = parseRes(readFileSync(`${dir}/${resFile}`, 'utf8'));
-const TONF = 9.80665e3;
+const { resFile, res } = readResult(dir);
 const um = (v) => (v === null || v === undefined ? '       —' : (v * 1e6).toFixed(1).padStart(8));
 const kn = (v) => (v === null || v === undefined ? '       —' : (v / 1e6).toFixed(2).padStart(8));
 const mm = (v) => (v * 1e3).toFixed(1).padStart(8);
 const disp = (n) => res.node.get(n).DISPLACEMENT;
 const W = ref.WR;
 console.log(`${ref.mill}: F ${(ref.force / TONF).toFixed(1)} tonf, quarter strip load ${(ref.loadSumY / TONF).toFixed(2)} tonf; FEM ${ref.mesh.map((m) => `${m.name} ${m.nodes}`).join(' + ')} nodes (${resFile})`);
-const reaction = (nodes) => { let r = 0; for (const n of nodes) r += res.node.get(n).REACTION?.[1] ?? 0; return r; };
+const reaction = (nodes) => { let r = 0; for (const n of nodes) r += ((res.node.get(n).REACTION_FORCE ?? res.node.get(n).REACTION)?.[1] ?? 0); return r; };
 
 if (ref.mill === '2hi') {
-  const vB = disp(W.nodes.axis[W.iSupport])[1];
-  console.log(`  bearing reaction (FEM) ${(reaction(W.nodes.support) / TONF).toFixed(2)} tonf against the quarter load ${(ref.loadSumY / TONF).toFixed(2)}`);
+  const C = compare2hi(ref, res);
+  console.log(`  bearing reaction (FEM) ${(C.bearingReaction / TONF).toFixed(2)} tonf against the quarter load ${(ref.loadSumY / TONF).toFixed(2)}`);
   console.log('    x [mm]   q [kN/mm]   b [mm] | axis v − v(bearing) [µm]: model    FEM    diff | flattening [µm]: model  FEM(bottom−top)  diff  (bottom−axis)');
-  let worstV = 0, worstVrel = 0, worstF = 0;
-  for (let i = 0; i < W.x.length; i++) {
-    const a = disp(W.nodes.axis[i]), s = disp(W.nodes.bottom[i]), t = disp(W.nodes.top[i]);
-    const vF = a[1] - vB, flatF = s[1] - t[1], flatA = s[1] - a[1];
-    const vM = W.v[i], fM = W.flat[i], q = W.q[i];
-    console.log(`${mm(W.x[i])} ${kn(q)} ${W.b[i] === null ? '      —' : (W.b[i] * 1e3).toFixed(2).padStart(7)} | ${um(vM)} ${um(vF)} ${vM === null ? '       —' : um(vF - vM)} | ${um(fM)} ${um(flatF)} ${fM === null ? '       —' : um(flatF - fM)}  (${um(flatA)})`);
-    if (vM !== null) { worstV = Math.max(worstV, Math.abs(vF - vM)); if (Math.abs(vM) > 1e-4) worstVrel = Math.max(worstVrel, Math.abs(vF - vM) / Math.abs(vM)); }
-    if (fM !== null && q > 0) worstF = Math.max(worstF, Math.abs(flatF - fM));
+  for (let i = 0; i < C.x.length; i++) {
+    const vM = C.vModel[i], vF = C.vFem[i], fM = C.flatModel[i], fF = C.flatFem[i];
+    console.log(`${mm(C.x[i])} ${kn(C.q[i])} ${C.b[i] === null ? '      —' : (C.b[i] * 1e3).toFixed(2).padStart(7)} | ${um(vM)} ${um(vF)} ${vM === null ? '       —' : um(vF - vM)} | ${um(fM)} ${um(fF)} ${fM === null ? '       —' : um(fF - fM)}  (${um(C.flatAxis[i])})`);
   }
-  console.log(`max |diff|: deflection ${(worstV * 1e6).toFixed(1)} µm (${(worstVrel * 100).toFixed(1)} % of the model's where |v| > 100 µm), flattening ${(worstF * 1e6).toFixed(1)} µm`);
+  console.log(`max |diff|: deflection ${(C.worst.v * 1e6).toFixed(1)} µm (${(C.worst.vRel * 100).toFixed(1)} % of the model's where |v| > 100 µm), flattening ${(C.worst.flat * 1e6).toFixed(1)} µm`);
 } else {
   const Bk = ref.BUR, C = ref.contact;
   const vBrg = disp(Bk.nodes.axis[Bk.iSupport])[1];
@@ -80,27 +74,4 @@ if (ref.mill === '2hi') {
     console.log(cols.join(' '));
   }
   console.log(`max |diff|: WR axis ${(worst.wr * 1e6).toFixed(1)} µm, BUR axis ${(worst.bur * 1e6).toFixed(1)} µm, contact load ${(worst.q / 1e6).toFixed(2)} kN/mm, exit profile ${(worst.prof * 1e6).toFixed(1)} µm`);
-}
-
-/** the fstrresult 2.0 text: per node, the labelled vectors */
-function parseRes(text) {
-  const L = text.split('\n');
-  let i = L.indexOf('*data') + 1;
-  const [nn] = L[i++].split(/\s+/).filter(Boolean).map(Number);
-  const [nNodeTypes] = L[i++].split(/\s+/).filter(Boolean).map(Number);
-  const sizes = L[i++].split(/\s+/).filter(Boolean).map(Number);
-  const labels = [];
-  for (let k = 0; k < nNodeTypes; k++) labels.push(L[i++].trim());
-  const per = sizes.reduce((a, b) => a + b, 0);
-  const node = new Map();
-  for (let n = 0; n < nn; n++) {
-    const id = Number(L[i++].trim());
-    const vals = [];
-    while (vals.length < per) vals.push(...L[i++].split(/\s+/).filter(Boolean).map(Number));
-    const rec = {};
-    let o = 0;
-    labels.forEach((lab, k) => { rec[lab] = vals.slice(o, o + sizes[k]); o += sizes[k]; });
-    node.set(id, rec);
-  }
-  return { node, labels };
 }
