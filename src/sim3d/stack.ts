@@ -578,6 +578,10 @@ export function solvedRolls(st: Stack): {
  * contact has to be tangent (its two circles meet), and any other pair has
  * to keep the clearance - two rolls that meet without a contact between
  * them would be pushing on each other with nothing in the model to say so.
+ * And no roll but the work roll (`rolls[0]`) may reach below the work roll's
+ * underside, the pass line: the strip runs there. The minimum wrap angle
+ * keeps the first intermediates clear of each other, not of the strip - on a
+ * small work roll they come down past it (a 12Hi with a 40 mm WR, 8.9 mm).
  */
 export function layoutIssues(rolls: RollDef[], contacts: ContactDef[], clearance: number): string[] {
   const out: string[] = [];
@@ -596,6 +600,11 @@ export function layoutIssues(rolls: RollDef[], contacts: ContactDef[], clearance
         out.push(`${A.id}–${B.id}: 隙間 ${mm(gap)} < クリアランス ${mm(clearance)}`);
       }
     }
+  }
+  const pass = rolls[0].cy - rolls[0].D / 2;
+  for (let i = 1; i < rolls.length; i++) {
+    const r = rolls[i], depth = pass - (r.cy - r.D / 2);
+    if (depth > 1e-9) out.push(`${r.id}: パスライン（WR の下端）より ${mm(depth)} 下に出ている`);
   }
   return out;
 }
@@ -620,14 +629,26 @@ export function onBarrel(r: RollDef, x: number): boolean {
   return Math.abs(x - r.shift) <= r.Lb / 2;
 }
 
+/** the share of a shaft's support length the saddles are spread over, end saddle to end saddle */
+const SADDLE_SPREAD = 0.92;
+
 /** the saddle positions of a shaft (mill coordinates), as the solver places them */
 export function saddleXs(r: RollDef): number[] {
   const out: number[] = [];
   for (let k = 0; k < r.saddles; k++) {
     const t = r.saddles === 1 ? 0 : -1 + (2 * k) / (r.saddles - 1);
-    out.push(r.shift + ((t * r.Ls) / 2) * 0.92);
+    out.push(r.shift + ((t * r.Ls) / 2) * SADDLE_SPREAD);
   }
   return out;
+}
+
+/**
+ * The distance between neighbouring saddles on a shaft of support length `Ls` with `saddles`
+ * saddles (see `saddleXs`) [m]. A bearing gap this wide or wider leaves no bearing ring between
+ * them.
+ */
+export function saddlePitch(Ls: number, saddles: number): number {
+  return saddles > 1 ? (SADDLE_SPREAD * Ls) / (saddles - 1) : Infinity;
 }
 
 /**

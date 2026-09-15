@@ -43,7 +43,7 @@ import {
   sliceLoad, sliceTension, springback, kfMean, kfExitOf, kfAt, TENSION_CAP, type StripLaw,
 } from './strip';
 import {
-  buildStack, solvedRolls, radiusProfile, onBarrel, saddleXs, type Params3D, type Stack, type RollDef,
+  buildStack, solvedRolls, radiusProfile, onBarrel, saddleXs, saddlePitch, type Params3D, type Stack, type RollDef,
 } from './stack';
 
 const DOF = 4;
@@ -272,7 +272,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   tensionYield: `張力が降伏に近い（設定張力が変形抵抗の ${Math.round(TENSION_YIELD_FRAC * TENSION_CAP * 100)} % 超）`,
   stuck: '未収束（残差が下がらない）',
   target: '制御目標に届かない',
-  layout: 'ロール配置が成立していない（端面図の赤い線）',
+  layout: 'ロール配置が成立していない（個々の指摘は隣のチップ。ロールどうしの干渉は端面図の赤い線）',
   openContact: '上下のロールが離れている接触がある（端面図の破線）',
   fem: '材料 FEM が反復上限で打ち切り（結果は近似）',
   wrTouch: '板の外で上下のワークロール同士が接触している（対称モデルは考慮しない — 荷重配分が実機と変わる）',
@@ -669,6 +669,16 @@ export class StackSolver {
         c.weight[s] = Math.max(0, w);
       }
     }
+    // A segmented shaft whose saddle gaps leave no bearing ring: every contact of it carries no
+    // width anywhere, so the shaft supports nothing and the solve goes on as if it were not
+    // there. Reported with the layout's own complaints (a setting, see `settingsWarnings`).
+    rolls.forEach((r, i) => {
+      if (r.bearingGap <= 0) return;
+      const own = this.contacts.filter((c) => c.a === i || c.b === i);
+      if (own.length === 0 || own.some((c) => c.weight.some((w) => w > 0))) return;
+      const mm = (v: number) => `${(v * 1e3).toFixed(1)} mm`;
+      this.stack.issues.push(`${r.id}: 軸受リングが 1 つも残らない（サドル幅 ${mm(r.bearingGap)}、サドル間隔 ${mm(saddlePitch(r.Ls, r.saddles))}。接触が全区間で 0）`);
+    });
     for (const c of this.contacts) {
       c.law.ring1 = this.ringFor(rolls[c.a]);
       c.law.ring2 = this.ringFor(rolls[c.b]);
