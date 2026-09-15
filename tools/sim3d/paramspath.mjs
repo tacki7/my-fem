@@ -3,6 +3,7 @@
 //
 //   node tools/sim3d/paramspath.mjs              exit 1 on any FAIL
 //   node tools/sim3d/paramspath.mjs --measure    print every margin, hold nothing
+//   node tools/sim3d/paramspath.mjs width        only the cases whose 'mill label' contains the text
 //
 // `setParams` rebuilds the mesh only when `geometryKey` changes; everything else is refreshed in
 // place (`refreshProfiles`). An input read only by the rebuild - the contacts' normals and their
@@ -24,6 +25,7 @@ import { StackSolver } from './build/solver.js';
 import { defaultParams } from './build/stack.js';
 
 const MEASURE = process.argv.includes('--measure');
+const ONLY = process.argv.slice(2).find((a) => !a.startsWith('--'));
 const GRID = { stations: 81, stripStations: 0, stripNz: 8 };
 const TONF = 9.80665e3;
 const DEG = Math.PI / 180;
@@ -58,6 +60,20 @@ const MILLS = [
     ],
   },
   {
+    // the strip on its own cells: the grid then follows the width (on the even grid above it does not)
+    mill: '4hi strip cells', millType: '4hi', base: { stripStations: 71 },
+    cases: [
+      ['width 1050 mm', { width: 1.05 }],
+    ],
+  },
+  {
+    // a bender on the work roll's chocks: its force sits at the supports the span places
+    mill: '4hi bender', millType: '4hi', base: { wrBender: 50 * TONF },
+    cases: [
+      ['wrLs 2000 mm', { wrLs: 2.0 }],
+    ],
+  },
+  {
     mill: '4hi housing', millType: '4hi', base: { housingMode: true },
     cases: [
       ['housingPostArea 0.25 m²', { housingPostArea: 0.25 }],
@@ -70,6 +86,7 @@ const MILLS = [
     cases: [
       ['irShift +50 mm', { irShift: 0.05 }],
       ['irShift -50 mm', { irShift: -0.05 }],
+      ['width 1050 mm', { width: 1.05 }],
       ['irD 450 mm', { irD: 0.45 }],
       ['irDn 250 mm', { irDn: 0.25 }],
       ['irLb 1600 mm', { irLb: 1.6 }],
@@ -140,9 +157,11 @@ let count = 0;
 for (const m of MILLS) {
   const type = m.millType ?? m.mill;
   const params = (patch) => ({ ...defaultParams(type), ...GRID, ...m.base, ...patch });
-  const walker = new StackSolver(params({}));
+  const cases = m.cases.filter(([label]) => !ONLY || `${m.mill} ${label}`.includes(ONLY));
+  if (!cases.length) continue;
+  let walker = new StackSolver(params({}));
   settle(walker);
-  for (const [label, patch] of m.cases) {
+  for (const [label, patch] of cases) {
     walker.setParams(params({}));
     settle(walker);
     const p = params(patch);
@@ -152,7 +171,14 @@ for (const m of MILLS) {
     const itFresh = settle(fresh);
     const a = walker.result, b = fresh.result;
     const name = `${m.mill} ${label}`;
-    if (!a.converged || !b.converged) { fails++; console.log(`FAIL  ${name}: did not converge (moved ${a.converged}, fresh ${b.converged})`); continue; }
+    if (!a.converged || !b.converged) {
+      fails++;
+      console.log(`FAIL  ${name}: did not converge (moved ${a.converged}, fresh ${b.converged})`);
+      // a walker that lost its way would fail every case after it: start the next one afresh
+      walker = new StackSolver(params({}));
+      settle(walker);
+      continue;
+    }
     const detail = `moved ${itMoved} / fresh ${itFresh} it; C25 ${(a.crown * 1e6).toFixed(3)} / ${(b.crown * 1e6).toFixed(3)} µm, latent ${a.latentIU.toFixed(1)} / ${b.latentIU.toFixed(1)}`;
     hold(`${name}: load`, Math.abs(a.force / b.force - 1), TOL.force, detail);
     hold(`${name}: screw`, Math.abs(a.screw - b.screw), TOL.len, detail);
