@@ -53,7 +53,15 @@ const saveFolded = () => {
 const foldedThisVisit = new Map<string, boolean>();
 
 export function section(
-  title: string, opts: { open?: boolean; hint?: string; remember?: boolean } = {},
+  title: string,
+  opts: {
+    open?: boolean; hint?: string; remember?: boolean;
+    /**
+     * Called after the reader folds (false) or opens (true) the section. A canvas in a folded
+     * section has no size, so a view that skipped drawing while it was folded redraws on open.
+     */
+    onToggle?: (open: boolean) => void;
+  } = {},
 ): SectionHandle {
   const root = el('section', 'panel-section');
   const head = el('div', 'panel-head');
@@ -79,6 +87,7 @@ export function section(
     btn.setAttribute('aria-expanded', String(!nowShut));
     store.set(title, nowShut);
     if (remember) saveFolded();
+    opts.onToggle?.(!nowShut);
   });
   return { root, body };
 }
