@@ -108,8 +108,16 @@ export interface Params3D {
   width: number;
   h0: number;
   reduction: number;
-  /** entry thickness crown, centre minus edge [m] */
+  /** entry thickness crown, centre minus edge [m] - of the parabola; the edge drop comes on top */
   entryCrown: number;
+  /**
+   * Entry edge drop: how much thinner the incoming strip is at its edges than the
+   * crown's parabola [m] (negative: thicker, an edge build-up), fading out over
+   * `entryEdgeDropWidth` from each edge (see `entryThickness`)
+   */
+  entryEdgeDrop: number;
+  /** the band from each edge the entry edge drop runs over [m]; at most half the width counts */
+  entryEdgeDropWidth: number;
   backTension: number;
   frontTension: number;
   lmnL: number;
@@ -253,7 +261,7 @@ export const ASU_RACKS = 7;
 export function defaultParams(mill: MillType): Params3D {
   const base: Params3D = {
     mill,
-    width: 1.0, h0: 0.002, reduction: 0.25, entryCrown: 30e-6,
+    width: 1.0, h0: 0.002, reduction: 0.25, entryCrown: 30e-6, entryEdgeDrop: 0, entryEdgeDropWidth: 50e-3,
     backTension: 50e6, frontTension: 80e6,
     lmnL: 1200e6, lmnM: 0.010, lmnN: 0.255, entryStrain: 0,
     mu: 0.06, Estrip: 206e9, nuStrip: 0.3,

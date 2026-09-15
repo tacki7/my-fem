@@ -253,6 +253,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
   into(gLoad, 'relief', '張力による降伏緩和 σ̄t/k̄f', '%');
   into(gShape, 'crown', 'クラウン C25', 'µm'); into(gShape, 'wedge', 'ウェッジ', 'µm'); into(gShape, 'edge', 'エッジドロップ L / R', 'µm');
+  into(gShape, 'shape0', '入側 C25 / エッジドロップ', 'µm');
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
   into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
   into(gNum, 'grid', '幅方向 節点 板上 / 全');
@@ -531,7 +532,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
     stripSec.body.append(num('width', '板幅', 'mm', 300, 1600, 10, 1e-3, 'WR の胴長を超えると警告が出る（胴からはみ出した板は圧延されず、計算にも入らない）。'));
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
-    stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差。出側クラウン比が入側と一致すれば平坦。'));
+    stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差（放物線）。板端だけが急に薄くなる分は下の「入側エッジドロップ」で足す。出側クラウン比が入側と一致すれば平坦。'));
+    stripSec.body.append(num('entryEdgeDrop', '入側エッジドロップ', 'µm', -100, 200, 2, 1e-6, '板端での落ち込み: 板端が放物線（入側クラウン）よりどれだけ薄いか。板端から「エッジドロップ 範囲」の内側で 0、そこから板端へ距離の 2 乗で深くなる（範囲の内端で傾き 0、板端で最も急）。負は板端が厚い（エッジアップ）。出側と同じ読み方（板端から 100 mm と 15 mm の板厚の差、放物線の分を含む）の入側の値は右の「板形状 ▸ 入側 C25 / エッジドロップ」。'));
+    stripSec.body.append(num('entryEdgeDropWidth', 'エッジドロップ 範囲', 'mm', 5, 300, 5, 1e-3, '入側エッジドロップが始まる位置の板端からの距離（板幅の半分まで）。狭いほど板端で急に落ちる。板上の節点間隔（3D 図の左上「分割数」の材料の括弧内）の数倍はないと、落ち込みが数点でしか表せない。'));
     stripSec.body.append(num('backTension', '後方張力', 'MPa', 0, 300, 5, 1e6));
     stripSec.body.append(num('frontTension', '前方張力', 'MPa', 0, 300, 5, 1e6, '幅方向の平均値。分布は伸び差から決まる。'));
     stripSec.body.append(num('mu', '摩擦係数 μ', '', 0.01, 0.3, 0.005, 1));
@@ -785,6 +788,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('crown', (R.crown * 1e6).toFixed(1));
     stats.set('wedge', (R.wedge * 1e6).toFixed(1));
     stats.set('edge', `${(R.edgeDropL * 1e6).toFixed(1)} / ${(R.edgeDropR * 1e6).toFixed(1)}`);
+    stats.set('shape0', `${(R.crown0 * 1e6).toFixed(1)} / ${(R.edgeDrop0 * 1e6).toFixed(1)}`);
     stats.set('latent', R.latentIU.toFixed(0), R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
     stats.set('manifest', R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
     stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);

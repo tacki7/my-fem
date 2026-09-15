@@ -157,6 +157,22 @@ const Y_REUSE = 3;
 const USE_WOODBURY = TENSION_COUPLING === 'full';
 
 /**
+ * The incoming strip's thickness at x, |x| ≤ width/2 [m]: the crown's parabola, h₀ − C·(2x/W)²,
+ * less the edge drop D, which runs over a band b = `entryEdgeDropWidth` in from each edge (b at
+ * most half the width) and at a distance d from the nearer edge is D·(1 − d/b)² - all of D at
+ * the edge, falling off to nothing at the band's inner end with no kink there. A slice takes the
+ * value at its station, as it always took the parabola's.
+ */
+export function entryThickness(p: Params3D, x: number): number {
+  const t = (2 * x) / p.width;
+  const h = p.h0 - p.entryCrown * t * t;
+  const band = Math.min(p.entryEdgeDropWidth, p.width / 2);
+  if (!(p.entryEdgeDrop !== 0 && band > 0)) return h;
+  const u = Math.min(1, Math.max(0, 1 - (p.width / 2 - Math.abs(x)) / band));
+  return h - p.entryEdgeDrop * u * u;
+}
+
+/**
  * The stress of a buckled strip slice at a free stress f below the buckling limit −σcr (see
  * `stripSolve`), and the law's slope: −σcr + k(f + σcr) on the linear law, −√(σcr² + k·σcr·(−σcr − f))
  * on the effective width's, never below −hi. k = 0 is the clamp at −σcr.
@@ -265,6 +281,9 @@ export interface Result3D {
   wedge: number;
   edgeDropL: number;
   edgeDropR: number;
+  /** the entry's crown and edge drop as the exit's are read (the entry is symmetric: both edges' mean) [m] */
+  crown0: number;
+  edgeDrop0: number;
   /** how much the tension lowers the yield pressure: σ̄t / k̄f over the loaded slices (0 with the feedback off; the equivalent tension with the tensions split) */
   yieldRelief: number;
   /**
@@ -630,8 +649,7 @@ export class StackSolver {
       const w = overlap(cell(s), strip);
       if (w <= 0 || !wr || !onBarrel(wr, this.x[s])) continue;
       const xc = Math.max(strip[0], Math.min(strip[1], this.x[s]));
-      const t = (2 * xc) / p.width;
-      const h0 = p.h0 - p.entryCrown * t * t;
+      const h0 = entryThickness(p, xc);
       const prev = old.get(s);
       this.slices.push({
         s, x: xc, weight: w, h0,
@@ -1985,7 +2003,7 @@ export class StackSolver {
     return {
       x: this.x, rolls: this.rolls.slice(0, up), contacts: this.contacts.filter((c) => c.a < up && c.b < up),
       h0: nan(), h1: nan(), q: nan(), flat: nan(), dEps: nan(), manifest: nan(), sigmaF: nan(),
-      force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0,
+      force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0, crown0: 0, edgeDrop0: 0,
       profile: { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) },
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
       iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
@@ -2148,6 +2166,11 @@ export class StackSolver {
     R.wedge = at(-W / 2 + 0.025) - at(W / 2 - 0.025);
     R.edgeDropL = at(-W / 2 + 0.1) - at(-W / 2 + 0.015);
     R.edgeDropR = at(W / 2 - 0.1) - at(W / 2 - 0.015);
+    {
+      const in0 = (x: number) => this.sliceAt(x, (sl) => sl.h0);
+      R.crown0 = in0(0) - 0.5 * (in0(-W / 2 + 0.025) + in0(W / 2 - 0.025));
+      R.edgeDrop0 = 0.5 * (in0(-W / 2 + 0.1) - in0(-W / 2 + 0.015) + in0(W / 2 - 0.1) - in0(W / 2 - 0.015));
+    }
     R.latentIU = Number.isFinite(lat1 - lat0) ? (lat1 - lat0) * 1e5 : 0;
     {
       let rel = 0, n = 0;
@@ -2285,16 +2308,21 @@ export class StackSolver {
 
   /** exit thickness at x by linear interpolation between slices */
   private h1At(x: number): number {
+    return this.sliceAt(x, (sl) => sl.h1);
+  }
+
+  /** a slice quantity at x by linear interpolation between slices (held flat past the outermost) */
+  private sliceAt(x: number, f: (sl: Slice) => number): number {
     const sl = this.slices;
     if (sl.length === 0) return this.p.h0;
-    if (x <= sl[0].x) return sl[0].h1;
+    if (x <= sl[0].x) return f(sl[0]);
     for (let i = 1; i < sl.length; i++) {
       if (x <= sl[i].x) {
         const t = (x - sl[i - 1].x) / (sl[i].x - sl[i - 1].x || 1);
-        return sl[i - 1].h1 + t * (sl[i].h1 - sl[i - 1].h1);
+        return f(sl[i - 1]) + t * (f(sl[i]) - f(sl[i - 1]));
       }
     }
-    return sl[sl.length - 1].h1;
+    return f(sl[sl.length - 1]);
   }
 
   get isConverged(): boolean { return this.converged; }
