@@ -617,6 +617,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('irD', params.mill === '20hi' ? '第1中間 直径' : 'IR 直径', 'mm', 50, 900, 5, 1e-3));
       geoSec.body.append(num('irLb', params.mill === '20hi' ? '第1中間 胴長' : 'IR 胴長', 'mm', 500, 2500, 10, 1e-3));
       geoSec.body.append(num('irLs', params.mill === '20hi' ? '第1中間 支持スパン' : 'IR 支持スパン', 'mm', 600, 3000, 10, 1e-3, SPAN_HINT));
+      // the neck had no dial: a thinner IR pulled it down (the bound), and it stayed thin when the IR grew back
+      geoSec.body.append(num('irDn', params.mill === '20hi' ? '第1中間 ネック径' : 'IR ネック径', 'mm', 20, 700, 5, 1e-3, NECK_HINT));
     }
     if (params.mill === '20hi') {
       geoSec.body.append(num('ir2D', '第2中間 直径', 'mm', 80, 400, 5, 1e-3));
