@@ -8,7 +8,7 @@
  * once the solve has settled.
  */
 
-import { StackSolver, WARNING_TEXT, type Warning3D } from '../sim3d/solver';
+import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, type Warning3D } from '../sim3d/solver';
 import { RemainingTime, type Eta } from '../sim3d/eta';
 import {
   defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
@@ -54,6 +54,8 @@ const PRESETS: Preset3D[] = [
 ];
 /** solve time allowed per frame [ms] */
 const FRAME_BUDGET = 14;
+/** rows of the right panel's 板形状 and 解析 grids that the settings decide (the rest are results, faded when not this setting's) */
+const SETTING_ROWS = new Set(['shape0', 'conv', 'dof', 'grid']);
 /** a gap between solving frames longer than this is a pause or a hidden tab, not part of the solve [ms] */
 const ETA_GAP_MS = 1000;
 
@@ -261,9 +263,13 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const numSec2 = section('解析', { open: false, onToggle: redrawOnOpen, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
   const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
   const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
+  // each row of the 板形状 and 解析 grids, to fade the results in them row by row (see `SETTING_ROWS`)
+  const rowFade = new Map<string, HTMLElement>();
   const into = (g: HTMLElement, key: string, label: string, unit?: string) => {
     stats.add(key, label, unit);
-    g.append(stats.root.lastElementChild!);
+    const row = stats.root.lastElementChild as HTMLElement;
+    if (g !== gLoad) rowFade.set(key, row);
+    g.append(row);
   };
   into(gLoad, 'force', '圧延荷重', 'tonf'); into(gLoad, 'screw', '圧下位置 S', 'mm'); into(gLoad, 'h1', '出側板厚 平均 / 中央', 'mm');
   into(gLoad, 'relief', '張力による降伏緩和 σ̄t/k̄f', '%');
@@ -867,26 +873,34 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     }
 
-    // stats
-    stats.set('force', (R.force / TONF).toFixed(1));
-    stats.set('screw', (R.screw * 1e3).toFixed(3));
+    // stats: the result rows read "—" until the first iteration on this mesh (the empty result's
+    // zeros - a 0 tonf load, h₁ = h₀, a green flatness of 0 - are not a result); the rows the
+    // settings alone decide are shown from them at once
+    const none = R.iterations === 0;
+    const dash = (text: string) => (none ? '—' : text);
+    stats.set('force', dash((R.force / TONF).toFixed(1)));
+    stats.set('screw', params.mode === 'screw' ? (params.screw * 1e3).toFixed(3) : dash((R.screw * 1e3).toFixed(3)));
     // the greyed screw dial reads the position the solve is at, so a switch to the manual
     // mode starts from it (only rewritten when it moved: a DOM write a frame is not free)
     if (params.mode !== 'screw' && Number.isFinite(R.screw) && !(Math.abs(R.screw - screwShown) <= 1e-9)) {
       screwShown = R.screw;
       dials.get('screw')?.set(R.screw);
     }
-    stats.set('relief', params.tensionFeedback ? (R.yieldRelief * 100).toFixed(1) : 'OFF');
-    stats.set('h1', `${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`);
-    stats.set('crown', (R.crown * 1e6).toFixed(1));
-    stats.set('wedge', (R.wedge * 1e6).toFixed(1));
-    stats.set('edge', `${(R.edgeDropL * 1e6).toFixed(1)} / ${(R.edgeDropR * 1e6).toFixed(1)}`);
-    stats.set('shape0', `${(R.crown0 * 1e6).toFixed(1)} / ${(R.edgeDrop0 * 1e6).toFixed(1)}`);
-    stats.set('latent', R.latentIU.toFixed(0), R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
-    stats.set('manifest', R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
+    stats.set('relief', params.tensionFeedback ? dash((R.yieldRelief * 100).toFixed(1)) : 'OFF');
+    stats.set('h1', dash(`${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`));
+    stats.set('crown', dash((R.crown * 1e6).toFixed(1)));
+    stats.set('wedge', dash((R.wedge * 1e6).toFixed(1)));
+    stats.set('edge', dash(`${(R.edgeDropL * 1e6).toFixed(1)} / ${(R.edgeDropR * 1e6).toFixed(1)}`));
+    {
+      // the entry profile is a setting: read from it now, not from the last solve
+      const entry = solver.entryReadings();
+      stats.set('shape0', `${(entry.crown0 * 1e6).toFixed(1)} / ${(entry.edgeDrop0 * 1e6).toFixed(1)}`);
+    }
+    stats.set('latent', dash(R.latentIU.toFixed(0)), none ? undefined : R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
+    stats.set('manifest', dash(R.manifestIU.toFixed(0)), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
     stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
-    stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
-    stats.set('ms', R.solveMs.toFixed(1));
+    stats.set('iter', dash(`${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
+    stats.set('ms', dash(R.solveMs.toFixed(1)));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
     stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
     {
@@ -906,7 +920,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       const mid = solver.slices[Math.floor(solver.slices.length / 2)];
       const qc = mid?.q ?? 0;
       const b = Math.max(Math.sqrt(solver.wsLaw.bCoef * Math.max(qc, 1)), (mid?.arc ?? 0) / 2);
-      if (inf) {
+      // at the middle slice's load, which there is none of before a solve
+      if (inf && !none) {
         const johnson = ((1 - wr.nu * wr.nu) / (Math.PI * wr.E)) * (2 * Math.log((4 * wr.D) / (2 * b)) - 1);
         stats.set('flatCmp', `${(ringCompliance(inf, b) / johnson).toFixed(3)} (b = ${(b * 1e3).toFixed(1)} mm)`);
       } else stats.set('flatCmp', '—');
@@ -933,7 +948,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
 
     // chips: nothing to show before the first iteration on this mesh, faded while not the current solution
-    const none = R.iterations === 0;
     setChip(chips.mill, MILL_LABEL[params.mill]);
     setChip(chips.force, none ? '—' : (R.force / TONF).toFixed(0));
     setChip(chips.h1, none ? '—' : (R.h1Mean * 1e3).toFixed(3));
@@ -951,25 +965,41 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       staleTag.hidden = !faded;
       const tagText = R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）' : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
       if (staleTag.textContent !== tagText) staleTag.textContent = tagText;
-      for (const e of [chartGrid, loadSec.root, shapeSec.root, numSec2.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
+      for (const e of [chartGrid, loadSec.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
+      // 板形状 and 解析 hold rows the settings decide as well: only the result rows fade
+      for (const [key, row] of rowFade) row.classList.toggle('v3-stale', faded && !SETTING_ROWS.has(key));
     }
     {
       const res = Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—';
       const fem = R.fem ? ` / 補正 ${solver.femLastChange.toExponential(1)}` : '';
-      setChip(chips.res, res + fem, R.converged ? 'ok' : R.residual < 1e-3 ? 'warn' : 'bad');
+      setChip(chips.res, none ? '—' : res + fem, none ? undefined : R.converged ? 'ok' : R.residual < 1e-3 ? 'warn' : 'bad');
     }
     setChip(chips.ms, none ? '—' : R.solveMs.toFixed(0));
     for (const c of [chips.force, chips.h1, chips.crown, chips.manifest, chips.res, chips.ms]) c.classList.toggle('v3-stale', stale && !running);
-    const warns = [...R.warnings.map((w: Warning3D) => WARNING_TEXT[w]), ...R.notes];
-    const want = warns.join('\u0001');
-    if (warnBox.dataset.sig !== want) {
-      warnBox.dataset.sig = want;
-      warnBox.replaceChildren(...warns.map((w) => {
-        const b = el('div', 'badge warn');
-        b.innerHTML = `<b>⚠</b><span></span>`;
-        b.querySelector('span')!.textContent = w;
-        return b;
-      }));
+    {
+      // Two kinds of warning. The settings' own (a strip wider than the barrel, the housing, the
+      // layout, a floored entry profile, a tension near yield) come from the settings as they are
+      // now - shown before a solve and gone as soon as the setting is put right. The solution's
+      // come with the result and fade with it. A warning with numbers shows once, with them.
+      const set = solver.settingsWarnings();
+      const warns = [
+        ...set.keys.map((w) => ({ text: set.details[w] ?? WARNING_TEXT[w], solved: false })),
+        ...set.notes.map((text) => ({ text, solved: false })),
+        ...R.warnings.filter((w: Warning3D) => !SETTINGS_WARNINGS.includes(w)).map((w: Warning3D) => ({ text: R.warningDetails[w] ?? WARNING_TEXT[w], solved: true })),
+      ];
+      const want = warns.map((w) => `${w.solved ? 1 : 0}${w.text}`).join('\u0001');
+      if (warnBox.dataset.sig !== want) {
+        warnBox.dataset.sig = want;
+        warnBox.replaceChildren(...warns.map((w) => {
+          const b = el('div', 'badge warn');
+          b.innerHTML = `<b>⚠</b><span></span>`;
+          b.querySelector('span')!.textContent = w.text;
+          if (w.solved) b.dataset.solved = '';
+          return b;
+        }));
+      }
+      const fadedWarn = stale && !running;
+      for (const b of warnBox.children) if ((b as HTMLElement).dataset.solved !== undefined) b.classList.toggle('v3-stale', fadedWarn);
     }
 
     // contacts + reactions; the grid is rebuilt when the set changes (a new mill)
@@ -987,9 +1017,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       contactGrid = fresh;
       contactKeys = keys;
     }
-    R.contacts.forEach((c) => contactGrid.set(`c:${c.a}-${c.b}`, (c.total / TONF).toFixed(1)));
+    R.contacts.forEach((c) => contactGrid.set(`c:${c.a}-${c.b}`, dash((c.total / TONF).toFixed(1))));
     R.rolls.forEach((r) => {
-      if (r.def.support !== 'free') contactGrid.set(`r:${r.def.id}`, r.reactions.map((v) => (v / TONF).toFixed(0)).join(' / '));
+      if (r.def.support !== 'free') contactGrid.set(`r:${r.def.id}`, dash(r.reactions.map((v) => (v / TONF).toFixed(0)).join(' / ')));
     });
   };
 

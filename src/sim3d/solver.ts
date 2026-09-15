@@ -257,11 +257,19 @@ export interface ContactState {
 }
 
 export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope' | 'housingStrip' | 'entryThin';
+/** `tensionYield` is raised when the larger set tension passes this share of the tension cap `TENSION_CAP`·k̄f */
+const TENSION_YIELD_FRAC = 0.9;
+/**
+ * The warnings the settings alone decide - the parameters and the roll layout, not the solve - in
+ * the order `diagnose` lists them (see `settingsWarnings`). A page can show these before a solve
+ * and drop them the moment the setting is put right; the others describe a solution.
+ */
+export const SETTINGS_WARNINGS: readonly Warning3D[] = ['tensionYield', 'layout', 'stripWide', 'entryThin', 'housingScope', 'housingStrip'];
 export const WARNING_TEXT: Record<Warning3D, string> = {
   stone: 'Stone 限界: 扁平が先行し圧下できない（板厚に対してロール径が大きい）',
   bite: '噛み込み限界超過 (μ < tan α)',
   gapClosed: 'ロールギャップが閉じている（圧下位置が深すぎる）',
-  tensionYield: '張力が降伏に近い（変形抵抗の 70% 超）',
+  tensionYield: `張力が降伏に近い（設定張力が変形抵抗の ${Math.round(TENSION_YIELD_FRAC * TENSION_CAP * 100)} % 超）`,
   stuck: '未収束（残差が下がらない）',
   target: '制御目標に届かない',
   layout: 'ロール配置が成立していない（端面図の赤い線）',
@@ -325,6 +333,8 @@ export interface Result3D {
   converged: boolean;
   /** what is wrong with this pass, if anything - keys, see `WARNING_TEXT` */
   warnings: Warning3D[];
+  /** a warning's text with this pass's numbers in it, where it has some (else `WARNING_TEXT`) */
+  warningDetails: Partial<Record<Warning3D, string>>;
   /** the layout's own complaints, spelled out (see `layoutIssues`) */
   notes: string[];
   /** the strip FEM's last solution, when that model is on */
@@ -2032,7 +2042,7 @@ export class StackSolver {
       force: 0, h1Mean: this.p.h0, h1Centre: this.p.h0, crown: 0, wedge: 0, edgeDropL: 0, edgeDropR: 0, crown0: 0, edgeDrop0: 0,
       profile: { x: new Float64Array(0), latent: new Float64Array(0), wave: new Float64Array(0) },
       latentIU: 0, manifestIU: 0, yieldRelief: 0, screw: this.screw, residual: Infinity, stepMax: Infinity,
-      iterations: 0, converged: false, warnings: [], notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
+      iterations: 0, converged: false, warnings: [], warningDetails: {}, notes: [], fem: null, arc: nan(), wrGap: nan(), solveMs: 0, dof: this.u.length, bandwidth: this.K.hb,
       housing: null,
     };
   }
@@ -2193,9 +2203,9 @@ export class StackSolver {
     R.edgeDropL = at(-W / 2 + 0.1) - at(-W / 2 + 0.015);
     R.edgeDropR = at(W / 2 - 0.1) - at(W / 2 - 0.015);
     {
-      const in0 = (x: number) => this.sliceAt(x, (sl) => sl.h0);
-      R.crown0 = in0(0) - 0.5 * (in0(-W / 2 + 0.025) + in0(W / 2 - 0.025));
-      R.edgeDrop0 = 0.5 * (in0(-W / 2 + 0.1) - in0(-W / 2 + 0.015) + in0(W / 2 - 0.1) - in0(W / 2 - 0.015));
+      const entry = this.entryReadings();
+      R.crown0 = entry.crown0;
+      R.edgeDrop0 = entry.edgeDrop0;
     }
     R.latentIU = Number.isFinite(lat1 - lat0) ? (lat1 - lat0) * 1e5 : 0;
     {
@@ -2226,15 +2236,10 @@ export class StackSolver {
       }
     }
     R.housing = this.housingActive() ? this.housingResult() : null;
-    R.warnings = this.diagnose();
-    R.notes = [...this.stack.issues];
-    {
-      const over = this.stripOverhang();
-      if (over > 0) {
-        const wr = this.stack.rolls[this.stack.wr];
-        R.notes.push(`板幅 ${(p_.width * 1e3).toFixed(0)} mm > WR 胴長 ${(wr.Lb * 1e3).toFixed(0)} mm: 胴からはみ出した板 ${(over * 1e3).toFixed(0)} mm（両側合計）は圧延されず、荷重・板厚・形状の計算に入らない`);
-      }
-    }
+    const settings = this.settingsWarnings();
+    R.warnings = this.diagnose(settings.keys);
+    R.warningDetails = { ...settings.details };
+    R.notes = [...settings.notes];
     {
       let xMin = Infinity, xMax = -Infinity, deepest = 0;
       for (let s = 0; s < ns; s++) {
@@ -2243,7 +2248,7 @@ export class StackSolver {
         xMin = Math.min(xMin, this.x[s]); xMax = Math.max(xMax, this.x[s]); deepest = Math.max(deepest, -g / 2);
       }
       if (Number.isFinite(xMin)) {
-        R.notes.push(`WR 同士の接触: x = ${(xMin * 1e3).toFixed(0)}〜${(xMax * 1e3).toFixed(0)} mm（板端 ±${(p_.width / 2 * 1e3).toFixed(0)} mm の外）、板厚中央面への食い込み 最大 ${(deepest * 1e6).toFixed(0)} µm`);
+        R.warningDetails.wrTouch = `板の外で上下のワークロール同士が接触している: x = ${(xMin * 1e3).toFixed(0)}〜${(xMax * 1e3).toFixed(0)} mm（板端 ±${(p_.width / 2 * 1e3).toFixed(0)} mm の外）、板厚中央面への食い込み 最大 ${(deepest * 1e6).toFixed(0)} µm（対称モデルは考慮しない — 荷重配分が実機と変わる）`;
       }
     }
     R.residual = this.residual;
@@ -2271,7 +2276,49 @@ export class StackSolver {
     return over > 1e-9 ? over : 0;
   }
 
-  private diagnose(): Warning3D[] {
+  /**
+   * The warnings the settings alone decide (`SETTINGS_WARNINGS`), with the numbers where a warning
+   * has some, and the layout's complaints. Pure, and valid from construction and after every
+   * `setParams` - before any solve - since it reads only the parameters, the stack, the slices'
+   * entry profile and the strip law; `collect` puts the same into the result.
+   */
+  settingsWarnings(): { keys: Warning3D[]; details: Partial<Record<Warning3D, string>>; notes: string[] } {
+    const p = this.p;
+    const keys: Warning3D[] = [];
+    const details: Partial<Record<Warning3D, string>> = {};
+    const e0 = Math.max(p.entryStrain, 0);
+    const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
+    if (Math.max(p.frontTension, p.backTension) > TENSION_YIELD_FRAC * TENSION_CAP * kf) keys.push('tensionYield');
+    if (this.stack.issues.length) keys.push('layout');
+    const over = this.stripOverhang();
+    if (over > 0) {
+      keys.push('stripWide');
+      const wr = this.stack.rolls[this.stack.wr];
+      details.stripWide = `板幅 ${(p.width * 1e3).toFixed(0)} mm が WR 胴長 ${(wr.Lb * 1e3).toFixed(0)} mm より長い（胴からはみ出した板 ${(over * 1e3).toFixed(0)} mm（両側合計）は圧延されず、計算にも入らない）`;
+    }
+    // every slice, loaded or not: a floored edge carries no load while the gap is open
+    if (this.slices.some((sl) => sl.entryFloored)) keys.push('entryThin');
+    if (p.housingMode && !this.housingActive()) keys.push('housingScope');
+    if (this.housingActive() && housingPlan(p, this.rolls[this.screwRolls[0]].def).stripOverlap > 0) keys.push('housingStrip');
+    return { keys, details, notes: [...this.stack.issues] };
+  }
+
+  /**
+   * The entry strip's C25 and edge drop, read as the exit's are (centre − the mean at 25 mm in;
+   * h at 100 mm − h at 15 mm from the edges, linearly between slices). The entry profile is a
+   * setting, so this is valid before any solve; `collect` puts it into the result.
+   */
+  entryReadings(): { crown0: number; edgeDrop0: number } {
+    const W = this.p.width;
+    const in0 = (x: number) => this.sliceAt(x, (sl) => sl.h0);
+    return {
+      crown0: in0(0) - 0.5 * (in0(-W / 2 + 0.025) + in0(W / 2 - 0.025)),
+      edgeDrop0: 0.5 * (in0(-W / 2 + 0.1) - in0(-W / 2 + 0.015) + in0(W / 2 - 0.1) - in0(W / 2 - 0.015)),
+    };
+  }
+
+  /** every warning of this pass: the solution's, with the settings' `settings` (from `settingsWarnings`) in their place in the order */
+  private diagnose(settings: Warning3D[]): Warning3D[] {
     const p = this.p;
     const w: Warning3D[] = [];
     let runaway = 0, closed = 0, bite = 0, loaded = 0;
@@ -2298,15 +2345,7 @@ export class StackSolver {
     }
     if (closed > 0) w.push('gapClosed');
     if (loaded > 0 && bite > loaded / 2) w.push('bite');
-    const e0 = Math.max(p.entryStrain, 0);
-    const kf = kfMean(this.law, e0, e0 + 1.1547 * Math.log(1 / (1 - Math.min(p.reduction, 0.95))));
-    if (Math.max(p.frontTension, p.backTension) > 0.9 * TENSION_CAP * kf) w.push('tensionYield');
-    if (this.stack.issues.length) w.push('layout');
-    if (this.stripOverhang() > 0) w.push('stripWide');
-    // every slice, loaded or not: a floored edge carries no load while the gap is open
-    if (this.slices.some((sl) => sl.entryFloored)) w.push('entryThin');
-    if (p.housingMode && !this.housingActive()) w.push('housingScope');
-    if (this.housingActive() && housingPlan(p, this.rolls[this.screwRolls[0]].def).stripOverlap > 0) w.push('housingStrip');
+    w.push(...settings);
     for (let s = 0; s < this.ns; s++) if (this.result.wrGap[s] <= 0) { w.push('wrTouch'); break; }
     if ((p.stripModel === 'fem' || p.stripModel === 'fem3d') && this.femResult && !this.femResult.converged) w.push('fem');
     // a designated contact carrying nothing once the solve has settled: the
