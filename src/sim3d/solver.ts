@@ -2416,6 +2416,34 @@ export class StackSolver {
     };
   }
   wake(): void { this.converged = false; }
+
+  /**
+   * Start over as a solver just built on the current inputs: the displacements, the screw, the
+   * slices, the strip FEM's correction and solution and every other warm start are dropped, and
+   * the next solve runs as a cold one. `setParams` keeps them on purpose, and `wake` only lowers
+   * the converged flag - neither is a reset (the 3D tab's R used to call those, and the next solve
+   * ended in two iterations on the old answer).
+   */
+  reset(): void {
+    this.housingLoads = [];
+    this.seats = [];
+    this.Ybuf = null;
+    this.tensionLive = false;
+    this.nlLive = false;
+    this.nlChange = 0;
+    this.fem = new StripFem();
+    this.fem3d = new StripFem3D();
+    this.residual = Infinity;
+    this.stepMax = Infinity;
+    this.forceTotal = 0;
+    this.h1Mean = 0;
+    this.targetResidual = 0;
+    this.screw = 0;
+    // no previous mill to carry the screw over from, and a key that cannot match: a new mesh
+    this.stack = undefined as unknown as Stack;
+    this.geomKey = '';
+    this.setParams(this.p);
+  }
 }
 
 /**

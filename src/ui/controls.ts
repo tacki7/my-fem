@@ -388,6 +388,7 @@ export function buttonRow(
 export class StatGrid {
   readonly root: HTMLElement;
   private cells = new Map<string, HTMLElement>();
+  private units = new Map<string, HTMLElement>();
 
   constructor(cls = 'stat-grid') { this.root = el('div', cls); }
 
@@ -397,19 +398,26 @@ export class StatGrid {
     const v = el('span', 'stat-value', '—');
     const wrap = el('span', 'stat-vwrap');
     wrap.append(v);
-    if (unit) wrap.append(el('span', 'stat-unit', unit));
+    if (unit) {
+      const u = el('span', 'stat-unit', unit);
+      wrap.append(u);
+      this.units.set(key, u);
+    }
     row.append(wrap);
     this.root.append(row);
     this.cells.set(key, v);
     return this;
   }
 
-  set(key: string, text: string, tone?: 'ok' | 'warn' | 'bad'): void {
+  /** `unit: false` hides the row's unit, for a text that is not a quantity ('OFF', '—（座なし）') */
+  set(key: string, text: string, tone?: 'ok' | 'warn' | 'bad', unit = true): void {
     const c = this.cells.get(key);
     if (!c) return;
     if (c.textContent !== text) c.textContent = text;
     const want = tone ? `stat-value tone-${tone}` : 'stat-value';
     if (c.className !== want) c.className = want;
+    const u = this.units.get(key);
+    if (u && u.hidden === unit) u.hidden = !unit;
   }
 }
 

@@ -696,7 +696,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 60, 1, Math.PI / 180, '鉛直からの角度。左右の中間ロールが触れ合わない最小角より小さければ、その最小角に引き上げられる（端面図に実際の角を表示）。'));
       geoSec.body.append(num('clearance', '隣接ロールのクリアランス', 'mm', 0.5, 20, 0.5, 1e-3, '同じ段に並ぶロール同士（第1中間の左右、第2中間、バッキング）に空ける隙間。'));
     }
-    geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 5, 1e9));
+    geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 1, 1e9));
     left.append(geoSec.root);
 
     // numerics / display
@@ -892,7 +892,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       screwShown = R.screw;
       dials.get('screw')?.set(R.screw);
     }
-    stats.set('relief', params.tensionFeedback ? dash((R.yieldRelief * 100).toFixed(1)) : 'OFF');
+    stats.set('relief', params.tensionFeedback ? dash((R.yieldRelief * 100).toFixed(1)) : 'OFF', undefined, params.tensionFeedback);
     stats.set('h1', dash(`${(R.h1Mean * 1e3).toFixed(4)} / ${(R.h1Centre * 1e3).toFixed(4)}`));
     {
       // the reduction the pass actually made: at the centre, h₁ centre against h₀ centre; across the
@@ -913,7 +913,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('latent', dash(R.latentIU.toFixed(0)), none ? undefined : R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
     stats.set('manifest', dash(R.manifestIU.toFixed(0)), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
     stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
-    stats.set('iter', dash(`${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
+    stats.set('iter', dash(`${solver.progress().iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
     stats.set('ms', dash(R.solveMs.toFixed(1)));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
     stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
@@ -954,8 +954,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       housingStats.set('hBottom', pair((sd) => sd.crossheadBottom, 1e6, 1));
       housingStats.set('hTilt', (h.burTilt * 1e6).toFixed(1));
       const seats = (from: number) => (h.seatForces.length ? h.seatForces.slice(from, from + 2).map((f) => (f / TONF).toFixed(1)).join(' / ') : '—（座なし）');
-      housingStats.set('hSeatTop', seats(0));
-      housingStats.set('hSeatBottom', seats(2));
+      housingStats.set('hSeatTop', seats(0), undefined, h.seatForces.length > 0);
+      housingStats.set('hSeatBottom', seats(2), undefined, h.seatForces.length > 0);
       housingStats.set('hModulus', (h.millModulus / 1e9).toFixed(2));
     } else if (housingSec.root.isConnected) {
       housingSec.root.remove();
@@ -977,7 +977,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       // results that are not this setting's solution are faded until a solve has run on it
       const faded = stale && !running;
       staleTag.hidden = !faded;
-      const tagText = R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）' : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
+      const tagText = iterated ? '停止中: 今の条件を途中まで解いた変形と荷重（「計算再開」で続き）'
+        : R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）'
+          : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
       if (staleTag.textContent !== tagText) staleTag.textContent = tagText;
       for (const e of [chartGrid, loadSec.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
       // 板形状 and 解析 hold rows the settings decide as well: only the result rows fade
@@ -1107,14 +1109,24 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     relayout() { dirty = true; },
   };
 
-  // keyboard: space pauses the solve on this tab too
+  // keyboard: Space starts or stops the solve, R starts over, 1-5 pick the mill. A field that takes
+  // typed text keeps its keys (Space, R and the digits are characters there), and a button takes
+  // Space as its own press. A toggle or a slider clicked last keeps the focus but types nothing: the
+  // keys work there too, with the browser's own action - flipping the toggle - held back (it used to
+  // flip the toggle back instead of starting the solve).
   window.addEventListener('keydown', (e) => {
-    if (!active || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.code === 'Space') { e.preventDefault(); if (running) stopSolve(); else startSolve(); }
-    if (e.key === 'r' || e.key === 'R') { solver.setParams(params); solver.wake(); settingsChanged(); }
-    const k = Number(e.key);
-    if (k >= 1 && k <= MILLS.length && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      switchMill(MILLS[k - 1]);
+    if (!active || e.metaKey || e.ctrlKey || e.altKey || takesTyping(e.target)) return;
+    if (e.target instanceof HTMLButtonElement) return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (running) stopSolve(); else startSolve();
+    } else if (e.key === 'r' || e.key === 'R') {
+      e.preventDefault();
+      solver.reset();
+      settingsChanged();
+    } else {
+      const k = Number(e.key);
+      if (k >= 1 && k <= MILLS.length) { e.preventDefault(); switchMill(MILLS[k - 1]); }
     }
   });
   void idleFrames;
@@ -1125,6 +1137,16 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     start: startSolve, stop: stopSolve, get running() { return running; }, get stale() { return stale; },
   };
   return handle;
+}
+
+/** the input types a key press does not type into: the view's keys still work with one of these focused */
+const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']);
+
+/** a field that takes typed text (a text or number box, a textarea, a select, an editable element) */
+function takesTyping(t: EventTarget | null): boolean {
+  if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return true;
+  if (t instanceof HTMLInputElement) return !NON_TEXT_INPUTS.has(t.type);
+  return t instanceof HTMLElement && t.isContentEditable;
 }
 
 function millNote(m: MillType): string {
