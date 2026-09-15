@@ -33,6 +33,14 @@ export function fit(c: HTMLCanvasElement): CanvasRenderingContext2D {
   return ctx;
 }
 
+/**
+ * Whether a canvas of this css size has room to draw in. One in a folded section
+ * (`display: none`) measures 0 and `fit` leaves it 1 × 1: a view's scale, taken from the
+ * size less its padding, comes out negative there, and `arc` throws on a negative radius.
+ * The view draws nothing and is drawn again when the section opens.
+ */
+const hasRoom = (W: number, H: number): boolean => W >= 2 && H >= 2;
+
 export interface XYSeries {
   label: string;
   color: string;
@@ -109,6 +117,7 @@ export class LineChart {
     this.last = { series, o };
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     const padL = 46, padR = 10, padT = 8, padB = 20;
@@ -332,6 +341,7 @@ export class FrontView {
   draw(R: Result3D, stack: Stack, o: FrontViewOpts): void {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     const rolls = R.rolls;
@@ -559,6 +569,7 @@ export class EndView {
   draw(R: Result3D, stack: Stack, width: number, tonf: number): void {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     const rolls = stack.rolls;
@@ -568,7 +579,8 @@ export class EndView {
     const wr = rolls[stack.wr];
     const bottom = -wr.D / 2 - 0.02;
     const pad = 14;
-    const scale = Math.min((W - 2 * pad) / (2 * zmax + 0.02), (H - 2 * pad - 12) / (top - bottom));
+    // never below 0: on a canvas narrower than its padding the circles' radii would be negative
+    const scale = Math.max(0, Math.min((W - 2 * pad) / (2 * zmax + 0.02), (H - 2 * pad - 12) / (top - bottom)));
     const cx = W / 2, cy0 = pad + top * scale;
     const px = (z: number) => cx + z * scale;
     const py = (y: number) => cy0 - y * scale;
@@ -689,6 +701,7 @@ export class SideView {
     const width = p.width;
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     const rolls = stack.rolls;
@@ -933,6 +946,7 @@ export class SectionView {
   draw(inf: RingInfluence | undefined, q: number, magnify: number, label: string): void {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     ctx.font = FONT;
@@ -944,7 +958,8 @@ export class SectionView {
       return;
     }
     const pad = 14;
-    const scale = (Math.min(W, H) / 2 - pad) / inf.R;
+    // never below 0: on a canvas smaller than its padding the rings' radii would be negative
+    const scale = Math.max(0, (Math.min(W, H) / 2 - pad) / inf.R);
     const cx = W / 2, cy = H / 2;
     const { X, u, rows, cols } = inf;
     const px = (x: number, y: number, ux: number, uy: number, side: 1 | -1): [number, number] =>
@@ -997,6 +1012,7 @@ export class HeatChart {
   ): void {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    if (!hasRoom(W, H)) return;
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
     ctx.font = FONT;

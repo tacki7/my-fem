@@ -254,9 +254,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   // One grid, three sections: the same `set` calls land wherever the row
   // lives, so the split is a matter of which body each row is appended to.
   const stats = new StatGrid();
-  const loadSec = section('荷重・圧下', { open: true });
-  const shapeSec = section('板形状', { open: true });
-  const numSec2 = section('解析', { open: false, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
+  // A view in a folded section skips drawing (its canvas has no size); drawn again when opened.
+  const redrawOnOpen = (open: boolean) => { if (open) dirty = true; };
+  const loadSec = section('荷重・圧下', { open: true, onToggle: redrawOnOpen });
+  const shapeSec = section('板形状', { open: true, onToggle: redrawOnOpen });
+  const numSec2 = section('解析', { open: false, onToggle: redrawOnOpen, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
   const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
   const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
   const into = (g: HTMLElement, key: string, label: string, unit?: string) => {
@@ -270,16 +272,16 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
   into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
   into(gNum, 'grid', '幅方向 節点 板上 / 全');
-  const contactSec = section('接触力・支持反力', { open: true });
+  const contactSec = section('接触力・支持反力', { open: true, onToggle: redrawOnOpen });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
-  const endSec = section('端面図（クラスタ配置）', { open: true });
+  const endSec = section('端面図（クラスタ配置）', { open: true, onToggle: redrawOnOpen });
   const endCanvas = el('canvas');
   endCanvas.id = 'v3-end';
   endSec.body.append(endCanvas);
   const endView = new EndView(endCanvas);
   const sideSec = section('側面図（横から）', {
-    open: true,
+    open: true, onToggle: redrawOnOpen,
     hint: '端面図のロール配置を横（オペレータ側）から見た図。上半分の各ロールの胴・ネックを実寸の比で、ロール軸方向のシフトと支持（□ チョック、赤 ▼ 圧下、黄 ● サドル、緑の矢印 ベンダー）、パスラインの板幅とともに。端面図で同じ高さに並ぶロールは重なって見える（ミル中心線に近いロールが手前）。撓みは正面図、荷重は端面図。',
   });
   const sideCanvas = el('canvas');
@@ -287,7 +289,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   sideSec.body.append(sideCanvas);
   const sideView = new SideView(sideCanvas);
   const secSec = section('ワークロール断面（扁平メッシュ）', {
-    open: true,
+    open: true, onToggle: redrawOnOpen,
     hint: '扁平モデルが「断面 FEM」のときのロール断面リング。板中央の接触線荷重による変形を倍率表示。刻み数は「解析・表示」で。',
   });
   const secCanvas = el('canvas');
@@ -299,7 +301,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   // solve has a housing result - with the mode off, or on a mill outside its
   // scope, the panel reads exactly as it did before the mode existed.
   const housingSec = section('ハウジング', {
-    open: true,
+    open: true, onToggle: redrawOnOpen,
     hint: 'ハウジング変形考慮モードの結果。左右（操作側 −x・駆動側 +x）のハウジング枠それぞれについて、枠が受ける荷重（上下チョック荷重の平均）と窓の開き（ポストの伸び + 上下クロスヘッドのたわみ）。圧下ロールの傾きは駆動側の支持点の鉛直変位 − 操作側。IR チョック座の力は 6Hi で着座 ON のときの圧縮力（上 −x・上 +x・下 −x・下 +x）。ミル剛性は圧延荷重 ÷ 左右の窓の開きの平均。',
   });
   const housingStats = new StatGrid();
@@ -1003,9 +1005,30 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   let etaClock = 0;
   let lastSolveEnd = 0;
   const etaKey = () => `${params.stripModel}|${params.stripNz}|${params.stripNy}|${params.slabTension}|${solver.result.dof}|${solver.slices.length}`;
+  /** messages already reported by `tick`, so a throw that repeats every frame is logged once */
+  const tickErrors = new Set<string>();
+  /**
+   * The loop. Whatever one frame throws, the next one is still asked for, as on the 2D tab: a
+   * throw from the drawing (a folded section's canvas gave the end view a negative radius) used
+   * to skip the `requestAnimationFrame` at the end, and 計算開始 then did nothing at all.
+   */
   const tick = () => {
     raf = 0;
     if (!active) return;
+    try {
+      tickBody();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!tickErrors.has(msg)) {
+        tickErrors.add(msg);
+        console.error('3D frame:', err);
+      }
+    } finally {
+      // once settled, keep a slow heartbeat so a resize or theme change is picked up cheaply
+      raf = requestAnimationFrame(tick);
+    }
+  };
+  const tickBody = () => {
     let moved = false;
     if (running && !solver.isConverged) {
       const t0 = performance.now();
@@ -1027,8 +1050,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     } else {
       idleFrames++;
     }
-    // once settled, keep a slow heartbeat so a resize or theme change is picked up cheaply
-    raf = requestAnimationFrame(tick);
   };
 
   const handle: View3DHandle = {
