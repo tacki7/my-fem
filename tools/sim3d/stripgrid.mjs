@@ -114,7 +114,8 @@ function report(ok, name, detail = '') {
 
 // ── 2. solves on a refined grid ─────────────────────────────────────────────
 for (const [label, mill, patch] of [['4Hi N 71', '4hi', { stripStations: 71 }], ['6Hi shift +100, N 61', '6hi', { irShift: 0.1, stripStations: 61 }]]) {
-  const p = { ...defaultParams(mill), stations: 81, ...patch };
+  // the strip's rows as the check was written with (the defaults have 16)
+  const p = { ...defaultParams(mill), stations: 81, stripNz: 8, ...patch };
   const { sv } = solve(p, 400);
   const R = sv.result;
   let wsum = 0; for (const sl of sv.slices) wsum += sl.weight;
@@ -142,7 +143,8 @@ for (const [label, mill, patch] of [['4Hi N 71', '4hi', { stripStations: 71 }], 
 
 // ── 3. the same grid both ways ──────────────────────────────────────────────
 for (const [label, mill, patch] of [['4Hi', '4hi', {}], ['4Hi slab', '4hi', { stripModel: 'slab' }], ['12Hi', '12hi', {}]]) {
-  const base = { ...defaultParams(mill), stations: 81, ...patch };
+  // the even grid (stripStations 0) against the strip's own: the defaults tile the strip with 281 cells
+  const base = { ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8, ...patch };
   const dx = solve({ ...base }, 0).sv.dx;
   const N = 2 * Math.round((base.width / dx - 1) / 2) + 1;
   const width = N * dx;
@@ -162,7 +164,7 @@ console.log('\nnote  4Hi, 81 stations: the headline results as the strip is refi
 console.log('note    grid          stations slices  ds[mm]  F[tonf]  C25[µm]  edge L[µm]  latent[IU]   ms');
 for (const [label, patch] of [['even 81', {}], ['even 161', { stations: 161 }], ['N 35', { stripStations: 35 }], ['N 71', { stripStations: 71 }], ['N 141', { stripStations: 141 }]]) {
   const t0 = performance.now();
-  const { sv } = solve({ ...defaultParams('4hi'), stations: 81, ...patch }, 400);
+  const { sv } = solve({ ...defaultParams('4hi'), stations: 81, stripStations: 0, stripNz: 8, ...patch }, 400);
   const R = sv.result;
   console.log(`note    ${label.padEnd(12)} ${String(sv.ns).padStart(8)} ${String(sv.slices.length).padStart(6)} ${(sv.grid.dxStrip * 1e3).toFixed(2).padStart(7)} ${(R.force / TONF).toFixed(1).padStart(8)} ${(R.crown * 1e6).toFixed(1).padStart(8)} ${(R.edgeDropL * 1e6).toFixed(1).padStart(11)} ${R.latentIU.toFixed(0).padStart(11)} ${(performance.now() - t0).toFixed(0).padStart(5)}`);
 }
