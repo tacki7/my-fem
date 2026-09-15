@@ -11,7 +11,7 @@
 import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, type Warning3D } from '../sim3d/solver';
 import { RemainingTime, type Eta } from '../sim3d/eta';
 import {
-  defaultParams, MILL_LABEL, ASU_RACKS, type MillType, type Params3D,
+  defaultParams, MILL_LABEL, ASU_RACKS, saddlePitch, type MillType, type Params3D,
 } from '../sim3d/stack';
 import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
@@ -355,6 +355,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     // the taper's start (at W/2 + taperShift) between the mill centre and the barrel end
     { key: 'taperShift', by: (p) => -p.width / 2, side: 'min' },
     { key: 'taperShift', by: (p) => p.irLb / 2 - p.width / 2, side: 'max' },
+    // the saddle width (the bare shaft at each saddle) under the saddle pitch of the backing
+    // shafts (one saddle per AS-U rack, spread over their support length), with a tenth of the
+    // pitch left as a bearing ring: at the pitch itself no ring remains and the shaft supports
+    // nothing (a 700 mm shaft has a 107 mm pitch, so the 120 mm the dial allows emptied it)
+    { key: 'bbGap', by: (p) => 0.9 * saddlePitch(p.bbLb, ASU_RACKS), side: 'max' },
   ];
   const boundOf = (p: Params3D, b: Bound) => (typeof b.by === 'function' ? b.by(p) : (p as unknown as Record<string, number>)[b.by as string]);
   /**
