@@ -135,3 +135,66 @@ function boundary(
   }
   return { lo, hi, mid: (lo + hi) / 2 };
 }
+
+/**
+ * The rounding step a readout's text names: its last printed digit, with the exponent
+ * of an exponential form taken in ("4.50e-3" is printed to 1e-5, not to 0.01). NaN
+ * when the text is not a number.
+ */
+export function printedStep(text: string): number {
+  const m = text.trim().match(/^-?\d+(?:\.(\d+))?(?:e([+-]?\d+))?$/i);
+  if (!m) return NaN;
+  const dec = m[1]?.length ?? 0;
+  return 10 ** ((m[2] ? Number(m[2]) : 0) - dec);
+}
+
+/**
+ * How much one press of an arrow should move a readout, in the readout's own units.
+ *
+ * Two rules, and the larger wins. A 1-2-5 step near a percent of the number keeps a
+ * logarithmic dial usable across its decades: 1200 MPa steps by 10, 2.00 mm by 0.02. The
+ * readout's last printed digit is the floor, so a press changes what is printed.
+ */
+export function nudgeStep(text: string): number {
+  const shown = Number(text);
+  const floor = printedStep(text);
+  const mag = Math.abs(shown);
+  if (!(mag > 0)) return floor;
+  const raw = mag * 0.01;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const m = raw / pow;
+  const nice = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
+  return Math.max(nice, floor);
+}
+
+/**
+ * The value a dial takes when its arrow is pressed: the readout stepped by `nudgeStep`,
+ * snapped to that step's grid so repeated presses land on round numbers, and taken back
+ * through `typedValue` - which holds it to the dial's own step grid and its rails.
+ *
+ * When the readout's step is finer than the dial's grid the snap can land the press back
+ * on the value it left (a μ of 0.060 stepped by 0.001 rounds back to the 0.005 grid), so
+ * the press is repeated, twice as far each time, until the value moves - to the next grid
+ * point, never past it; an arrow that looks dead is worse than one that steps coarsely. Null only when the dial cannot move
+ * that way at all (at a rail).
+ */
+export function nudged(d: TypedDial, value: number, dir: 1 | -1): number | null {
+  const text = d.format(value);
+  const shown = Number(text);
+  if (!Number.isFinite(shown)) return null;
+  const st = nudgeStep(text);
+  if (!(st > 0)) return null;
+  const base = Math.round(shown / st) * st;
+  // the value it left, to a float's noise: a sample on the step grid and the same point snapped
+  // to it can differ in the last bit
+  const same = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(Math.abs(a), Math.abs(b));
+  // the multiple doubles: from under half a grid step it reaches the next grid point without
+  // skipping one, and a readout of 0.000 on a 0.5 grid gets there in nine tries, not 250
+  for (let k = 1; k <= 2 ** 40; k *= 2) {
+    const v = typedValue(d, Number((base + dir * k * st).toPrecision(12)));
+    if (v === null) return null;
+    if (!same(v, value) && Math.sign(v - value) === dir) return v;
+    if (dir > 0 ? v >= d.max : v <= d.min) return null;
+  }
+  return null;
+}

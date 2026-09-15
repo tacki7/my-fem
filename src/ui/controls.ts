@@ -1,6 +1,6 @@
 /** Small declarative widget kit for the parameter panels. */
 
-import { parseTyped, typedValue } from './typed';
+import { parseTyped, typedValue, nudged } from './typed';
 
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, cls?: string, text?: string,
@@ -273,40 +273,14 @@ export function slider(o: SliderOpts): SliderHandle {
     out.value = `${fmt(value)}${o.unit ? ' ' + o.unit : ''}`;
   };
   /**
-   * How much one press of an arrow should move the readout.
-   *
-   * In display units, so a click steps the number the reader is looking at
-   * rather than the solver value behind it - on a dial printing millimetres
-   * over a range held in metres those are four orders apart.
-   *
-   * Two rules, and the larger wins. A 1-2-5 step near a percent of the current
-   * value keeps a logarithmic dial usable across its decades: 1200 MPa steps
-   * by 10, 2.00 mm by 0.02. The formatter's own last digit is the floor, so a
-   * press can never fail to change what is printed - an arrow that looks dead
-   * is worse than one that steps coarsely.
+   * One press of an arrow: the readout stepped in its own units - a click moves the
+   * number the reader is looking at, not the solver value behind it - by `nudgeStep`,
+   * and never by nothing (see `nudged`: a step finer than the dial's grid is repeated
+   * until the value moves; tools/ui/typed.mjs holds every dial to that).
    */
-  const displayStep = (shown: number): number => {
-    const txt = fmt(value);
-    const dec = txt.match(/\.(\d+)/)?.[1].length ?? 0;
-    const floor = Math.pow(10, -dec);
-    const mag = Math.abs(shown);
-    if (!(mag > 0)) return floor;
-    const raw = mag * 0.01;
-    const pow = Math.pow(10, Math.floor(Math.log10(raw)));
-    const m = raw / pow;
-    const nice = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow;
-    return Math.max(nice, floor);
-  };
-
   const nudge = (dir: 1 | -1) => {
-    const shown = Number(fmt(value));
-    if (!Number.isFinite(shown)) return;
-    const st = displayStep(shown);
-    // Snapped to the step grid, so repeated presses land on round numbers
-    // instead of drifting off whatever the dial happened to be sitting on.
-    const next = Math.round(shown / st) * st + dir * st;
-    const v = typedValue(dial, Number(next.toPrecision(12)));
-    if (v === null || v === value) return;
+    const v = nudged(dial, value, dir);
+    if (v === null) return;
     value = v;
     input.value = String(toPos(value));
     paint(value);

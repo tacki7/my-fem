@@ -8,14 +8,16 @@
 // in src/main.ts and src/ui3d/view3d.ts, and every `num(...)` dial of the 3D
 // tab. For each, values across its range are printed, the text is taken back
 // through `typedValue`, and it has to print the same text again, landing
-// within half a rounding step of the number typed.
+// within half a rounding step of the number typed. And an arrow press (▴ / ▾,
+// `nudged`) has to move every dial from every value not on a rail, in the
+// direction pressed, and change what is printed.
 //
 // @check
 // @check-build --out tools/ui/build src/ui/typed.ts
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { parseTyped, snapToStep, typedValue } from './build/ui/typed.js';
+import { parseTyped, snapToStep, typedValue, nudged, printedStep } from './build/ui/typed.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SAMPLES = 400;
@@ -82,15 +84,16 @@ for (const file of ['src/main.ts', 'src/ui3d/view3d.ts']) {
           });
         } catch (e) { unreadable.push(`${where(n)} ${e.message}`); }
       } else if (name === 'num' && file.endsWith('view3d.ts') && n.arguments.length >= 7) {
-        // num(key, label, unit, min, max, step, scale, hint?, log?) - slider value in display units
+        // num(key, label, unit, min, max, step, scale, hint?, log?, format?) - slider value in display units
         try {
           const a = n.arguments.map((x) => x.getText());
           const step = evalExpr(a[5]);
+          const fText = a[9] ?? `(v) => v.toFixed(${step >= 1 ? 0 : 3})`;
           dials.push({
             where: where(n), label: a[1],
             min: evalExpr(a[3]), max: evalExpr(a[4]), step,
             log: a[8] !== undefined ? evalExpr(a[8]) : false,
-            format: defaultFormat(step), fine: evalExpr(fineSource(`(v) => v.toFixed(${step >= 1 ? 0 : 3})`)),
+            format: a[9] !== undefined ? evalExpr(fText) : defaultFormat(step), fine: evalExpr(fineSource(fText)),
           });
         } catch (e) { unreadable.push(`${where(n)} ${e.message}`); }
       }
@@ -228,6 +231,52 @@ report(snapToStep(0.0045, 0.0005) === 0.0045 && snapToStep(0.00451, 0.0005) === 
   const caught = dials.filter((d) => roundTrip(d, lowerEdge).length > 0);
   report(caught.length > 0, '(harness) the old lower-edge bisection fails the round trip',
     `on ${caught.length} of ${dials.length} dials, e.g. ${caught[0]?.where} ${caught[0]?.label}`);
+}
+
+// ── the arrows: a press moves every dial, the way it points, and changes the readout ──
+{
+  const dead = [];
+  let presses = 0;
+  // a value whose readout is the rail's cannot move past it (a sample a float's noise above the rail counts as on it)
+  const onRail = (d, v, dir) => (dir > 0 ? Number(d.format(v)) >= Number(d.format(d.max)) : Number(d.format(v)) <= Number(d.format(d.min)));
+  for (const d of dials) {
+    for (const v of samples(d)) {
+      for (const dir of [1, -1]) {
+        if (onRail(d, v, dir)) continue;
+        presses++;
+        const w = nudged(d, v, dir);
+        const ok = w !== null && Math.sign(w - v) === dir && d.format(w) !== d.format(v) && w >= d.min && w <= d.max;
+        if (!ok) { dead.push(`${d.where} ${d.label} at ${d.format(v)} ${dir > 0 ? '▴' : '▾'} → ${w === null ? 'null' : d.format(w)}`); break; }
+      }
+      if (dead.length && dead[dead.length - 1].startsWith(d.where)) break;
+    }
+  }
+  report(dead.length === 0, 'an arrow press moves every dial and changes its readout', `${dials.length} dials, ${presses} presses`
+    + (dead.length ? `\n      ${dead.slice(0, 8).join('\n      ')}` : ''));
+  // The rule as it was: a step of about a percent, floored at the readout's decimals, pressed
+  // once. Finer than the dial's own grid it snapped back where it came from (μ 0.060 by 0.001
+  // rounds back to the 0.005 grid), and an exponential readout's decimals floored it at 0.01
+  // in absolute terms (4.50e-3 jumped to 1.00e-2). The harness has to see those.
+  const oldNudged = (d, value, dir) => {
+    const text = d.format(value), shown = Number(text);
+    const dec = text.match(/\.(\d+)/)?.[1].length ?? 0;
+    const floor = 10 ** -dec, mag = Math.abs(shown);
+    let st = floor;
+    if (mag > 0) { const raw = mag * 0.01, pow = 10 ** Math.floor(Math.log10(raw)), m = raw / pow; st = Math.max((m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow, floor); }
+    const w = typedValue(d, Number((Math.round(shown / st) * st + dir * st).toPrecision(12)));
+    return w === null || w === value ? null : w;
+  };
+  const stuck = dials.filter((d) => samples(d).some((v) => (!onRail(d, v, 1) && oldNudged(d, v, 1) === null) || (!onRail(d, v, -1) && oldNudged(d, v, -1) === null)));
+  report(stuck.length > 0, '(harness) the old one-press rule leaves dials dead',
+    `${stuck.length} of ${dials.length} dials, e.g. ${stuck.slice(0, 4).map((d) => `${d.where} ${d.label}`).join('; ')}`);
+  // the crosshead's second moment of area: 4.50e-3 m⁴ on a logarithmic dial printed to three significant digits
+  const ex = dials.find((d) => d.label.includes('断面二次モーメント'));
+  if (ex) {
+    const v = typedValue(ex, 4.5e-3);
+    const up = nudged(ex, v, 1);
+    report(printedStep(ex.format(v)) === 1e-5 && up !== null && up > v && up < 1.05 * v,
+      'an exponential readout steps in its own last digit', `${ex.where} ${ex.label}: ${ex.format(v)} ▴ → ${up === null ? 'null' : ex.format(up)} (old rule → ${oldNudged(ex, v, 1) === null ? 'null' : ex.format(oldNudged(ex, v, 1))})`);
+  } else report(false, 'an exponential readout steps in its own last digit', 'the 断面二次モーメント dial was not found');
 }
 
 if (failed) { console.log(`\n${failed} FAIL`); process.exit(1); }
