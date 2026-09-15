@@ -18,6 +18,7 @@ import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_C
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '../sim3d/housing';
+import { pingFrontistr, solveFrontistr2hi, FistrError, type FistrResult } from './frontistr';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
@@ -129,6 +130,18 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   let magnify = 200;
   let sectionMagnify = 200;
   let dirty = true;
+  /* ── the FrontISTR cross-check (2Hi only): once a solve has converged, the same strip load on
+     the work roll as a solid, solved by fistr1 through the dev server's bridge (frontistr.ts).
+     Its deflection and indentation are drawn over the model's and set beside them. ── */
+  /** the check is switched on (解析・表示 ▸ ロールの照合) */
+  let fistrOn = false;
+  /** the request in flight, so a changed setting can drop it */
+  let fistrBusy: AbortController | null = null;
+  let fistrT0 = 0;
+  /** the last answer, for the settings the solve converged on; dropped when they change */
+  let fistrShown: FistrResult | null = null;
+  /** why there is no answer: the bridge's error, or nothing at the other end */
+  let fistrNote = '';
 
   /* ── DOM ── */
   const left = el('aside', 'panel v3-panel');
@@ -225,8 +238,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   const chips = {
     mill: chip('', 'ミル'), force: chip('tonf', '荷重'), h1: chip('mm', '平均板厚'),
     crown: chip('µm', 'C25'), manifest: chip('I-unit', '顕在形状'), conv: chip('', ''),
-    res: chip('', '残差'), ms: chip('ms', '解法'),
+    res: chip('', '残差'), ms: chip('ms', '解法'), fistr: chip('', 'FrontISTR'),
   };
+  chips.fistr.hidden = true;
+  chips.fistr.title = 'ソリッド要素の FEM（FrontISTR）で解いた WR の撓みと扁平の、このモデルとの最大差。計算が収束するたびに解き直す（2Hi のみ、数十秒）。';
   chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
   chips.conv.title = [
     '推定残り時間: ここまでの反復から外挿した、収束までの実時間（描画の時間も含む）。',
@@ -238,7 +253,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   const runBtn = el('button', 'btn btn-primary v3-run', '▶ 計算開始');
   runBtn.type = 'button';
   runBtn.title = '今の条件で収束まで解く（Space でも同じ）。計算中に押すと止まる。条件を変えると計算は止まり、結果は「未計算」になる（上の 3D 図と右の端面図・側面図は条件どおりにすぐ描き変わる）。';
-  status.append(runBtn, chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms);
+  status.append(runBtn, chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms, chips.fistr);
   const warnBox = el('div', 'v3-warnings');
   status.append(warnBox);
   const setChip = (c: HTMLElement, text: string, tone?: 'ok' | 'warn' | 'bad') => {
@@ -284,6 +299,20 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   into(gShape, 'latent', '潜在形状 (p-p)', 'I-unit'); into(gShape, 'manifest', '顕在形状 (最大)', 'I-unit');
   into(gNum, 'conv', '収束'); into(gNum, 'fem', '材料 FEM 反復 / 質量収支'); into(gNum, 'iter', '反復 / 残差'); into(gNum, 'ms', '解法時間', 'ms/frame'); into(gNum, 'dof', '自由度 / 半バンド幅');
   into(gNum, 'grid', '幅方向 節点 板上 / 全');
+  const fistrSec = section('FrontISTR 照合（2Hi）', {
+    open: true, onToggle: redrawOnOpen,
+    hint: 'このモデル（ティモシェンコ梁 ＋ 線接触の扁平）と、同じロールをソリッド要素で解いた FrontISTR の解。板の荷重 q(x)（収束したスライスの値）を両方に同じだけ与えるので、違いはロールの力学だけ。'
+      + '撓みは軸受に対する WR 軸の値（板中央）、扁平は板の下の局所的な沈み込み（FEM は下面 − 上面で読み、曲げのポアソン効果を除く）。格子は関門と同じ 81 点・弧 8 分割で解く。詳細は tools/frontistr/README.md。',
+  });
+  fistrSec.root.hidden = true;
+  const fistrStats = new StatGrid();
+  fistrStats.add('state', '状態');
+  fistrStats.add('v', '撓み 中央 モデル / FEM', 'µm');
+  fistrStats.add('flat', '扁平 中央 モデル / FEM', 'µm');
+  fistrStats.add('worst', '最大差 撓み / 扁平', 'µm');
+  fistrStats.add('brg', '軸受反力 FEM / 荷重÷4', 'tonf');
+  fistrStats.add('mesh', '節点 / 時間');
+  fistrSec.body.append(fistrStats.root);
   const contactSec = section('接触力・支持反力', { open: true, onToggle: redrawOnOpen });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
@@ -327,7 +356,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     .add('hSeatBottom', 'IR チョック座 下 −x / +x', 'tonf')
     .add('hModulus', 'ミル剛性（荷重 ÷ 窓の開き）', 'MN/mm');
   housingSec.body.append(housingStats.root);
-  right.append(loadSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
+  right.append(loadSec.root, fistrSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
 
   /* ── left panel: inputs ── */
   const dials = new Map<string, Dial>();
@@ -405,6 +434,52 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     running = false;
     stale = true;
     iterated = false;
+    dirty = true;
+    dropFistr();
+  };
+  /** the check's answer and any request in flight go with the settings they were for */
+  const dropFistr = () => {
+    fistrBusy?.abort();
+    fistrBusy = null;
+    fistrShown = null;
+  };
+  /** a converged solve with the check on: ask the bridge (nothing while one is running) */
+  const maybeRunFistr = () => {
+    if (!fistrOn || params.mill !== '2hi' || stale || running || fistrBusy) return;
+    const ctl = new AbortController();
+    fistrBusy = ctl;
+    fistrT0 = performance.now();
+    fistrNote = '';
+    // the chip counts the seconds while the solve runs: a frame a second is enough
+    const ticker = setInterval(() => { dirty = true; }, 1000);
+    solveFrontistr2hi(params, ctl.signal).then((r) => {
+      if (fistrBusy !== ctl) return;
+      fistrShown = r;
+    }).catch((e: unknown) => {
+      if (ctl.signal.aborted || fistrBusy !== ctl) return;
+      fistrNote = e instanceof FistrError ? e.message : e instanceof Error ? e.message : String(e);
+      if (e instanceof FistrError && e.log) console.warn('FrontISTR:', e.log);
+    }).finally(() => {
+      clearInterval(ticker);
+      if (fistrBusy === ctl) fistrBusy = null;
+      dirty = true;
+    });
+    dirty = true;
+  };
+  const setFistr = (on: boolean) => {
+    fistrOn = on && params.mill === '2hi';
+    chips.fistr.hidden = !fistrOn;
+    fistrSec.root.hidden = !fistrOn;
+    if (!fistrOn) { dropFistr(); fistrNote = ''; }
+    else {
+      void pingFrontistr().then((p) => {
+        if (!fistrOn) return;
+        if (!p) fistrNote = '接続なし（npm run dev の橋渡しが要る）';
+        else if (!p.fistr1) fistrNote = 'fistr1 が無い（tools/frontistr/README.md）';
+        dirty = true;
+      });
+      maybeRunFistr();
+    }
     dirty = true;
   };
   const apply = () => {
@@ -716,6 +791,19 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
       'ON: WR と板の扁平を、そのスライスの荷重だけでなく隣のスライスの荷重によるへこみも足して求める。半無限体の表面変位（Boussinesq、Johnson "Contact Mechanics" §3.2。板プロフィルの理論の戸澤・上田 1970 と同じ積分）をロール軸方向に重ね、一様な荷重では上の扁平モデルの値に戻るように |s| = 0.446 R で打ち切る。'
       + '板の外の胴は荷重を受けないので、板端から約 0.45 R の範囲で扁平が小さくなり、エッジドロップと板端の伸びが増える（4Hi・301 点・前後の平均の張力・座屈限界の頭打ちで、エッジドロップ 40 → 94 µm、C25 54 → 86 µm、潜在形状 1481 → 2847 I-unit。板の中央部は変わらない）。'
       + 'ON が既定。OFF: 各スライスが自分の荷重だけで扁平する。ON では外側の反復が 3〜5 割増える。ロール間の接触（WR–BUR など）の扁平はどちらでもスライスごと。').root);
+    {
+      // the check is a 2Hi thing: another mill switches it off before the select is built
+      if (params.mill !== '2hi' && fistrOn) setFistr(false);
+      const fs = select<'off' | 'on'>('ロールの照合', [
+        { value: 'off', text: 'なし' },
+        { value: 'on', text: 'FrontISTR（2Hi・ソリッド要素）' },
+      ], fistrOn ? 'on' : 'off', (v) => setFistr(v === 'on'),
+      '収束のたびに、同じ板の荷重をソリッド要素の WR に載せて FrontISTR で解き、撓みと扁平をグラフに重ね、右の「FrontISTR 照合」に並べる。'
+        + '2Hi のみ。npm run dev の橋渡し（tools/frontistr/bridge.mjs）と手元の fistr1 が要る。1 回 10〜20 秒。');
+      fs.root.dataset.key = 'fistr';
+      if (params.mill !== '2hi') { fs.root.classList.add('disabled'); fs.root.title = '2Hi のみ'; }
+      numSec.body.append(fs.root);
+    }
     if (params.flatModel === 'ring') {
       numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。既定 800 × 半径方向 12（20Hi は 1600 × 16）。接触半幅（数 mm）を数節点で解像するには 400 以上。潜在形状が収束値から 2 % 以内に入るのは、4Hi・6Hi で 800 × 12、20Hi で 1600 × 16 から（400 × 8 では 4Hi で 5 %、20Hi で 7 % 大きい。旧既定の局所扁平で測定）。'));
       numSec.body.append(num('ringNr', 'ロール 半径方向 分割 nr', '', 2, 24, 1, 1));
@@ -793,19 +881,42 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     sideView.draw(st, params, R.housing, stale && !running);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
-    charts.defl.draw(R.rolls.map((r, i): XYSeries => ({
+    // the FrontISTR answer is the x ≥ 0 half; mirrored to draw with the whole roll
+    const mirrored = (f: FistrResult, y: number[]): { x: Float64Array; y: Float64Array } => {
+      const n = f.x.length, xs = new Float64Array(2 * n - 1), ys = new Float64Array(2 * n - 1);
+      for (let i = 0; i < n; i++) { xs[n - 1 - i] = -f.x[i]; xs[n - 1 + i] = f.x[i]; ys[n - 1 - i] = ys[n - 1 + i] = y[i] * 1e6; }
+      return { x: xs, y: ys };
+    };
+    const FISTR_COLOR = '#ffffff';
+    const deflSeries = R.rolls.map((r, i): XYSeries => ({
       label: r.def.id, color: ROLL_COLORS[i % ROLL_COLORS.length], x: R.x, y: um(r.v),
-    })), { unit: 'µm', halfWidth, strip, zero: true });
+    }));
+    if (fistrShown) {
+      // The solid's axis is read against its held bearing; the model's `v` is absolute (the
+      // supports sit where the screw and the housing put them). Set on the model's bearings,
+      // so the two curves lie on each other and the difference between them is the check.
+      const w = R.rolls[st.wr];
+      const sups = w.supports.filter((s) => Number.isFinite(w.v[s]));
+      const onBearing = sups.length ? sups.reduce((a, s) => a + w.v[s], 0) / sups.length : 0;
+      deflSeries.push({ label: 'WR FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...mirrored(fistrShown, fistrShown.vFem.map((v) => v + onBearing)) });
+    }
+    charts.defl.draw(deflSeries, { unit: 'µm', halfWidth, strip, zero: true });
 
     const contactLabel = (c: { a: number; b: number }) => `${st.rolls[c.a].id}–${st.rolls[c.b].id}`;
     // an open gap is no flattening: zero where the contact carries no load,
     // and nothing at all where the barrels do not overlap
     const closed = (c: { delta: Float64Array; weight: Float64Array }) =>
       Float64Array.from(c.delta, (d, i) => (c.weight[i] > 0 ? Math.max(d, 0) * 1e6 : NaN));
-    charts.flat.draw([
+    const flatSeries: XYSeries[] = [
       { label: 'WR–板', color: STRIP_COLOR, x: R.x, y: um(R.flat) },
       ...R.contacts.map((c, i): XYSeries => ({ label: contactLabel(c), color: ROLL_COLORS[(i + 1) % ROLL_COLORS.length], x: R.x, y: closed(c) })),
-    ], { unit: 'µm', halfWidth, strip, zero: true });
+    ];
+    if (fistrShown) {
+      // the solid's indentation where the strip loads it; off the strip the model shows nothing either
+      const on = fistrShown.flatFem.map((v, i) => ((fistrShown!.q[i] ?? 0) > 0 ? v : NaN));
+      flatSeries.push({ label: 'WR–板 FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...mirrored(fistrShown, on) });
+    }
+    charts.flat.draw(flatSeries, { unit: 'µm', halfWidth, strip, zero: true });
 
     const kn = (a: Float64Array) => Float64Array.from(a, (v) => v / 1e6);
     const onBarrels = (c: { q: Float64Array; weight: Float64Array }) =>
@@ -1002,6 +1113,25 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     }
     setChip(chips.ms, none ? '—' : R.solveMs.toFixed(0));
     for (const c of [chips.force, chips.h1, chips.crown, chips.manifest, chips.res, chips.ms]) c.classList.toggle('v3-stale', stale && !running);
+    if (fistrOn) {
+      const f = fistrShown;
+      const sec = ((performance.now() - fistrT0) / 1000).toFixed(0);
+      const um1 = (v: number) => (v * 1e6).toFixed(1);
+      const signed = (v: number) => `${v >= 0 ? '+' : '−'}${um1(Math.abs(v))}`;
+      const state = fistrBusy ? `計算中 ${sec} s` : f ? '照合済み' : fistrNote ? fistrNote : stale || running ? '収束後に解く' : '—';
+      const tone = fistrBusy ? 'warn' : f ? (f.worst.vRel < 0.05 && f.worst.flat < 20e-6 ? 'ok' : 'warn') : fistrNote ? 'bad' : undefined;
+      setChip(chips.fistr, fistrBusy ? `計算中 ${sec} s` : f ? `撓み ${signed(f.vFem[0] - (f.vModel[0] ?? 0))} µm（${(f.worst.vRel * 100).toFixed(1)} %）扁平 ${signed(f.flatFem[0] - (f.flatModel[0] ?? 0))} µm` : fistrNote ? '×' : '—', tone);
+      chips.fistr.classList.toggle('busy', !!fistrBusy);
+      chips.fistr.classList.toggle('v3-stale', !fistrBusy && !f);
+      fistrStats.set('state', state, tone, false);
+      fistrStats.set('v', f ? `${um1(f.vModel[0] ?? NaN)} / ${um1(f.vFem[0])}` : '—');
+      fistrStats.set('flat', f ? `${um1(f.flatModel[0] ?? NaN)} / ${um1(f.flatFem[0])}` : '—');
+      fistrStats.set('worst', f ? `${um1(f.worst.v)}（${(f.worst.vRel * 100).toFixed(1)} %）/ ${um1(f.worst.flat)}` : '—');
+      // the reaction carries the load's sign turned; its size is what is checked against the quarter load
+      fistrStats.set('brg', f ? `${(Math.abs(f.bearingReaction) / TONF).toFixed(1)} / ${(f.loadSumY / TONF).toFixed(1)}` : '—');
+      fistrStats.set('mesh', f ? `${f.nodes.toLocaleString()}（${f.grid.stations} × ${f.grid.layers} × ${f.grid.angles}）/ ${f.seconds.toFixed(1)} s` : '—', undefined, false);
+      fistrSec.root.classList.toggle('v3-stale', !f && !fistrBusy);
+    }
     {
       // Two kinds of warning. The settings' own (a strip wider than the barrel, the housing, the
       // layout, a floored entry profile, a tension near yield) come from the settings as they are
@@ -1095,7 +1225,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
       eta = remaining.update(etaClock, solver.progress(), etaKey());
       iterated = true;
       // converged: the results are this setting's, and the solve waits for the next 計算開始
-      if (solver.isConverged) { running = false; stale = false; dirty = true; }
+      if (solver.isConverged) { running = false; stale = false; dirty = true; maybeRunFistr(); }
     } else {
       lastSolveEnd = 0;
     }

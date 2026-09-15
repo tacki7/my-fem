@@ -40,6 +40,27 @@ node tools/frontistr/compare.mjs tools/frontistr/run/4hi
 
 `case.mjs <mill> [outdir] ['{"param":value}']` で条件を変えられる（`Params3D` のキー）。`run/` は git 管理外。各 `run/<mill>/compare.txt` に表の写し。
 
+## アプリ内から（2Hi）
+
+`npm run dev` の開発サーバーが同じ照合を `/__frontistr` で受ける（`vite.config.ts` が `bridge.mjs` を組み込む）。
+3D タブで **ミル形式 2Hi** にし、「解析・表示 ▸ ロールの照合」を **FrontISTR** にすると、計算が収束するたびに
+今の条件で 2Hi ケースを作って `fistr1` で解き（10〜20 秒）:
+
+- 「ロール撓み」「扁平量」のグラフに FEM の曲線（白の破線）を重ねる
+- 右パネル「FrontISTR 照合（2Hi）」に、板中央の撓み・扁平のモデル／FEM、最大差、軸受反力（FEM）と荷重÷4、節点数と所要時間
+- 上のチップ「FrontISTR」に中央の差と撓みの最大相対差
+
+条件を変えると結果は消え、次の収束でまた解く。格子は関門と同じ（81 点・弧 8 分割・板はロールの節点）に固定し、
+それ以外の条件（寸法・クラウン・板・荷重・扁平モデルなど）はアプリの設定をそのまま使う。ケースは
+`tools/frontistr/run/app-2hi/` に残るので、`compare.mjs` で表にもできる。
+`fistr1` の場所は既定 `~/.local/bin/fistr1`、環境変数 `FISTR1` で変えられる。
+
+ビルドしたアプリ（`npm run preview`）や別オリジンから使うときは `node tools/frontistr/serve.mjs [port]` を立て、
+アプリを `?fistr=http://localhost:<port>` 付きで開く。4Hi 以降は未対応（接触ありで 26 分かかるので、CLI で）。
+
+`npm run check` には `casecheck.mjs`（2Hi ケース生成だけ: 収束・節点数 34,099・4 分の 1 荷重 = F/4）が入る。
+`fistr1` は要らない。
+
 ## 結果 1: 2Hi 既定（ワークロール 1 本、2026-09-15、FrontISTR 5.9）
 
 | 位置 x [mm] | q [kN/mm] | たわみ 梁 [µm] | たわみ FEM [µm] | 差 | 扁平 近似式 [µm] | 扁平 FEM [µm] | 差 |
