@@ -318,35 +318,63 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   let contactKeys: string[] = [];
 
   /**
-   * Dimensions another one bounds: a neck (or a backing shaft) no thicker than its roll, and a
-   * support span no shorter than its barrel - a bearing inside the barrel is no mill. The bounded
-   * dial's travel ends at the other's value, so it cannot be dragged, typed or stepped past it;
-   * when the roll or the barrel is moved past it, the bounded value follows. A preset or a
-   * remembered mill geometry is held to the same bounds.
+   * Dimensions the other settings bound: a neck (or a backing shaft) no thicker than its roll, a
+   * support span no shorter than its barrel - a bearing inside the barrel is no mill - and the
+   * strokes that move a barrel end along the strip: a 6Hi's intermediate shift keeps the shifted
+   * barrel end out of the middle half of the strip and the far end past the far strip edge, a
+   * 20Hi's taper starts between the mill centre and the barrel end. The bounded dial's travel
+   * ends at the bound, so it cannot be dragged, typed or stepped past it; when the bound moves
+   * past the value, the value follows. A preset or a remembered mill geometry is held to the
+   * same bounds. A bound is another setting's value or a function of the settings [SI].
    */
-  const BOUNDS: { key: keyof Params3D; by: keyof Params3D; side: 'max' | 'min' }[] = [
+  type Bound = { key: keyof Params3D; by: keyof Params3D | ((p: Params3D) => number); side: 'max' | 'min' };
+  const BOUNDS: Bound[] = [
     { key: 'wrDn', by: 'wrD', side: 'max' }, { key: 'irDn', by: 'irD', side: 'max' },
     { key: 'burDn', by: 'burD', side: 'max' }, { key: 'bbShaft', by: 'bbD', side: 'max' },
     { key: 'wrLs', by: 'wrLb', side: 'min' }, { key: 'irLs', by: 'irLb', side: 'min' }, { key: 'burLs', by: 'burLb', side: 'min' },
+    // the shifted barrel end (at W/2 + irShift) no further in than a quarter of the width from
+    // the centre; the other end (W/2 + irShift − Lb) still past the other edge (−W/2)
+    { key: 'irShift', by: (p) => -p.width / 4, side: 'min' },
+    { key: 'irShift', by: (p) => p.irLb - p.width, side: 'max' },
+    // the taper's start (at W/2 + taperShift) between the mill centre and the barrel end
+    { key: 'taperShift', by: (p) => -p.width / 2, side: 'min' },
+    { key: 'taperShift', by: (p) => p.irLb / 2 - p.width / 2, side: 'max' },
   ];
-  /** the parameters held to their bounds */
+  const boundOf = (p: Params3D, b: Bound) => (typeof b.by === 'function' ? b.by(p) : (p as unknown as Record<string, number>)[b.by as string]);
+  /**
+   * The parameters held to their bounds. The upper bounds go first, so where a key's two bounds
+   * cross (a barrel shorter than three quarters of the strip) the lower one - the end kept out of
+   * the middle of the strip - is the one that holds.
+   */
   const clampBounds = (p: Params3D) => {
     const pr = p as unknown as Record<string, number>;
-    for (const b of BOUNDS) {
-      const v = pr[b.key as string], lim = pr[b.by as string];
-      if (b.side === 'max' ? v > lim : v < lim) pr[b.key as string] = lim;
+    for (const side of ['max', 'min'] as const) {
+      for (const b of BOUNDS) {
+        if (b.side !== side) continue;
+        const v = pr[b.key as string], lim = boundOf(p, b);
+        if (side === 'max' ? v > lim : v < lim) pr[b.key as string] = lim;
+      }
     }
   };
-  /** each bounded dial: its travel cut at the bound (never to nothing), and the value as the parameter has it */
+  /** each bounded dial: its travel cut at its bounds (never to nothing), and the value as the parameter has it */
   const syncBounds = () => {
     const pr = params as unknown as Record<string, number>;
+    const seen = new Set<string>();
     for (const b of BOUNDS) {
-      const d = dials.get(b.key as string);
-      if (!d) continue;
-      const lim = pr[b.by as string] / d.scale;
-      if (b.side === 'max') d.setRange(d.min, Math.max(Math.min(d.max, lim), d.min + 1e-9 * (d.max - d.min)));
-      else d.setRange(Math.min(Math.max(d.min, lim), d.max - 1e-9 * (d.max - d.min)), d.max);
-      d.set(pr[b.key as string]);
+      const key = b.key as string;
+      const d = dials.get(key);
+      if (!d || seen.has(key)) continue;
+      seen.add(key);
+      let lo = d.min, hi = d.max;
+      for (const c of BOUNDS) {
+        if (c.key !== b.key) continue;
+        const lim = boundOf(params, c) / d.scale;
+        if (c.side === 'max') hi = Math.min(hi, lim); else lo = Math.max(lo, lim);
+      }
+      lo = Math.min(lo, d.max - 1e-9 * (d.max - d.min));
+      hi = Math.max(hi, lo + 1e-9 * (d.max - d.min));
+      d.setRange(lo, hi);
+      d.set(pr[key]);
     }
   };
   /** the housing section's derived-stiffness line, rewritten on every change while the section is built */
@@ -445,10 +473,10 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     }
     if (params.mill === '6hi') {
       actSec.body.append(num('irBender', 'IR ベンダー', 'tonf/chock', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
-      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上 IR は +x 側の胴端を +x 側の板端に、下 IR は −x 側の胴端を −x 側の板端に合わせる（上下で逆向き＝点対称のシフト）。上下対称でなくなるので下半分のロールも一緒に解く（表示は上半分）。'));
+      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上 IR は +x 側の胴端を +x 側の板端に、下 IR は −x 側の胴端を −x 側の板端に合わせる（上下で逆向き＝点対称のシフト）。上下対称でなくなるので下半分のロールも一緒に解く（表示は上半分）。スライダーの範囲は板幅と IR 胴長で狭まる: 胴端は板の中央側 1/4 より内側に入れず（−板幅/4 まで）、反対側の胴端は反対の板端より外に残す（IR 胴長 − 板幅 まで）。'));
     }
     if (params.mill === '20hi') {
-      actSec.body.append(num('taperShift', '第1中間 テーパ位置', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置（板端基準）。正で板端より外側、負で板端より内側から細り始める。'));
+      actSec.body.append(num('taperShift', '第1中間 テーパ位置', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置（板端基準）。正で板端より外側、負で板端より内側から細り始める。スライダーの範囲は板幅と胴長で狭まる: 開始点はミル中心（−板幅/2）と胴端（胴長/2 − 板幅/2）の間。'));
       actSec.body.append(num('taperLen', 'テーパ長', 'mm', 50, 500, 10, 1e-3));
       actSec.body.append(num('taperDepth', 'テーパ深さ（半径）', 'µm', 0, 1000, 10, 1e-6));
     }
