@@ -97,7 +97,15 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   let params: Params3D = defaultParams(opts.initialMill ?? '4hi');
   const solver = new StackSolver(params);
   let active = false;
-  let running = true;
+  // The solve runs only when asked (計算開始 or Space) and stops once it has converged. Until
+  // then a changed setting only rebuilds the stack, which takes milliseconds, so the 3D view and
+  // the end and side views follow the dials while the results wait for the next solve.
+  /** solving now */
+  let running = false;
+  /** the shown results are not the converged solution of the settings as they stand */
+  let stale = true;
+  /** the solve has iterated since the settings last changed (a stopped solve, not an unsolved one) */
+  let iterated = false;
   let magnify = 200;
   let sectionMagnify = 200;
   let dirty = true;
@@ -152,6 +160,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   setColor(colorBy);
   const legendBox = el('div', 'v3-legend');
   stage.append(legendBox);
+  // over the stack while its colours and deflections are not the current settings' solution
+  const staleTag = el('div', 'v3-stale-tag', '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）');
+  stage.append(staleTag);
   front.root.querySelector('.chart-head')!.append(colorBtns, modeBtns);
   const setFrontMode = (m: '3d' | '2d') => {
     if (m === '3d' && !stack3d) m = '2d';
@@ -195,16 +206,19 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     '「推定中」はまだ手がかりが無いとき、「不明」は残差が 80 反復下がらず補正ラウンドにも進めないとき（収束しない可能性が高い）。',
   ].join('\n');
   chips.res.title = '外側 Newton の相対残差（力の不釣り合い ÷ 最大の力、収束判定 2e-6）／ 材料 FEM のときはその補正の変化量（荷重比、収束判定 2e-3）';
-  status.append(chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms);
+  const runBtn = el('button', 'btn btn-primary v3-run', '▶ 計算開始');
+  runBtn.type = 'button';
+  runBtn.title = '今の条件で収束まで解く（Space でも同じ）。計算中に押すと止まる。条件を変えると計算は止まり、結果は「未計算」になる（上の 3D 図と右の端面図・側面図は条件どおりにすぐ描き変わる）。';
+  status.append(runBtn, chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms);
   const warnBox = el('div', 'v3-warnings');
   status.append(warnBox);
   const setChip = (c: HTMLElement, text: string, tone?: 'ok' | 'warn' | 'bad') => {
     const b = c.querySelector('b')!;
     if (b.textContent !== text) b.textContent = text;
-    const want = tone ? `badge ${tone}` : 'badge';
-    if (c.className !== want) c.className = want;
+    // the tone only: 'busy' and 'v3-stale' are set by their own owners
+    for (const t of ['ok', 'warn', 'bad'] as const) c.classList.toggle(t, t === tone);
   };
-  const hint = el('div', 'v3-hint', 'Space=一時停止 ／ R=再初期化 ／ 1–5=ミル形式（2Hi 4Hi 6Hi 12Hi 20Hi）／ チャート上にポインタで数値読み取り');
+  const hint = el('div', 'v3-hint', 'Space=計算開始／停止 ／ R=再初期化 ／ 1–5=ミル形式（2Hi 4Hi 6Hi 12Hi 20Hi）／ チャート上にポインタで数値読み取り');
   centre.append(status, front.root, chartGrid, hint);
 
   const frontView = new FrontView(front.canvas);
@@ -294,13 +308,34 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   };
   /** the housing section's derived-stiffness line, rewritten on every change while the section is built */
   let refreshHousingHint: (() => void) | null = null;
+  /** a changed setting: the stack follows at once, a running solve stops, the results go stale */
+  const settingsChanged = () => {
+    running = false;
+    stale = true;
+    iterated = false;
+    dirty = true;
+  };
   const apply = () => {
     clampNecks();
     solver.setParams(params);
     refreshHousingHint?.();
-    dirty = true;
-    running = true;
+    settingsChanged();
   };
+  const startSolve = () => {
+    if (running || !stale) return;
+    running = true;
+    dirty = true;
+  };
+  const stopSolve = () => {
+    if (!running) return;
+    running = false;
+    dirty = true;
+  };
+  runBtn.addEventListener('click', () => {
+    if (running) stopSolve(); else startSolve();
+    // the key handler below owns Space; a focused button would take it as a click as well
+    runBtn.blur();
+  });
   /** a dial on a numeric field, in display units `scale` × SI */
   const num = (
     key: keyof Params3D, label: string, unit: string, min: number, max: number, step: number,
@@ -320,7 +355,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const applyPreset = (pr: Preset3D) => {
     geometryByMill.set(params.mill, pickGeometry(params));
     params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)], asu2: [...(pr.patch.asu2 ?? defaultParams(pr.mill).asu2)] };
-    solver.setParams(params); dirty = true; running = true; buildLeft();
+    solver.setParams(params); settingsChanged(); buildLeft();
   };
   /** a new mill type with every other setting kept: only the roll dimensions change */
   const switchMill = (m: MillType) => {
@@ -742,7 +777,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('edge', `${(R.edgeDropL * 1e6).toFixed(1)} / ${(R.edgeDropR * 1e6).toFixed(1)}`);
     stats.set('latent', R.latentIU.toFixed(0), R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
     stats.set('manifest', R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    stats.set('conv', R.converged ? '収束' : running ? '反復中' : '停止', R.converged ? 'ok' : 'warn');
+    stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
     stats.set('iter', `${R.iterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`);
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
@@ -780,20 +815,34 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       housingSec.root.remove();
     }
 
-    // chips
+    // chips: nothing to show before the first iteration on this mesh, faded while not the current solution
+    const none = R.iterations === 0;
     setChip(chips.mill, MILL_LABEL[params.mill]);
-    setChip(chips.force, (R.force / TONF).toFixed(0));
-    setChip(chips.h1, (R.h1Mean * 1e3).toFixed(3));
-    setChip(chips.crown, (R.crown * 1e6).toFixed(0));
-    setChip(chips.manifest, R.manifestIU.toFixed(0), R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    setChip(chips.conv, R.converged ? '収束' : running ? `反復中 ${etaText(eta)}` : '停止', R.converged ? 'ok' : running ? 'warn' : undefined);
-    chips.conv.classList.toggle('busy', !R.converged && running);
+    setChip(chips.force, none ? '—' : (R.force / TONF).toFixed(0));
+    setChip(chips.h1, none ? '—' : (R.h1Mean * 1e3).toFixed(3));
+    setChip(chips.crown, none ? '—' : (R.crown * 1e6).toFixed(0));
+    setChip(chips.manifest, none ? '—' : R.manifestIU.toFixed(0), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
+    setChip(chips.conv, running ? `反復中 ${etaText(eta)}` : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
+    chips.conv.classList.toggle('busy', running);
+    {
+      const label = running ? '■ 停止' : !stale ? '✓ 計算済み' : iterated ? '▶ 計算再開' : '▶ 計算開始';
+      if (runBtn.textContent !== label) runBtn.textContent = label;
+      runBtn.disabled = !running && !stale;
+      runBtn.classList.toggle('running', running);
+      // results that are not this setting's solution are faded until a solve has run on it
+      const faded = stale && !running;
+      staleTag.hidden = !faded;
+      const tagText = R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）' : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
+      if (staleTag.textContent !== tagText) staleTag.textContent = tagText;
+      for (const e of [chartGrid, loadSec.root, shapeSec.root, numSec2.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
+    }
     {
       const res = Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—';
       const fem = R.fem ? ` / 補正 ${solver.femLastChange.toExponential(1)}` : '';
       setChip(chips.res, res + fem, R.converged ? 'ok' : R.residual < 1e-3 ? 'warn' : 'bad');
     }
-    setChip(chips.ms, R.solveMs.toFixed(0));
+    setChip(chips.ms, none ? '—' : R.solveMs.toFixed(0));
+    for (const c of [chips.force, chips.h1, chips.crown, chips.manifest, chips.res, chips.ms]) c.classList.toggle('v3-stale', stale && !running);
     const warns = [...R.warnings.map((w: Warning3D) => WARNING_TEXT[w]), ...R.notes];
     const want = warns.join('\u0001');
     if (warnBox.dataset.sig !== want) {
@@ -850,6 +899,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       etaClock += lastSolveEnd > 0 && t0 - lastSolveEnd < ETA_GAP_MS ? t1 - lastSolveEnd : t1 - t0;
       lastSolveEnd = t1;
       eta = remaining.update(etaClock, solver.progress(), etaKey());
+      iterated = true;
+      // converged: the results are this setting's, and the solve waits for the next 計算開始
+      if (solver.isConverged) { running = false; stale = false; dirty = true; }
     } else {
       lastSolveEnd = 0;
     }
@@ -878,8 +930,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   // keyboard: space pauses the solve on this tab too
   window.addEventListener('keydown', (e) => {
     if (!active || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.code === 'Space') { e.preventDefault(); running = !running; dirty = true; }
-    if (e.key === 'r' || e.key === 'R') { solver.setParams(params); solver.wake(); dirty = true; running = true; }
+    if (e.code === 'Space') { e.preventDefault(); if (running) stopSolve(); else startSolve(); }
+    if (e.key === 'r' || e.key === 'R') { solver.setParams(params); solver.wake(); settingsChanged(); }
     const k = Number(e.key);
     if (k >= 1 && k <= MILLS.length && !e.metaKey && !e.ctrlKey && !e.altKey) {
       switchMill(MILLS[k - 1]);
@@ -887,7 +939,11 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   });
   void idleFrames;
   // a hook for headless checks, like the 2D tab's
-  (window as unknown as { __v3: unknown }).__v3 = { solver, get params() { return params; }, get eta() { return eta; }, handle };
+  (window as unknown as { __v3: unknown }).__v3 = {
+    solver, get params() { return params; }, get eta() { return eta; }, handle,
+    // the 計算開始 button's actions and state, for checks that drive the page as a user would
+    start: startSolve, stop: stopSolve, get running() { return running; }, get stale() { return stale; },
+  };
   return handle;
 }
 
