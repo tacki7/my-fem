@@ -8,7 +8,7 @@
 import type { HousingResult, Result3D, RollState } from '../sim3d/solver';
 import type { Params3D, Stack } from '../sim3d/stack';
 import { onBearing, saddleXs } from '../sim3d/stack';
-import { housingPlan } from '../sim3d/housing';
+import { housingPlan, housingInScope } from '../sim3d/housing';
 import type { RingInfluence } from '../sim3d/ring';
 import { nearestStation, stationAbove, stationBelow } from '../sim3d/grid';
 
@@ -680,7 +680,12 @@ export class EndView {
 export class SideView {
   constructor(private canvas: HTMLCanvasElement) {}
 
-  draw(stack: Stack, p: Params3D, housing: HousingResult | null = null): void {
+  /**
+   * The stack as the settings now have it. The housing frame follows the settings too, from
+   * the moment the mode is on; only its numbers come from a solve (`housing`), drawn faded
+   * while they are not the current settings' (`faded`).
+   */
+  draw(stack: Stack, p: Params3D, housing: HousingResult | null = null, faded = false): void {
     const width = p.width;
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
@@ -689,15 +694,16 @@ export class SideView {
     const rolls = stack.rolls;
     if (!rolls.length) return;
     const wr = rolls[stack.wr];
-    // a bearing block at each support, as wide as the neck is thick
-    const block = (r: Stack['rolls'][number]) => Math.max(r.Dn, 0.04);
+    // a bearing block at each support, as wide as the neck is thick - but no wider than the
+    // neck is long, so a block never runs into its barrel
+    const block = (r: Stack['rolls'][number]) => Math.max(0, Math.min(Math.max(r.Dn, 0.04), r.Ls - r.Lb));
     let xmax = width / 2, top = 0;
     for (const r of rolls) {
       xmax = Math.max(xmax, Math.abs(r.shift) + r.Lb / 2, Math.abs(r.shift) + r.Ls / 2 + block(r) / 2);
       top = Math.max(top, r.cy + r.D / 2);
     }
     // the housings, in the housing mode: the posts round the screw roll's chocks, to scale
-    const screwRoll = housing ? rolls.find((r) => r.support === 'screw') : undefined;
+    const screwRoll = housingInScope(p) ? rolls.find((r) => r.support === 'screw') : undefined;
     const plan = screwRoll ? housingPlan(p, screwRoll) : null;
     const frame = screwRoll && plan ? {
       plan,
@@ -828,44 +834,52 @@ export class SideView {
     // the strip at the pass line, its width to scale
     ctx.fillStyle = STRIP_COLOR;
     ctx.fillRect(px(-width / 2), py(pass), width * scale, 3);
-    // the housings' numbers: each window's opening and its two crossheads' share of
-    // it - equal openings and the crossheads trading places are what a
-    // point-symmetric shift does to a frame - and the screw roll's tilt
-    if (frame && housing && screwRoll) {
-      const names = ['操作側', '駆動側'];
-      const yHead = py(frame.under + frame.depth);
-      ctx.fillStyle = '#ffc46b';
-      ctx.textBaseline = 'bottom';
-      frame.plan.centres.forEach((xc, k) => {
-        const sd = housing.sides[k];
-        if (!sd) return;
-        ctx.textAlign = xc < 0 ? 'left' : 'right';
-        const tx = xc < 0 ? pad : W - pad;
-        ctx.fillText(`${names[k]} 開き ${(sd.stretch * 1e6).toFixed(0)} µm`, tx, yHead - 15);
-        ctx.fillText(`上 ${(sd.crossheadTop * 1e6).toFixed(0)}・下 ${(sd.crossheadBottom * 1e6).toFixed(0)}`, tx, yHead - 3);
-      });
-      ctx.textAlign = 'center';
-      ctx.fillText(`${screwRoll.id} 支持の傾き（駆動側 − 操作側）${Math.round(housing.burTilt * 1e6) || 0} µm`, W / 2, yHead - 27);
-      // a 6Hi's intermediate chocks seated on the backup roll's: filled while a seat carries load, dashed once it has lifted
-      const ir = p.mill === '6hi' && p.irSeat ? rolls.find((r) => r.id === 'IR') : undefined;
-      if (ir && housing.seatForces.length >= 2) {
-        const yIR = py(ir.cy) - Math.max(ir.Dn * 1.3 * scale, 6) / 2, yBUR = py(screwRoll.cy) + Math.max(screwRoll.Dn * 1.3 * scale, 6) / 2;
-        const sw = Math.max(block(ir) * scale * 0.5, 5);
-        [ir.shift - ir.Ls / 2, ir.shift + ir.Ls / 2].forEach((xs, k) => {
-          if (yIR - yBUR < 3) return;
-          if (housing.seatForces[k] > 0) {
-            ctx.fillStyle = 'rgba(255, 196, 107, 0.6)';
-            ctx.fillRect(px(xs) - sw / 2, yBUR, sw, yIR - yBUR);
-          } else {
-            ctx.strokeStyle = 'rgba(220, 230, 245, 0.5)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([2, 2]);
-            ctx.strokeRect(px(xs) - sw / 2 + 0.5, yBUR + 0.5, sw - 1, yIR - yBUR - 1);
-            ctx.setLineDash([]);
-          }
+    if (frame && screwRoll) {
+      // The housings' numbers: each window's opening and its two crossheads' share of
+      // it - equal openings and the crossheads trading places are what a
+      // point-symmetric shift does to a frame - and the screw roll's tilt. They are a
+      // solve's: none before the first, faded once the settings have moved on.
+      if (housing) {
+        ctx.save();
+        if (faded) ctx.globalAlpha = 0.45;
+        const names = ['操作側', '駆動側'];
+        const yHead = py(frame.under + frame.depth);
+        ctx.fillStyle = '#ffc46b';
+        ctx.textBaseline = 'bottom';
+        frame.plan.centres.forEach((xc, k) => {
+          const sd = housing.sides[k];
+          if (!sd) return;
+          ctx.textAlign = xc < 0 ? 'left' : 'right';
+          const tx = xc < 0 ? pad : W - pad;
+          ctx.fillText(`${names[k]} 開き ${(sd.stretch * 1e6).toFixed(0)} µm`, tx, yHead - 15);
+          ctx.fillText(`上 ${(sd.crossheadTop * 1e6).toFixed(0)}・下 ${(sd.crossheadBottom * 1e6).toFixed(0)}`, tx, yHead - 3);
         });
+        ctx.textAlign = 'center';
+        ctx.fillText(`${screwRoll.id} 支持の傾き（駆動側 − 操作側）${Math.round(housing.burTilt * 1e6) || 0} µm`, W / 2, yHead - 27);
+        // a 6Hi's intermediate chocks seated on the backup roll's: filled while a seat carries load, dashed once it has lifted
+        const ir = p.mill === '6hi' && p.irSeat ? rolls.find((r) => r.id === 'IR') : undefined;
+        if (ir && housing.seatForces.length >= 2) {
+          const yIR = py(ir.cy) - Math.max(ir.Dn * 1.3 * scale, 6) / 2, yBUR = py(screwRoll.cy) + Math.max(screwRoll.Dn * 1.3 * scale, 6) / 2;
+          const sw = Math.max(block(ir) * scale * 0.5, 5);
+          [ir.shift - ir.Ls / 2, ir.shift + ir.Ls / 2].forEach((xs, k) => {
+            if (yIR - yBUR < 3) return;
+            if (housing.seatForces[k] > 0) {
+              ctx.fillStyle = 'rgba(255, 196, 107, 0.6)';
+              ctx.fillRect(px(xs) - sw / 2, yBUR, sw, yIR - yBUR);
+            } else {
+              ctx.strokeStyle = 'rgba(220, 230, 245, 0.5)';
+              ctx.lineWidth = 1;
+              ctx.setLineDash([2, 2]);
+              ctx.strokeRect(px(xs) - sw / 2 + 0.5, yBUR + 0.5, sw - 1, yIR - yBUR - 1);
+              ctx.setLineDash([]);
+            }
+          });
+        }
+        ctx.restore();
       }
       // under the pass line: the clear span between the posts' inner faces, against the strip width
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
       const [i0, i1] = frame.plan.inner;
       const yd = py(bottom) + 8;
       ctx.strokeStyle = frame.warn ? '#ff6b81' : 'rgba(255, 196, 107, 0.75)';

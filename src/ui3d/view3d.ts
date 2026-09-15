@@ -17,10 +17,13 @@ import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, hel
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
-import { housingCompliance, halfStiffness, housingPlan } from '../sim3d/housing';
+import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '../sim3d/housing';
 
 const TONF = 9.80665e3;
 const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
+/** the hints of the dials another dimension bounds (see `BOUNDS`) */
+const NECK_HINT = 'ロール直径まで（スライダーの上限がロール直径。直径を細くするとネック径も追従する）。';
+const SPAN_HINT = '軸受の中心間の距離。胴長より短くできない（スライダーの下限が胴長。胴長を支持スパンより長くすると支持スパンも伸びる）。';
 
 /** ready-made setups, one click each; every one starts from its mill's defaults */
 interface Preset3D { name: string; note: string; mill: MillType; patch: Partial<Params3D> }
@@ -43,7 +46,8 @@ const PRESETS: Preset3D[] = [
   {
     name: '箔 20Hi', mill: '20hi',
     note: '0.1 mm → 20% ／ WR 径 40 mm',
-    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04 },
+    // the neck in the 20Hi default's proportion (55 of 65 mm): left at 55 mm it was thicker than the roll
+    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04, wrDn: 0.034 },
   },
 ];
 /** solve time allowed per frame [ms] */
@@ -76,7 +80,14 @@ export interface View3DHandle {
 }
 
 interface Dial {
+  /** show a parameter value (SI) */
   set(v: number): void;
+  /** the travel the dial was built with, in its display units, and the factor from those to SI */
+  min: number;
+  max: number;
+  scale: number;
+  /** move the ends of its travel (display units) */
+  setRange(min: number, max: number): void;
 }
 
 /**
@@ -306,14 +317,36 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const dials = new Map<string, Dial>();
   let contactKeys: string[] = [];
 
-  /** a neck (or a backing shaft) never wider than its barrel: whichever dial moved, the other follows */
-  const NECKS: [keyof Params3D, keyof Params3D][] = [['wrDn', 'wrD'], ['irDn', 'irD'], ['burDn', 'burD'], ['bbShaft', 'bbD']];
-  const clampNecks = () => {
+  /**
+   * Dimensions another one bounds: a neck (or a backing shaft) no thicker than its roll, and a
+   * support span no shorter than its barrel - a bearing inside the barrel is no mill. The bounded
+   * dial's travel ends at the other's value, so it cannot be dragged, typed or stepped past it;
+   * when the roll or the barrel is moved past it, the bounded value follows. A preset or a
+   * remembered mill geometry is held to the same bounds.
+   */
+  const BOUNDS: { key: keyof Params3D; by: keyof Params3D; side: 'max' | 'min' }[] = [
+    { key: 'wrDn', by: 'wrD', side: 'max' }, { key: 'irDn', by: 'irD', side: 'max' },
+    { key: 'burDn', by: 'burD', side: 'max' }, { key: 'bbShaft', by: 'bbD', side: 'max' },
+    { key: 'wrLs', by: 'wrLb', side: 'min' }, { key: 'irLs', by: 'irLb', side: 'min' }, { key: 'burLs', by: 'burLb', side: 'min' },
+  ];
+  /** the parameters held to their bounds */
+  const clampBounds = (p: Params3D) => {
+    const pr = p as unknown as Record<string, number>;
+    for (const b of BOUNDS) {
+      const v = pr[b.key as string], lim = pr[b.by as string];
+      if (b.side === 'max' ? v > lim : v < lim) pr[b.key as string] = lim;
+    }
+  };
+  /** each bounded dial: its travel cut at the bound (never to nothing), and the value as the parameter has it */
+  const syncBounds = () => {
     const pr = params as unknown as Record<string, number>;
-    for (const [dn, d] of NECKS) {
-      if (pr[dn as string] <= pr[d as string]) continue;
-      pr[dn as string] = pr[d as string];
-      dials.get(dn as string)?.set(pr[dn as string]);
+    for (const b of BOUNDS) {
+      const d = dials.get(b.key as string);
+      if (!d) continue;
+      const lim = pr[b.by as string] / d.scale;
+      if (b.side === 'max') d.setRange(d.min, Math.max(Math.min(d.max, lim), d.min + 1e-9 * (d.max - d.min)));
+      else d.setRange(Math.min(Math.max(d.min, lim), d.max - 1e-9 * (d.max - d.min)), d.max);
+      d.set(pr[b.key as string]);
     }
   };
   /** the housing section's derived-stiffness line, rewritten on every change while the section is built */
@@ -326,7 +359,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     dirty = true;
   };
   const apply = () => {
-    clampNecks();
+    clampBounds(params);
+    syncBounds();
     solver.setParams(params);
     refreshHousingHint?.();
     settingsChanged();
@@ -355,7 +389,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       label, unit, min, max, step, log, value: (params[key] as number) / scale, hint, format,
       onInput: (v) => { (params as unknown as Record<string, number>)[key as string] = v * scale; apply(); },
     });
-    dials.set(key as string, { set: (v) => h.set(v / scale) });
+    dials.set(key as string, { set: (v) => h.set(v / scale), min, max, scale, setRange: (lo, hi) => h.setRange(lo, hi) });
     h.root.dataset.key = key as string;
     return h.root;
   };
@@ -365,6 +399,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const applyPreset = (pr: Preset3D) => {
     geometryByMill.set(params.mill, pickGeometry(params));
     params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)], asu2: [...(pr.patch.asu2 ?? defaultParams(pr.mill).asu2)] };
+    clampBounds(params);
     solver.setParams(params); settingsChanged(); buildLeft();
   };
   /** a new mill type with every other setting kept: only the roll dimensions change */
@@ -576,12 +611,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     const geoSec = section('ロール寸法', { remember: false, open: false });
     geoSec.body.append(num('wrD', 'WR 直径', 'mm', 30, 900, 5, 1e-3));
     geoSec.body.append(num('wrLb', 'WR 胴長', 'mm', 500, 2500, 10, 1e-3));
-    geoSec.body.append(num('wrLs', 'WR 支持スパン', 'mm', 600, 3000, 10, 1e-3));
-    geoSec.body.append(num('wrDn', 'WR ネック径', 'mm', 20, 700, 5, 1e-3, 'ロール直径を超えない（超える値は直径に丸められる）。'));
+    geoSec.body.append(num('wrLs', 'WR 支持スパン', 'mm', 600, 3000, 10, 1e-3, SPAN_HINT));
+    geoSec.body.append(num('wrDn', 'WR ネック径', 'mm', 20, 700, 5, 1e-3, NECK_HINT));
     if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
       geoSec.body.append(num('irD', params.mill === '20hi' ? '第1中間 直径' : 'IR 直径', 'mm', 50, 900, 5, 1e-3));
       geoSec.body.append(num('irLb', params.mill === '20hi' ? '第1中間 胴長' : 'IR 胴長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('irLs', params.mill === '20hi' ? '第1中間 支持スパン' : 'IR 支持スパン', 'mm', 600, 3000, 10, 1e-3));
+      geoSec.body.append(num('irLs', params.mill === '20hi' ? '第1中間 支持スパン' : 'IR 支持スパン', 'mm', 600, 3000, 10, 1e-3, SPAN_HINT));
+      // the neck had no dial: a thinner IR pulled it down (the bound), and it stayed thin when the IR grew back
+      geoSec.body.append(num('irDn', params.mill === '20hi' ? '第1中間 ネック径' : 'IR ネック径', 'mm', 20, 700, 5, 1e-3, NECK_HINT));
     }
     if (params.mill === '20hi') {
       geoSec.body.append(num('ir2D', '第2中間 直径', 'mm', 80, 400, 5, 1e-3));
@@ -590,12 +627,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     if (params.mill === '4hi' || params.mill === '6hi') {
       geoSec.body.append(num('burD', 'BUR 直径', 'mm', 400, 2000, 10, 1e-3));
       geoSec.body.append(num('burLb', 'BUR 胴長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('burLs', 'BUR 支持スパン', 'mm', 600, 3200, 10, 1e-3));
-      geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3, 'ロール直径を超えない。'));
+      geoSec.body.append(num('burLs', 'BUR 支持スパン', 'mm', 600, 3200, 10, 1e-3, SPAN_HINT));
+      geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3, NECK_HINT));
     }
     if (params.mill === '12hi' || params.mill === '20hi') {
       geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
-      geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3));
+      geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3, 'バッキング外径まで（スライダーの上限が外径。外径を小さくすると軸径も追従する）。'));
       geoSec.body.append(num('bbLb', 'バッキング軸 支持長', 'mm', 500, 2500, 10, 1e-3));
       geoSec.body.append(toggle('バッキング軸受を分割', params.bbSegmented, (v) => { params.bbSegmented = v; apply(); },
         'ON: 軸受はサドル間ごとの独立したリング（サドル幅の隙間では接触しない）。OFF: 一本の連続胴として扱う。').root);
@@ -629,6 +666,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     left.append(numSec.root);
 
     syncModeDials();
+    syncBounds();
   };
 
   const syncModeDials = () => {
@@ -641,7 +679,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     on('screw', params.mode === 'screw');
     // the housing frame's dimensions only mean something with the mode on, and
     // with it on the screw roll no longer sits on the per-support stiffness
-    const housingOn = params.housingMode && (params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi');
+    const housingOn = housingInScope(params);
     for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingPostWidth', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
     on('irSeatK', params.housingMode && params.irSeat);
     // the load formula's tension only acts with the tension feedback on
@@ -687,8 +725,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       }
     } else frontView.draw(R, st, { magnify, width: params.width });
     endView.draw(R, st, params.width, TONF);
-    sideCanvas.classList.toggle('with-housing', R.housing !== null);
-    sideView.draw(st, params, R.housing);
+    // the frame follows the mode, not the result, so the view keeps its height through a change
+    sideCanvas.classList.toggle('with-housing', housingInScope(params));
+    sideView.draw(st, params, R.housing, stale && !running);
 
     const um = (a: Float64Array) => Float64Array.from(a, (v) => v * 1e6);
     charts.defl.draw(R.rolls.map((r, i): XYSeries => ({
