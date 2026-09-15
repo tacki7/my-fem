@@ -162,7 +162,16 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   stage.append(legendBox);
   // over the stack while its colours and deflections are not the current settings' solution
   const staleTag = el('div', 'v3-stale-tag', '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）');
-  stage.append(staleTag);
+  // the discretisation at a glance, for the settings as they are now (not the last solve's):
+  // the stations every roll is solved on, with the flattening's ring mesh when that model is
+  // on, and the strip's slices, with the FEM's rows and layers when a FEM solves it
+  const gridRoll = el('span'), gridStrip = el('span');
+  const gridTag = el('div', 'v3-grid-tag');
+  gridTag.append(el('span', 'v3-grid-title', '分割数'), el('span', '', 'ロール'), gridRoll, el('span', '', '材料'), gridStrip);
+  // both along the stack's top edge; a narrow stage wraps the stale note under the counts
+  const stageTop = el('div', 'v3-stage-top');
+  stageTop.append(gridTag, staleTag);
+  stage.append(stageTop);
   front.root.querySelector('.chart-head')!.append(colorBtns, modeBtns);
   const setFrontMode = (m: '3d' | '2d') => {
     if (m === '3d' && !stack3d) m = '2d';
@@ -783,6 +792,15 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
     stats.set('ms', R.solveMs.toFixed(1));
     stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
     stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
+    {
+      const ring = solver.ringFor(st.rolls[st.wr]);
+      const rollText = `幅 ${solver.ns}${ring ? ` ／ 断面 ${2 * (ring.cols - 1)} × ${ring.rows - 1}` : ''}`;
+      const stripText = `幅 ${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）`
+        + (params.stripModel === 'slab' ? '' : ` × 圧延 ${Math.round(params.stripNz)}`)
+        + (params.stripModel === 'fem3d' ? ` × 板厚 ${Math.round(params.stripNy)}` : '');
+      if (gridRoll.textContent !== rollText) gridRoll.textContent = rollText;
+      if (gridStrip.textContent !== stripText) gridStrip.textContent = stripText;
+    }
     stats.set('fem', R.fem ? `${params.stripModel === 'fem3d' ? '3D ' : ''}${R.fem.iterations} / ${R.fem.massRatio.toFixed(4)}` : '—（スラブ法）', R.fem && !R.fem.converged ? 'warn' : undefined);
     {
       const wr = st.rolls[st.wr];
