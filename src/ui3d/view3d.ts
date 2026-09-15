@@ -179,7 +179,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
   const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
   const cGauge = cell('v3-gauge', '板厚プロファイル', '板幅中央を 0 とした偏差');
   const cCrown = cell('v3-crown', 'クラウン比率', '板厚プロファイル ÷ 中央の板厚');
-  const cCrownChange = cell('v3-crown-change', 'クラウン比率変化', '出側 − 入側 ／ 負 = 板端側が伸びる');
+  const cCrownChange = cell('v3-crown-change', 'クラウン比率変化', '入側 − 出側 ／ 正 = 板端側が伸びる');
   const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
   const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
   const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
@@ -726,11 +726,12 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType 
       { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: r0, dash: true, width: 2 },
       { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: r1, width: 2 },
     ], { unit: '%', halfWidth: strip * 1.05, strip, zero: true });
-    // How far the pass moved the crown ratio, exit less entry: zero where the shape was
-    // kept, negative where the edge was rolled thinner relative to the centre than it
-    // came in - there the edge is the longer fibre (edge waves), positive the centre.
+    // How far the pass moved the crown ratio, entry less exit: zero where the shape was
+    // kept, positive where the edge was rolled thinner relative to the centre than it
+    // came in - there the edge is the longer fibre (edge waves), negative the centre.
+    // Before lateral flow it is the elongation relative to the centre (1 % = 1000 I-units).
     charts.crownChange.draw([
-      { label: '出側 − 入側', color: '#ff8fa8', x: R.x, y: Float64Array.from(r1, (v, i) => v - r0[i]), width: 2, fill: true },
+      { label: '入側 − 出側', color: '#ff8fa8', x: R.x, y: Float64Array.from(r0, (v, i) => v - r1[i]), width: 2, fill: true },
     ], { unit: '%', halfWidth: strip * 1.05, strip, zero: true });
 
     // Each curve shifted so its smallest value across the strip reads zero:
