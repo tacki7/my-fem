@@ -21,15 +21,36 @@ export async function loadModel() {
 }
 
 /**
- * Write a FrontISTR case for `mill` ('2hi' | '4hi') into `out`: roll.msh, roll.cnt,
+ * The coarser solid the app solves the 4Hi and 6Hi with: 2 mm cells at the contact lines
+ * growing to 60 mm, 3 mm surface layers, half the roll model's stations, two load steps.
+ * A 4Hi answers in ~1 min against ~26 min on the fine mesh, within 10 µm of it.
+ */
+const QUICK_MESH = { arcCell: 2.0e-3, arcFine: 0.020, arcGrowth: 1.4, arcMax: 0.060, layer0: 3e-3, layerGrowth: 1.8 };
+export const QUICK = {
+  '2hi': {},
+  '4hi': { mesh: QUICK_MESH, substeps: 2 },
+  // The 6Hi spans the whole length with three bodies: coarser still around the circumference
+  // and through the radius, but not along the axis - with half the stations a barrel end
+  // falls between two node rings and the contact load there is 20 % off.
+  '6hi': { mesh: { arcCell: 3.0e-3, arcFine: 0.020, arcGrowth: 1.5, arcMax: 0.080, layer0: 4e-3, layerGrowth: 2.0 }, substeps: 2 },
+};
+
+/** the mills a case can be built for, and whether the case spans the whole roll length */
+export const MILLS = { '2hi': { full: false }, '4hi': { full: false }, '6hi': { full: true } };
+
+/**
+ * Write a FrontISTR case for `mill` ('2hi' | '4hi' | '6hi') into `out`: roll.msh, roll.cnt,
  * hecmw_ctrl.dat and reference.json (the roll model's answer at the same stations).
  *
- * 2Hi: the work roll as a solid under the strip load the slab slices found, its bearing
- * cross-section held, symmetry on x = 0 and z = 0. 4Hi: the work roll and the backup roll,
- * touching at the centre line, in contact (the work roll's top nodes on the backup roll's
- * bottom faces, augmented Lagrange, no friction); the backup roll's bearing section held, the
- * work roll's chock a spring as soft as the roll model's (K_CHOCK_Y), the strip load ramped in
- * substeps.
+ * The rolls of the upper half as solids, each a stepped cylinder: barrel with its ground and
+ * thermal crown, then the neck. 2Hi: the work roll under the strip load the slab slices found,
+ * its bearing cross-section held. 4Hi / 6Hi: the rolls touching on the centre line, in contact
+ * (the lower roll's top nodes on the upper roll's bottom faces, augmented Lagrange, no
+ * friction); the screw roll's bearing sections held, the chocked rolls' chock sections on a
+ * spring as soft as the roll model's (K_CHOCK_Y) with their bender forces, the strip load
+ * ramped in substeps. 2Hi and 4Hi are symmetric about x = 0 and model the x ≥ 0 half; the 6Hi's
+ * shifted intermediate roll is not, so its case spans the whole length. All model the z ≥ 0
+ * half (symmetry about the plane of the roll axes).
  *
  * The strip load q(x) is prescribed to both models (the slab slices' converged load, over the
  * same Hertz half-width b(x) the roll model flattens with), so what differs is the roll
@@ -40,53 +61,79 @@ export async function loadModel() {
  *
  * `patch` overrides the mill's default parameters; the grid is the gate's (81 stations, the
  * strip on the roll's nodes, 8 elements along the arc) unless the patch says otherwise.
+ * `opts.mesh` overrides the mesh's cell sizes (a coarser solid for a quicker answer),
+ * `opts.substeps` the contact's load steps (4), `opts.full` whether to span the whole length.
  */
-export async function buildCase(mill, patch, out) {
-  if (mill !== '2hi' && mill !== '4hi') throw new Error('mill: 2hi or 4hi');
+export async function buildCase(mill, patch, out, opts = {}) {
+  if (!MILLS[mill]) throw new Error(`mill: ${Object.keys(MILLS).join(', ')}`);
+  const full = opts.full ?? MILLS[mill].full;
+  const substeps = opts.substeps ?? 4;
   mkdirSync(out, { recursive: true });
   const { StackSolver, defaultParams, radiusProfile } = await loadModel();
 
   // ── the roll model's pass ──
-  const p = { ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8, ...patch, mill };
+  const p = { ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8, ...patch, ...(opts.stations ? { stations: opts.stations } : {}), mill };
   const sv = new StackSolver(p);
   let it = 0;
   for (let f = 0; f < 600; f++) { sv.advance(1e9, 6); it += sv.result.iterations; if (sv.isConverged) break; }
   const R = sv.result, st = sv.stack;
   if (!R.converged) throw new Error('the roll model did not converge');
   const ns = R.x.length, c = (ns - 1) / 2;
-  const wrDef = st.rolls[st.wr], wr = sv.rolls[st.wr];
-  const burIdx = mill === '4hi' ? st.rolls.findIndex((r) => r.id === 'BUR') : -1;
-  const burDef = burIdx >= 0 ? st.rolls[burIdx] : null, bur = burIdx >= 0 ? sv.rolls[burIdx] : null;
+  // the upper half's rolls, bottom up: the work roll first, the screw roll last
+  const up = R.rolls.length;
+  const defs = st.rolls.slice(0, up), rolls = sv.rolls.slice(0, up);
+  const screwIdx = defs.findIndex((d) => d.support === 'screw');
+  if (screwIdx < 0) throw new Error('no screw roll');
+  // the contact pairs of the upper half, lower roll first
+  const pairs = st.contacts.filter((k) => k.a < up && k.b < up).map((k) => (k.a < k.b ? [k.a, k.b] : [k.b, k.a]));
 
-  /** the stations of a roll's mesh: the grid's from the centre out to the roll's last station, with the barrel step's transition */
-  function stationsOf(def, roll) {
-    const xs = [];
-    for (let s = c; s <= roll.ib; s++) xs.push(R.x[s]);
+  /** where a roll's barrel ends, with the 5 mm step to its neck: the stations a mesh needs there */
+  const barrelEnds = (def) => {
     const eb = def.Lb / 2;
-    for (const w of [eb, eb + 0.005]) if (!xs.some((v) => Math.abs(v - w) < 1e-9)) xs.push(w);
+    return full ? [def.shift - eb - 0.005, def.shift - eb, def.shift + eb, def.shift + eb + 0.005] : [eb, eb + 0.005];
+  };
+  /**
+   * The stations of a roll's mesh: the grid's over the roll (from the centre out on a half
+   * model), with the barrel ends' transitions - its own, and those of the rolls it touches, so
+   * a contact ends on a node ring where the partner's barrel ends (a 6Hi's shifted intermediate
+   * roll ends inside the work roll's barrel; without its ring the contact would stop a cell short).
+   */
+  function stationsOf(def, roll, partners) {
+    const xs = [];
+    for (let s = full ? roll.ia : c; s <= roll.ib; s++) xs.push(R.x[s]);
+    const lo = xs[0], hi = xs[xs.length - 1];
+    const ends = [...barrelEnds(def), ...partners.flatMap(barrelEnds)];
+    for (const w of ends) if (w > lo - 1e-9 && w < hi + 1e-9 && !xs.some((v) => Math.abs(v - w) < 1e-9)) xs.push(w);
     xs.sort((a, b) => a - b);
-    const station = xs.map((x) => { for (let s = c; s < ns; s++) if (Math.abs(R.x[s] - x) < 1e-9) return s; return -1; });
-    const support = R.x[roll.supports[roll.supports.length - 1]];
-    const iSupport = xs.findIndex((x) => Math.abs(x - support) < 1e-9);
-    if (iSupport < 0) throw new Error(`${def.id}: the support station ${support} is not on the mesh`);
-    return { xs, station, iSupport, support };
+    const station = xs.map((x) => { for (let s = roll.ia; s <= roll.ib; s++) if (Math.abs(R.x[s] - x) < 1e-9) return s; return -1; });
+    const sups = full ? roll.supports : [roll.supports[roll.supports.length - 1]];
+    const supports = sups.map((s) => R.x[s]);
+    const iSupports = supports.map((x) => xs.findIndex((v) => Math.abs(v - x) < 1e-9));
+    if (iSupports.some((i) => i < 0)) throw new Error(`${def.id}: a support station (${supports.join(', ')}) is not on the mesh`);
+    return { xs, station, iSupports, supports, sups };
   }
   /** the roll's radius along x: the barrel with its ground and thermal crown, then the neck */
-  const radiusOf = (def) => (x) => (x <= def.Lb / 2 + 1e-9 ? def.D / 2 + radiusProfile(def, x) : def.Dn / 2);
-  const meshOpts = { arcCell: 1.0e-3, arcFine: 0.030, arcGrowth: 1.25, arcMax: 0.040, layer0: 1.5e-3, layerGrowth: 1.5 };
+  const radiusOf = (def) => (x) => (Math.abs(x - def.shift) <= def.Lb / 2 + 1e-9 ? def.D / 2 + radiusProfile(def, x) : def.Dn / 2);
+  const inBarrel = (def, x, tol = 1e-9) => Math.abs(x - def.shift) <= def.Lb / 2 + tol;
+  const meshOpts = { arcCell: 1.0e-3, arcFine: 0.030, arcGrowth: 1.25, arcMax: 0.040, layer0: 1.5e-3, layerGrowth: 1.5, ...(opts.mesh ?? {}) };
 
-  // ── the work roll ──
-  const W = stationsOf(wrDef, wr);
-  const mW = halfCylinderMesh({ ...meshOpts, xs: W.xs, radiusAt: radiusOf(wrDef), R0: wrDef.D / 2, cy: 0, fineTop: mill === '4hi' });
-  const bodies = [{ name: 'WR', mesh: mW }];
-  // ── the backup roll, touching the work roll on the centre line ──
-  let Bk = null, mB = null;
-  if (burDef) {
-    Bk = stationsOf(burDef, bur);
-    const cy = radiusOf(wrDef)(0) + radiusOf(burDef)(0);
-    mB = halfCylinderMesh({ ...meshOpts, layer0: 2e-3, layerGrowth: 1.6, xs: Bk.xs, radiusAt: radiusOf(burDef), R0: burDef.D / 2, cy, nodeStart: mW.nodeStart + mW.nodes.length, elemStart: mW.elemEnd + 1, fineTop: false });
-    bodies.push({ name: 'BUR', mesh: mB });
+  // ── the bodies, bottom up ──
+  const S = [], M = [], bodies = [];
+  let nodeStart = 1, elemStart = 1, cy = 0;
+  for (let r = 0; r < up; r++) {
+    const def = defs[r];
+    S[r] = stationsOf(def, rolls[r], pairs.filter((q) => q.includes(r)).map((q) => defs[q[0] === r ? q[1] : q[0]]));
+    // each roll touching the one below on the centre line, crowns included (the stack's own
+    // `cy` is the nominal radii's; the model carries the crowns in the gap instead)
+    if (r > 0) cy += radiusOf(defs[r - 1])(0) + radiusOf(def)(0);
+    // a roll with another above it is fine-meshed at its top as well as its bottom; the
+    // backup roll's layers a little coarser (it is the biggest body)
+    const own = r === screwIdx && r > 0 ? { layer0: 2e-3, layerGrowth: 1.6, ...(opts.mesh ?? {}) } : {};
+    M[r] = halfCylinderMesh({ ...meshOpts, ...own, xs: S[r].xs, radiusAt: radiusOf(def), R0: def.D / 2, cy, nodeStart, elemStart, fineTop: pairs.some((q) => q[0] === r) });
+    nodeStart += M[r].nodes.length; elemStart = M[r].elemEnd + 1;
+    bodies.push({ name: def.id, mesh: M[r] });
   }
+  const wrDef = defs[0], mW = M[0], W = S[0];
 
   // ── the strip load: the slices' q over the Hertz half-width b the roll model uses ──
   const law = sv.wsLaw;
@@ -100,8 +147,8 @@ export async function buildCase(mill, patch, out) {
     if (s < 0 || !Number.isFinite(R.q[s]) || R.q[s] <= 0) continue;
     const q = R.q[s], b = bAt(q, R.arc[s]);
     // the station's share of the strip along x: its cell's overlap with the strip (the slice
-    // weight the roll model sums the force with), halved at x = 0 where only x ≥ 0 is modelled
-    const dx = sv.sliceW[s] * (i === 0 ? 0.5 : 1);
+    // weight the roll model sums the force with), halved at x = 0 on a half model
+    const dx = sv.sliceW[s] * (!full && i === 0 ? 0.5 : 1);
     const p0 = (2 * q) / (Math.PI * b);
     for (let k = 0; k < mW.nk; k++) {
       const sk = mW.phi[k] * RW;
@@ -117,70 +164,90 @@ export async function buildCase(mill, patch, out) {
   }
 
   // ── groups ──
-  const ng = { XSYM: [], ZSYM: [] };
-  const lists = {};
-  const collect = (name, m, S) => {
-    const L = { axis: [], bottom: [], top: [], support: [] };
-    for (let i = 0; i < S.xs.length; i++) {
+  const ng = {};
+  if (!full) ng.XSYM = [];
+  ng.ZSYM = [];
+  const lists = [];
+  for (let r = 0; r < up; r++) {
+    const m = M[r], Sr = S[r];
+    const L = { axis: [], bottom: [], top: [], support: Sr.iSupports.map(() => []) };
+    for (let i = 0; i < Sr.xs.length; i++) {
       L.axis.push(m.id(i, 0, 0));
       for (let j = 0; j <= m.nr; j++) {
         for (let k = 0; k < (j === 0 ? 1 : m.nk); k++) {
           const n = m.id(i, j, k);
-          if (i === 0) ng.XSYM.push(n);
+          if (!full && i === 0) ng.XSYM.push(n);
           if (j === 0 || k === 0 || k === m.nk - 1) ng.ZSYM.push(n);
-          if (i === S.iSupport) L.support.push(n);
+          Sr.iSupports.forEach((iS, q) => { if (i === iS) L.support[q].push(n); });
         }
       }
       L.bottom.push(m.id(i, m.nr, 0)); L.top.push(m.id(i, m.nr, m.nk - 1));
     }
-    lists[name] = L;
-  };
-  collect('WR', mW, W);
-  if (mB) collect('BUR', mB, Bk);
-  const sg = {}, pairs = {};
-  const slaveByStation = [];
-  if (mB) {
-    ng.BRG = lists.BUR.support;   // the backup roll's bearing section, held
-    ng.CHOCK = lists.WR.support;  // the work roll's chock section, on the soft spring
-    // the contact zone: the work roll's top within 40 mm of its top line, the backup roll's bottom faces within 60 mm of its bottom line
-    const slave = [];
-    for (let i = 0; i < W.xs.length; i++) {
-      if (W.xs[i] > wrDef.Lb / 2 + 1e-9) break;
+    lists[r] = L;
+  }
+  // the screw roll's bearing sections held; the chocked rolls' chock sections on springs, with their benders
+  ng.BRG = lists[screwIdx].support.flat();
+  // A whole-length case has no symmetry plane to hold the rolls along x, and frictionless
+  // contacts and y springs leave each free to slide: one node of each - its axis at the first
+  // support station - is held axially (the half case's x = 0 plane does this). One node, not
+  // the section: a plane section held in x cannot rotate, and that would clamp the bearing
+  // and stop a chocked roll tilting.
+  if (full) ng.XHOLD = M.map((m, r) => m.id(S[r].iSupports[0], 0, 0));
+  const springs = [], benders = [];
+  for (let r = 0; r < up; r++) {
+    if (defs[r].support !== 'chock') continue;
+    const name = up === 2 ? 'CHOCK' : `CHOCK_${defs[r].id}`;
+    ng[name] = lists[r].support.flat();
+    for (const sec of lists[r].support) {
+      for (const n of sec) springs.push([n, K_CHOCK / sec.length]);
+      if (defs[r].benderForce) for (const n of sec) benders.push([n, defs[r].benderForce / sec.length]);
+    }
+  }
+  // the contact zones: the lower roll's top within 40 mm of its top line, the upper roll's
+  // bottom faces within 60 mm of its bottom line, over the barrels
+  const sg = {}, cpairs = {};
+  const contacts = [];
+  pairs.forEach(([a, b], q) => {
+    const mA = M[a], mB = M[b], dA = defs[a], dB = defs[b], RA = dA.D / 2, RB = dB.D / 2;
+    const slave = [], slaveByStation = [];
+    for (let i = 0; i < S[a].xs.length; i++) {
+      if (!inBarrel(dA, S[a].xs[i])) { slaveByStation.push(null); continue; }
       const here = [];
-      for (let k = 0; k < mW.nk; k++) if ((Math.PI - mW.phi[k]) * RW <= 0.040 + 1e-9) here.push(mW.id(i, mW.nr, k));
+      for (let k = 0; k < mA.nk; k++) if ((Math.PI - mA.phi[k]) * RA <= 0.040 + 1e-9) here.push(mA.id(i, mA.nr, k));
       slave.push(...here); slaveByStation.push(here);
     }
-    ng.SLAVE = slave;
     const master = [];
-    const RB = burDef.D / 2;
-    for (let i = 0; i + 1 < Bk.xs.length; i++) {
-      if (Bk.xs[i] > burDef.Lb / 2 - 1e-9) break;
+    for (let i = 0; i + 1 < S[b].xs.length; i++) {
+      // the faces whose near end is on the barrel (the last one ends at the barrel end)
+      if (!inBarrel(dB, S[b].xs[i], -1e-9) || !inBarrel(dB, S[b].xs[i + 1], 1e-9)) continue;
       for (let k = 0; k + 1 < mB.nk; k++) if (mB.phi[k + 1] * RB <= 0.060 + 1e-9) master.push(mB.outerFace(i, k));
     }
-    sg.MASTER = master;
-    pairs.CP1 = ['SLAVE', 'MASTER'];
-  } else {
-    ng.BRG = lists.WR.support;
-  }
-  writeFileSync(`${out}/roll.msh`, meshText(bodies, { header: `ROLL FEM LAB ${mill.toUpperCase()}`, E: wrDef.E, nu: wrDef.nu, ngroups: ng, sgroups: sg, contactPairs: pairs }));
+    const sName = pairs.length === 1 ? 'SLAVE' : `SLAVE${q + 1}`, mName = pairs.length === 1 ? 'MASTER' : `MASTER${q + 1}`;
+    ng[sName] = slave; sg[mName] = master; cpairs[`CP${q + 1}`] = [sName, mName];
+    contacts.push({ a, b, label: `${dA.id}–${dB.id}`, slaveByStation });
+  });
+  writeFileSync(`${out}/roll.msh`, meshText(bodies, { header: `ROLL FEM LAB ${mill.toUpperCase()}`, E: wrDef.E, nu: wrDef.nu, ngroups: ng, sgroups: sg, contactPairs: cpairs }));
 
   // ── the control file ──
   const cnt = ['!VERSION', ' 3'];
-  if (mB) {
+  const bc = [' ZSYM, 3, 3, 0.0', ' BRG, 2, 2, 0.0'];
+  if (full) bc.push(' XHOLD, 1, 1, 0.0'); else bc.unshift(' XSYM, 1, 1, 0.0');
+  const cload = [...loads.flatMap(([n, fy, fz]) => [` ${n}, 2, ${fy.toPrecision(9)}`, ` ${n}, 3, ${fz.toPrecision(9)}`]), ...benders.map(([n, fy]) => ` ${n}, 2, ${fy.toPrecision(9)}`)];
+  if (pairs.length) {
     cnt.push('!SOLUTION, TYPE=NLSTATIC', '!WRITE, RESULT',
       '!OUTPUT_RES', ' DISP, ON', ' REACTION, ON', ' CONTACT_NFORCE, ON', ' NSTRESS, OFF', ' NMISES, OFF',
-      '!BOUNDARY, GRPID=1', ' XSYM, 1, 1, 0.0', ' ZSYM, 3, 3, 0.0', ' BRG, 2, 2, 0.0',
-      '!SPRING, GRPID=1', ...ng.CHOCK.map((n) => ` ${n}, 2, ${(K_CHOCK / ng.CHOCK.length).toPrecision(6)}`),
-      '!CLOAD, GRPID=1', ...loads.flatMap(([n, fy, fz]) => [` ${n}, 2, ${fy.toPrecision(9)}`, ` ${n}, 3, ${fz.toPrecision(9)}`]),
+      '!BOUNDARY, GRPID=1', ...bc,
+      '!SPRING, GRPID=1', ...springs.map(([n, k]) => ` ${n}, 2, ${k.toPrecision(6)}`),
+      '!CLOAD, GRPID=1', ...cload,
       '!CONTACT_ALGO, TYPE=ALAGRANGE',
-      '!CONTACT, GRPID=1', ' CP1, 0.0',
-      '!STEP, SUBSTEPS=4, CONVERG=1.0e-5, MAXITER=50', ' BOUNDARY, 1', ' LOAD, 1', ' CONTACT, 1',
+      '!CONTACT, GRPID=1', ...Object.keys(cpairs).map((name) => ` ${name}, 0.0`),
+      `!STEP, SUBSTEPS=${substeps}, CONVERG=1.0e-5, MAXITER=50`, ' BOUNDARY, 1', ' LOAD, 1', ' CONTACT, 1',
       '!SOLVER, METHOD=CG, PRECOND=1, ITERLOG=NO, TIMELOG=YES', ' 30000, 1', ' 1.0e-7, 1.0, 0.0');
   } else {
     cnt.push('!SOLUTION, TYPE=STATIC', '!WRITE, RESULT',
       '!OUTPUT_RES', ' DISP, ON', ' REACTION, ON', ' NSTRESS, OFF', ' NMISES, OFF',
-      '!BOUNDARY', ' XSYM, 1, 1, 0.0', ' ZSYM, 3, 3, 0.0', ' BRG, 2, 2, 0.0',
-      '!CLOAD', ...loads.flatMap(([n, fy, fz]) => [` ${n}, 2, ${fy.toPrecision(9)}`, ` ${n}, 3, ${fz.toPrecision(9)}`]),
+      '!BOUNDARY', ...bc,
+      '!CLOAD', ...cload,
       '!SOLVER, METHOD=CG, PRECOND=1, ITERLOG=NO, TIMELOG=YES', ' 20000, 1', ' 1.0e-8, 1.0, 0.0');
   }
   cnt.push('!END');
@@ -189,36 +256,39 @@ export async function buildCase(mill, patch, out) {
 
   // ── the roll model's answer at the same stations, for compare ──
   const at = (arr, s) => (s >= 0 && Number.isFinite(arr[s]) ? arr[s] : null);
-  const wrSup = wr.supports[wr.supports.length - 1], burSup = bur ? bur.supports[bur.supports.length - 1] : -1;
+  // deflections against the held bearing: the screw roll's support(s) - the beam's own on a 2Hi
+  const screw = rolls[screwIdx];
+  const vRef = S[screwIdx].sups.reduce((a, s) => a + screw.v[s], 0) / S[screwIdx].sups.length;
+  const refRolls = defs.map((def, r) => ({
+    id: def.id, x: S[r].xs, station: S[r].station, iSupports: S[r].iSupports, supports: S[r].supports, nodes: lists[r],
+    D: def.D, Dn: def.Dn, Lb: def.Lb, Ls: def.Ls, shift: def.shift, support: def.support, bender: def.benderForce,
+    v: S[r].station.map((s) => (s >= 0 ? rolls[r].v[s] - vRef : null)),
+    // the barrel's radius deviation (ground and thermal crown) at each station: geometry the FEM's displacements leave out
+    prof: S[r].xs.map((x) => (inBarrel(def, x) ? radiusProfile(def, x) : 0)),
+    dx: S[r].xs.map((x, i, xs) => (i === 0 ? (full ? xs[1] - xs[0] : 0.5 * xs[1]) : i + 1 < xs.length ? 0.5 * (xs[i + 1] - xs[i - 1]) : xs[i] - xs[i - 1])),
+  }));
   const ref = {
-    mill, params: patch, iterations: it, force: R.force, screw: R.screw, quarterForce: R.force / 4, loadSumY: Fsum,
-    rolls: { WR: { D: wrDef.D, Dn: wrDef.Dn, Lb: wrDef.Lb, Ls: wrDef.Ls, support: W.support }, ...(burDef ? { BUR: { D: burDef.D, Dn: burDef.Dn, Lb: burDef.Lb, Ls: burDef.Ls, support: Bk.support } } : {}) },
+    mill, full, params: patch, iterations: it, force: R.force, screw: R.screw, quarterForce: R.force / (full ? 2 : 4), loadSumY: Fsum,
+    screwRoll: screwIdx,
+    rolls: refRolls,
     WR: {
-      x: W.xs, station: W.station, iSupport: W.iSupport, nodes: lists.WR,
-      // the work roll's axis against the held support: its own on a 2Hi, the backup roll's bearing on a 4Hi
-      v: W.station.map((s) => (s >= 0 ? wr.v[s] - (bur ? bur.v[burSup] : wr.v[wrSup]) : null)),
+      ...refRolls[0],
       flat: W.station.map((s) => at(R.flat, s)), q: W.station.map((s) => at(R.q, s)),
       b: W.station.map((s) => (s >= 0 && Number.isFinite(R.q[s]) && R.q[s] > 0 ? bAt(R.q[s], R.arc[s]) : null)),
       h1: W.station.map((s) => at(R.h1, s)),
-      // the barrel's radius deviation (ground and thermal crown) at each station: geometry the FEM's displacements leave out
-      prof: W.xs.map((x) => (x <= wrDef.Lb / 2 + 1e-9 ? radiusProfile(wrDef, x) : 0)),
-      dx: W.xs.map((x, i) => (i === 0 ? 0.5 * W.xs[1] : i + 1 < W.xs.length ? 0.5 * (W.xs[i + 1] - W.xs[i - 1]) : W.xs[i] - W.xs[i - 1])),
     },
-    ...(bur ? {
-      BUR: {
-        x: Bk.xs, station: Bk.station, iSupport: Bk.iSupport, nodes: lists.BUR,
-        v: Bk.station.map((s) => (s >= 0 ? bur.v[s] - bur.v[burSup] : null)),
-      },
-      contact: {
-        q: W.station.map((s) => at(sv.contacts[0].q, s)), delta: W.station.map((s) => at(sv.contacts[0].delta, s)),
-        slaveByStation,
-      },
-    } : {}),
+    contacts: contacts.map((k, q) => ({
+      ...k, q: S[k.a].station.map((s) => at(sv.contacts[q].q, s)), delta: S[k.a].station.map((s) => at(sv.contacts[q].delta, s)),
+      // the station's cell lies wholly on both barrels: where it does not, the model's load per
+      // width is that of a partial cell while the solid's node ring is on the barrel or off it
+      whole: S[k.a].station.map((s) => s >= 0 && sv.contacts[q].weight[s] >= (R.x[1] - R.x[0]) * 0.999),
+    })),
     mesh: bodies.map((b) => ({ name: b.name, nodes: b.mesh.nodes.length, hex: b.mesh.hex.length, prism: b.mesh.prism.length, stations: b.mesh.ni, layers: b.mesh.nr, angles: b.mesh.nk - 1 })),
   };
   writeFileSync(`${out}/reference.json`, JSON.stringify(ref));
   const nn = bodies.reduce((a, b) => a + b.mesh.nodes.length, 0);
-  const summary = `${mill}: ${it} iterations, F ${(R.force / TONF).toFixed(1)} tonf; ${ref.mesh.map((m) => `${m.name} ${m.nodes} nodes (${m.stations} × ${m.layers} × ${m.angles})`).join(', ')} = ${nn} nodes; strip load on the quarter ${(Fsum / TONF).toFixed(2)} tonf (F/4 = ${(R.force / 4 / TONF).toFixed(2)}); ${loads.length} loaded nodes${mB ? `; contact: ${ng.SLAVE.length} slave nodes, ${sg.MASTER.length} master faces` : ''} → ${out}`;
+  const share = full ? 'half' : 'quarter';
+  const summary = `${mill}: ${it} iterations, F ${(R.force / TONF).toFixed(1)} tonf; ${ref.mesh.map((m) => `${m.name} ${m.nodes} nodes (${m.stations} × ${m.layers} × ${m.angles})`).join(', ')} = ${nn} nodes; strip load on the ${share} ${(Fsum / TONF).toFixed(2)} tonf (F/${full ? 2 : 4} = ${(ref.quarterForce / TONF).toFixed(2)}); ${loads.length} loaded nodes${contacts.length ? `; contact: ${contacts.map((k, q) => `${k.label} ${ng[cpairs[`CP${q + 1}`][0]].length} slave nodes, ${sg[cpairs[`CP${q + 1}`][1]].length} master faces`).join(', ')}` : ''} → ${out}`;
   return { ref, summary, nodes: nn, loadedNodes: loads.length };
 }
 
@@ -253,29 +323,82 @@ export function readResult(dir) {
 }
 
 /**
- * 2Hi, per station: the work roll's axis deflection against its bearing and the indentation
- * under the strip, the roll model's and FrontISTR's. Indentation is read as the bottom
- * surface's rise against the top surface's: in a solid the bending's transverse (Poisson)
- * strain, −ν κ R²/2, moves both surfaces against the axis by the same amount, and that reading
- * cancels it (the roll model's flattening is the local part only). [m], [N/m]
+ * The roll model against FrontISTR, per station (lengths in m, loads in N/m):
+ * - every roll's axis deflection against the held bearing (the screw roll's support sections;
+ *   the work roll's own on a 2Hi)
+ * - every contact's line load: the lower roll's slave nodes' normal forces per station over
+ *   the station's length, doubled for the z < 0 half
+ * - on a 2Hi, the indentation under the strip: the model's flattening against the solid's
+ *   bottom surface's rise against its top surface's (in a solid the bending's transverse
+ *   (Poisson) strain, −ν κ R²/2, moves both surfaces against the axis by the same amount, and
+ *   that reading cancels it; the model's flattening is the local part only)
+ * - the exit profile the strip would see, Δh₁/2 against the centre: the work roll's bottom
+ *   node's displacement against the centre's, less the barrel's radius deviation. The strip
+ *   load sits on one node ring per station, so the solid's surface under a ring is a local
+ *   dimple: a rough check where the load changes fast (near the strip edge)
  */
-export function compare2hi(ref, res) {
-  const W = ref.WR;
+export function compareStack(ref, res) {
   const disp = (n) => res.node.get(n).DISPLACEMENT;
-  const vB = disp(W.nodes.axis[W.iSupport])[1];
-  let bearingReaction = 0;
   // fistr1 labels the reactions REACTION_FORCE (older results said REACTION)
-  for (const n of W.nodes.support) { const r = res.node.get(n); bearingReaction += (r.REACTION_FORCE ?? r.REACTION)?.[1] ?? 0; }
-  const x = [], q = [], b = [], vModel = [], vFem = [], flatModel = [], flatFem = [], flatAxis = [];
-  const worst = { v: 0, vRel: 0, flat: 0 };
-  for (let i = 0; i < W.x.length; i++) {
-    const a = disp(W.nodes.axis[i]), s = disp(W.nodes.bottom[i]), t = disp(W.nodes.top[i]);
-    const vF = a[1] - vB, fF = s[1] - t[1];
-    const vM = W.v[i], fM = W.flat[i];
-    x.push(W.x[i]); q.push(W.q[i]); b.push(W.b[i]);
-    vModel.push(vM); vFem.push(vF); flatModel.push(fM); flatFem.push(fF); flatAxis.push(s[1] - a[1]);
-    if (vM !== null) { worst.v = Math.max(worst.v, Math.abs(vF - vM)); if (Math.abs(vM) > 1e-4) worst.vRel = Math.max(worst.vRel, Math.abs(vF - vM) / Math.abs(vM)); }
-    if (fM !== null && W.q[i] > 0) worst.flat = Math.max(worst.flat, Math.abs(fF - fM));
+  const react = (n) => { const r = res.node.get(n); return (r.REACTION_FORCE ?? r.REACTION)?.[1] ?? 0; };
+  // the largest difference, and it against the model's largest value (not station by
+  // station: where the model reads near zero any difference is a large ratio)
+  const worstOf = (model, fem, keep = () => true) => {
+    let w = 0, big = 0;
+    for (let i = 0; i < model.length; i++) {
+      const m = model[i], f = fem[i];
+      if (m === null || f === null || !Number.isFinite(m) || !Number.isFinite(f) || !keep(i)) continue;
+      w = Math.max(w, Math.abs(f - m));
+      big = Math.max(big, Math.abs(m));
+    }
+    return { abs: w, rel: big > 0 ? w / big : 0 };
+  };
+  const screw = ref.rolls[ref.screwRoll];
+  const vRef = screw.iSupports.reduce((a, i) => a + disp(screw.nodes.axis[i])[1], 0) / screw.iSupports.length;
+  let bearingReaction = 0;
+  for (const sec of screw.nodes.support) for (const n of sec) bearingReaction += react(n);
+  const rolls = ref.rolls.map((r) => {
+    const vFem = r.nodes.axis.map((n) => disp(n)[1] - vRef);
+    return { id: r.id, x: r.x, shift: r.shift, Lb: r.Lb, vModel: r.v, vFem, worst: worstOf(r.v, vFem) };
+  });
+  const contacts = ref.contacts.map((k) => {
+    const A = ref.rolls[k.a];
+    const qFem = A.x.map((_, i) => {
+      const here = k.slaveByStation[i];
+      if (!here) return null;
+      let f = 0;
+      for (const n of here) { const cf = res.node.get(n).CONTACT_NFORCE; if (cf) f += Math.abs(cf[1]); }
+      return (2 * f) / A.dx[i];
+    });
+    // the end of a barrel carries a concentration in the solid the model spreads over the
+    // station's cell: judged where the cell lies wholly on both barrels
+    const whole = (i) => k.whole[i];
+    return { a: k.a, b: k.b, label: k.label, x: A.x, qModel: k.q, qFem, whole: k.whole, worst: worstOf(k.q, qFem, whole) };
+  });
+  const W = ref.WR;
+  let flat = null;
+  if (!ref.contacts.length) {
+    const fem = W.nodes.bottom.map((n, i) => disp(n)[1] - disp(W.nodes.top[i])[1]);
+    flat = { model: W.flat, fem, worst: worstOf(W.flat, fem, (i) => (W.q[i] ?? 0) > 0) };
   }
-  return { x, q, b, vModel, vFem, flatModel, flatFem, flatAxis, worst, bearingReaction, loadSumY: ref.loadSumY, force: ref.force, iterations: ref.iterations, nodes: ref.mesh.reduce((n, m) => n + m.nodes, 0) };
+  let exit = null;
+  const i0 = W.x.findIndex((x) => Math.abs(x) < 1e-9);
+  if (i0 >= 0 && W.h1[i0] !== null) {
+    const wb0 = disp(W.nodes.bottom[i0])[1];
+    const model = W.h1.map((h1) => (h1 === null ? null : (h1 - W.h1[i0]) / 2));
+    const surface = W.x.map((_, i) => disp(W.nodes.bottom[i])[1] - wb0 - (W.prof[i] - W.prof[i0]));
+    // The gap the strip leaves through is between the upper work roll and the lower one, its
+    // mirror image ((x, y, z) → (−x, −y, z) on a 6Hi with the intermediate rolls shifted
+    // opposite ways): a tilt of the upper roll is cancelled by the lower's, and only the even
+    // part of the surface's displacement is the profile. A half case is even already.
+    const fem = ref.full
+      ? W.x.map((x, i) => { const j = W.x.findIndex((v) => Math.abs(v + x) < 1e-9); return j < 0 ? null : (surface[i] + surface[j]) / 2; })
+      : surface;
+    exit = { model, fem, worst: worstOf(model, fem) };
+  }
+  return {
+    mill: ref.mill, full: ref.full, x: W.x, q: W.q, b: W.b, rolls, contacts, flat, exit,
+    bearingReaction, loadSumY: ref.loadSumY, force: ref.force, iterations: ref.iterations,
+    nodes: ref.mesh.reduce((n, m) => n + m.nodes, 0), mesh: ref.mesh,
+  };
 }
