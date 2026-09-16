@@ -3,9 +3,11 @@
 //
 //   GET  /__frontistr/ping             → { ok, fistr1, busy }   fistr1: the solver binary was found
 //   POST /__frontistr/solve  { mill, params }
-//        → the 2Hi comparison (lib.mjs `compare2hi`) as JSON, lengths in m, loads in N/m;
-//          409 while another solve runs, 400 for a mill it cannot do, 500 with the log's tail
-//          when fistr1 fails. Closing the request kills the solve.
+//        → the comparison (lib.mjs `compareStack`) as JSON, lengths in m, loads in N/m;
+//          409 while another solve runs, 400 for a mill it cannot do (lib.mjs MILLS: 2Hi,
+//          4Hi, 6Hi), 500 with the log's tail when fistr1 fails. Closing the request kills
+//          the solve. The 2Hi is solved on the fine mesh (~10 s); the 4Hi and 6Hi, with their
+//          contacts, on the coarser QUICK one (a few minutes).
 //
 // One solve at a time: fistr1 takes every core it can get. The case is written to
 // tools/frontistr/run/app-<mill>/ (git-ignored) and left there, so it can be re-run by hand.
@@ -59,26 +61,25 @@ export function frontistrHandler(opts = {}) {
     try {
       const body = JSON.parse((await readBody(req)) || '{}');
       const mill = body.mill ?? '2hi';
-      if (mill !== '2hi') return json(res, 400, { error: `mill ${mill}: only 2hi is served` });
       if (!existsSync(fistr1)) return json(res, 500, { error: `fistr1 not found (${fistr1}); see tools/frontistr/README.md` });
       // the roll model as the app has it now: rebuilt from src/ each time (under a second)
       await run(process.execPath, ['tools/build-esm.mjs', 'sim3d'], ROOT, ctl.signal);
-      const { buildCase, readResult, compare2hi } = await import(new URL(`./lib.mjs?v=${Date.now()}`, import.meta.url));
+      const { buildCase, readResult, compareStack, MILLS, QUICK } = await import(new URL(`./lib.mjs?v=${Date.now()}`, import.meta.url));
+      if (!MILLS[mill]) return json(res, 400, { error: `mill ${mill}: ${Object.keys(MILLS).join(', ')} are served` });
       const dir = `${runDir}/app-${mill}`;
       mkdirSync(dir, { recursive: true });
       // the app's settings on the gate's grid (81 stations, the strip on the roll's nodes, 8
       // elements along the arc): the app's 301 stations would make a 176k-node solid and a
-      // minute's solve for the same answer
+      // minute's solve for the same answer. With contacts, the coarser mesh as well.
       const params = { ...(body.params && typeof body.params === 'object' ? body.params : {}), stations: 81, stripStations: 0, stripNz: 8 };
-      const { ref, summary } = await buildCase(mill, params, dir);
+      const { ref, summary } = await buildCase(mill, params, dir, QUICK[mill] ?? {});
       const tCase = Date.now();
       const log = await run(fistr1, [], dir, ctl.signal);
       writeFileSync(`${dir}/fistr.log`, log);
       const { res: result, resFile } = readResult(dir);
-      const cmp = compare2hi(ref, result);
+      const cmp = compareStack(ref, result);
       const solve = /solve \(sec\)\s*:\s*([\d.]+)/.exec(log);
-      json(res, 200, { mill, ...cmp, summary, resFile, seconds: (Date.now() - t0) / 1000, caseSeconds: (tCase - t0) / 1000, solveSeconds: solve ? Number(solve[1]) : null,
-        grid: { stations: ref.WR.x.length, layers: ref.mesh[0].layers, angles: ref.mesh[0].angles } });
+      json(res, 200, { ...cmp, summary, resFile, seconds: (Date.now() - t0) / 1000, caseSeconds: (tCase - t0) / 1000, solveSeconds: solve ? Number(solve[1]) : null });
     } catch (e) {
       if (ctl.signal.aborted) return; // the app gave up: nothing to answer
       const tail = typeof e.log === 'string' ? e.log.split('\n').slice(-20).join('\n') : '';

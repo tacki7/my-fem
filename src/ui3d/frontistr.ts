@@ -1,32 +1,41 @@
 /**
- * The FrontISTR cross-check from the app: the converged pass's strip load, put on the work
- * roll as a solid and solved by fistr1 through the dev server's bridge
+ * The FrontISTR cross-check from the app: the converged pass's strip load, put on the upper
+ * half's rolls as solids and solved by fistr1 through the dev server's bridge
  * (tools/frontistr/bridge.mjs). The bridge is on the page's own origin under `/__frontistr`
  * with `npm run dev`; `?fistr=http://host:port` names a stand-alone one (serve.mjs).
  */
-import type { Params3D } from '../sim3d/stack';
+import type { Params3D, MillType } from '../sim3d/stack';
 
-/** lib.mjs `compare2hi`, plus what the bridge adds; lengths in m, loads in N/m */
+/** the mills the bridge builds a case for (lib.mjs MILLS) */
+export const FISTR_MILLS: readonly MillType[] = ['2hi', '4hi', '6hi'];
+
+/** the largest difference over the stations, and it against the model's largest value */
+export interface Worst { abs: number; rel: number }
+
+/** lib.mjs `compareStack`, plus what the bridge adds; lengths in m, loads in N/m */
 export interface FistrResult {
-  mill: '2hi';
-  /** the stations from the centre out (x ≥ 0) */
+  mill: MillType;
+  /** the case spans the whole roll length (a 6Hi); otherwise the x ≥ 0 half, to mirror */
+  full: boolean;
+  /** the work roll's stations */
   x: number[];
   q: (number | null)[];
-  /** the work roll's axis against its bearing */
-  vModel: (number | null)[];
-  vFem: number[];
-  /** the indentation under the strip: the model's flattening, the solid's bottom − top surface */
-  flatModel: (number | null)[];
-  flatFem: number[];
-  worst: { v: number; vRel: number; flat: number };
+  /** every roll of the upper half, bottom up: its axis against the held bearing */
+  rolls: { id: string; x: number[]; shift: number; Lb: number; vModel: (number | null)[]; vFem: number[]; worst: Worst }[];
+  /** every contact, lower roll first: the line load, on the lower roll's stations */
+  contacts: { a: number; b: number; label: string; x: number[]; qModel: (number | null)[]; qFem: (number | null)[]; worst: Worst }[];
+  /** the indentation under the strip (a 2Hi): the model's flattening, the solid's bottom − top surface */
+  flat: { model: (number | null)[]; fem: number[]; worst: Worst } | null;
+  /** the exit profile the strip would see, Δh₁/2 against the centre (rough near the strip edge) */
+  exit: { model: (number | null)[]; fem: number[]; worst: Worst } | null;
   bearingReaction: number;
   loadSumY: number;
   force: number;
   iterations: number;
   nodes: number;
+  mesh: { name: string; nodes: number; stations: number; layers: number; angles: number }[];
   seconds: number;
   solveSeconds: number | null;
-  grid: { stations: number; layers: number; angles: number };
 }
 
 const base = (): string => {
@@ -54,14 +63,14 @@ export class FistrError extends Error {
   constructor(message: string, readonly log = '') { super(message); }
 }
 
-/** the 2Hi comparison for these settings; throws FistrError with the bridge's message */
-export async function solveFrontistr2hi(params: Params3D, signal: AbortSignal): Promise<FistrResult> {
+/** the comparison for these settings; throws FistrError with the bridge's message */
+export async function solveFrontistr(mill: MillType, params: Params3D, signal: AbortSignal): Promise<FistrResult> {
   let r: Response;
   try {
     r = await fetch(`${base()}/solve`, {
       method: 'POST', signal, cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mill: '2hi', params }),
+      body: JSON.stringify({ mill, params }),
     });
   } catch (e) {
     if (signal.aborted) throw e;
