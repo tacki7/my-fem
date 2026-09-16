@@ -1,5 +1,6 @@
 // @check
 // @check-build sim3d
+// @check-build sim2d
 // The case builder without FrontISTR: for each served mill the roll model converges on the
 // gate's grid, the mesh has the node count the README's results were read on (the app's
 // coarser QUICK mesh for the 4Hi and 6Hi), the strip load put on the modelled part of the
@@ -9,6 +10,7 @@ import { mkdtempSync, existsSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildCase, QUICK, MILLS, TONF } from './lib.mjs';
+import { buildStrip2d } from './strip2d.mjs';
 
 const fail = [];
 const expect = (ok, what) => { if (!ok) fail.push(what); };
@@ -52,6 +54,28 @@ for (const [mill, opts, wantNodes, wantContacts] of CASES) {
     expect(q0 > 1e6 && q0 < 5e7, `${tag} centre contact load ${(q0 / 1e6).toFixed(2)} kN/mm`);
   }
   console.log(`${mill}: ${ref.iterations} iterations, F ${(ref.force / TONF).toFixed(1)} tonf, ${nodes} nodes (${ref.mesh.map((m) => `${m.name} ${m.stations}×${m.layers}×${m.angles}`).join(', ')}), ${loadedNodes} loaded, ${ref.contacts.length} contacts, ${ms.toFixed(0)} ms`);
+}
+// the 2D rolling case (strip2d.mjs): the strip starts in the gap, a hair under the roll, and
+// runs on at the exit thickness; the roll ring closes; the groups the control file names exist
+{
+  const out = mkdtempSync(join(tmpdir(), 'rollfem-fistr-strip2d-'));
+  const t0 = performance.now();
+  const { ref, nodes } = await buildStrip2d({}, out, { dx: 0.5e-3, ny: 3, len: 0.03, surf: 1e-3, coarse: 30e-3 });
+  const ms = performance.now() - t0;
+  const tag = 'strip2d:';
+  const msh = readFileSync(join(out, 'roll.msh'), 'utf8'), cnt = readFileSync(join(out, 'roll.cnt'), 'utf8');
+  const X = new Map(); { let mode = ''; for (const l of msh.split('\n')) { if (l.startsWith('!')) { mode = l; continue; } if (mode.startsWith('!NODE')) { const a = l.split(',').map(Number); X.set(a[0], a.slice(1)); } } }
+  expect(X.size === nodes && nodes === ref.mesh.strip.nodes + ref.mesh.roll.nodes, `${tag} nodes ${X.size} vs ${nodes}`);
+  // every strip top node sits under the roll surface (never inside it), and the head is at the exit thickness
+  let inside = 0, atExit = 0;
+  for (const s of ref.slave) { const [x, y] = X.get(s.nodes[0]); const gap = Math.hypot(x, y - ref.yc) - ref.params.R; if (gap < -1e-9) inside++; if (x > 1e-3 && Math.abs(2 * y - (ref.params.h1 - 2 * ref.opts.gap0)) < 1e-9) atExit++; }
+  expect(inside === 0, `${tag} ${inside} strip top nodes inside the roll`);
+  expect(atExit > 3, `${tag} head at the exit thickness (${atExit} nodes)`);
+  for (const g of ['STRIP_SYM', 'TAIL', 'HEAD', 'ZALL', 'BORE', 'SLAVE']) expect(msh.includes(`NGRP=${g}`), `${tag} group ${g}`);
+  expect(msh.includes('SGRP=MASTER') && msh.includes('!CONTACT PAIR, NAME=CP1'), `${tag} contact pair`);
+  expect((cnt.match(/^!STEP/gm) ?? []).length === 1 && cnt.includes('!PLASTIC, YIELD=MISES, HARDEN=MULTILINEAR') && cnt.includes(`CP1, ${ref.params.mu}`), `${tag} one step, plasticity, friction`);
+  expect((cnt.match(/^!AMPLITUDE/gm) ?? []).length === ref.bore.length * 2, `${tag} an amplitude per bore station and component`);
+  console.log(`strip2d: ${nodes} nodes (strip ${ref.mesh.strip.nodes}, roll ${ref.mesh.roll.nodes}), contact ${(ref.Lc * 1e3).toFixed(1)} mm, ${ref.bore.length} bore stations, ${ms.toFixed(0)} ms`);
 }
 if (fail.length) { console.log('FAIL\n  ' + fail.join('\n  ')); process.exit(1); }
 console.log('PASS');

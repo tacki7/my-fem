@@ -37,7 +37,8 @@ export function frontistrHandler(opts = {}) {
   });
   /** run a command to its end; rejects with the last lines of its output */
   const run = (cmd, args, cwd, signal) => new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], signal });
+    // MallocPreScribble: see run.sh - fistr1 reads an allocation before writing it, and a NaN in fresh pages kills a run
+    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], signal, env: { ...process.env, MallocPreScribble: '1' } });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
