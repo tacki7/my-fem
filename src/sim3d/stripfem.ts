@@ -47,6 +47,8 @@
 import { BandMatrix } from './band';
 
 /** uniaxial flow stress over plane-strain resistance, σ̄ = FLOW · kf (von Mises) */
+import { buildStripField, type StripField3D } from './stripfield';
+
 export const FLOW = Math.sqrt(3) / 2;
 
 /** the width each node column stands for [m], given the node columns' positions: half of each column of elements beside it */
@@ -139,6 +141,8 @@ export interface StripFemResult {
   model: 'fem' | 'fem3d';
   /** per element: s_y, s_z, σ_m, div(hu)/h, ε̇_eq - for checking the recovery */
   debug: { sy: Float64Array; sz: Float64Array; sm: Float64Array; div: Float64Array; eq: Float64Array };
+  /** the solution as a field over the bite in three dimensions, for drawing (see `stripfield.ts`) */
+  field3d?: StripField3D;
 }
 
 const G = 1 / Math.sqrt(3);
@@ -438,7 +442,40 @@ export class StripFem {
     return {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
       massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, model: 'fem', debug: this.dbg,
+      field3d: this.field(nx, rows, X, Z, H, u, conn, kfEl),
     };
+  }
+
+  /**
+   * The plane solution stood up through the half thickness, for drawing: two node layers, the
+   * mid-plane (y = 0) and the roll face (y = h/2), the same values on both - the plane model
+   * has one velocity through the thickness. The roll face's vertical velocity is the one that
+   * keeps it on the gap's slope along the arc, v_y = w ∂(h/2)/∂z.
+   */
+  private field(nx: number, rows: number, X: Float64Array, Z: Float64Array, H: Float64Array, u: Float64Array, conn: Int32Array, kfEl: Float64Array): StripField3D {
+    const lay = 2, nn = nx * rows * lay, ne = conn.length / 4;
+    const X3 = new Float64Array(nn), Y3 = new Float64Array(nn), Z3 = new Float64Array(nn);
+    const vx = new Float64Array(nn), vy = new Float64Array(nn), vz = new Float64Array(nn);
+    for (let i = 0; i < nx; i++) for (let j = 0; j < rows; j++) {
+      const n = i * rows + j;
+      const jb = Math.max(0, j - 1), jf = Math.min(rows - 1, j + 1);
+      const dz = Z[i * rows + jf] - Z[i * rows + jb];
+      const slope = dz !== 0 ? (0.5 * (H[i * rows + jf] - H[i * rows + jb])) / dz : 0;
+      for (let k = 0; k < lay; k++) {
+        const m = n * lay + k;
+        X3[m] = X[n]; Z3[m] = Z[n]; Y3[m] = k === 0 ? 0 : H[n] / 2;
+        vx[m] = u[2 * n]; vz[m] = u[2 * n + 1]; vy[m] = k === 0 ? 0 : u[2 * n + 1] * slope;
+      }
+    }
+    const nodes = new Int32Array(8 * ne);
+    const flow = new Float64Array(ne);
+    for (let e = 0; e < ne; e++) {
+      for (let q = 0; q < 4; q++) { const n = conn[4 * e + q]; nodes[8 * e + q] = n * lay; nodes[8 * e + 4 + q] = n * lay + 1; }
+      flow[e] = FLOW * kfEl[e];
+    }
+    return buildStripField('fem', nx, rows, lay, X3, Y3, Z3, { x: vx, y: vy, z: vz }, {
+      nodes, per: 8, eqRate: this.dbg.eq, sm: this.dbg.sm, szz: this.dbg.sz, flow,
+    });
   }
 
   /** p = −σ_y at each element centre: the deviatoric part through the thickness plus the penalty pressure */
