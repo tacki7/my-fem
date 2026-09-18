@@ -25,7 +25,6 @@ const VOCAB = {
   fields: ['strain', 'strainRate', 'flowStress', 'temperature', 'pressure'],
   colormaps: ['plasma', 'viridis', 'turbo'],
   meshes: ['fast', 'balanced', 'fine', 'ultra', 'extreme', 'insane'],
-  mills: ['2hi', '4hi', '6hi', '12hi', '20hi'],
 };
 const MAX = 8;
 const q = (s) => parseQuery(s, VOCAB, MAX);
@@ -76,10 +75,9 @@ const CASES = [
   ['?stopafter=-5', {}],
   ['?stopafter=Infinity', {}],
   ['?stopafter=abc', {}],
-  ['?mill=4HI', { mill: '4hi' }],
-  ['?mill=constructor', {}],
+  ['?mill=4hi', {}],
   ['?tab=3d', { tab: '3d' }],
-  ['?tab=2d&mill=20hi', { tab: '2d', mill: '20hi' }],
+  ['?tab=2d', { tab: '2d' }],
   ['?stands=3&agc=ratio&load=700&h1=1.2&field=temperature&mesh=insane&tension=rigid&tctl=1&tscale=0.05',
     { field: 'temperature', mesh: 'insane', agc: 'ratio', tension: 'rigid', tctl: true, tscale: 0.05, h1: 0.0012, stands: 3, load: 700 }],
 ];
@@ -92,10 +90,12 @@ for (const [s, want] of CASES) {
   if (diff.length) bad.push(`${s || '(empty)'}: ${diff.map((k) => `${k} ${JSON.stringify(got[k])} ≠ ${JSON.stringify(exp[k])}`).join(', ')}`);
 }
 check('known cases', bad.length === 0, `${CASES.length} cases${bad.length ? '; ' + bad.join('; ') : ''}`);
-check('a URLSearchParams reads the same as its string', same(q(new URLSearchParams('?stands=2&h1=0.5&mill=6hi')), q('?stands=2&h1=0.5&mill=6hi')));
+check('a URLSearchParams reads the same as its string', same(q(new URLSearchParams('?stands=2&h1=0.5&tab=3d')), q('?stands=2&h1=0.5&tab=3d')));
 
 // --- 2 -----------------------------------------------------------------------
-// The parser main.ts had inline, re-typed with the same tests in the same order.
+// The parser main.ts had inline, re-typed with the same tests in the same order -
+// less its `?mill=`, which went when the 3D tab was cut to the 4Hi (2026-09-19);
+// the `mill` values below now check that both ignore it.
 function legacy(search) {
   const QS = new URLSearchParams(search);
   const o = { ...FLAGS, debug: QS.has('debug') };
@@ -133,8 +133,6 @@ function legacy(search) {
   if (Number.isFinite(qs) && qs >= 1) o.stands = Math.min(MAX, Math.round(qs));
   const ql = Number(QS.get('load'));
   if (Number.isFinite(ql) && ql > 0) o.load = ql;
-  const qsMill = (QS.get('mill') ?? '').toLowerCase();
-  if (new Set(VOCAB.mills).has(qsMill)) o.mill = qsMill;
   o.tab = QS.get('tab');
   return o;
 }
