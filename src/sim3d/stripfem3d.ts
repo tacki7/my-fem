@@ -29,6 +29,7 @@
 
 import { BandMatrix } from './band';
 import { FLOW, atNodes, tributary, type StripFemInput, type StripFemResult } from './stripfem';
+import { buildStripField } from './stripfield';
 
 export interface StripFem3DInput extends StripFemInput {
   /** element layers through the upper half of the thickness */
@@ -451,6 +452,28 @@ export class StripFem3D {
       q, vExit, uExit, vIn, eps, p: pOut, ux: uxOut, ncol: nc, nrow: nz, xNode: Float64Array.from(xN), arcNode: LN,
       massRatio: flowIn > 0 ? flowOut / flowIn : 1, iterations, converged, model: 'fem3d',
       debug: { sy: new Float64Array(0), sz: new Float64Array(0), sm: new Float64Array(0), div: new Float64Array(0), eq: new Float64Array(0) },
+      field3d: (() => {
+        // the drawing's field: centroid strain rates of the solution, the mean stress the
+        // penalty carries, and the deviatoric σ_zz = (2/3)(σ̄/ε̇_eq) ε̇_zz
+        const eqRate = new Float64Array(ne), sm = new Float64Array(ne), szz = new Float64Array(ne), flow = new Float64Array(ne);
+        for (let e = 0; e < ne; e++) {
+          let exx = 0, eyy = 0, ezz = 0, gxy = 0, gyz = 0, gzx = 0;
+          for (let q = 0; q < 8; q++) {
+            const n = conn[8 * e + q], off = e * 24 + 3 * q;
+            const dx = dNc[off], dy = dNc[off + 1], dz = dNc[off + 2];
+            exx += dx * u[3 * n]; eyy += dy * u[3 * n + 1]; ezz += dz * u[3 * n + 2];
+            gxy += dy * u[3 * n] + dx * u[3 * n + 1]; gyz += dz * u[3 * n + 1] + dy * u[3 * n + 2]; gzx += dz * u[3 * n] + dx * u[3 * n + 2];
+          }
+          const eq = Math.sqrt((2 / 3) * (exx * exx + eyy * eyy + ezz * ezz) + (gxy * gxy + gyz * gyz + gzx * gzx) / 3 + epsReg * epsReg);
+          eqRate[e] = eq;
+          flow[e] = FLOW * kfEl[e];
+          szz[e] = ((2 / 3) * (flow[e] / eq)) * ezz;
+          sm[e] = KPEN * (exx + eyy + ezz);
+        }
+        const vx = new Float64Array(nn), vy = new Float64Array(nn), vz = new Float64Array(nn);
+        for (let n = 0; n < nn; n++) { vx[n] = u[3 * n]; vy[n] = u[3 * n + 1]; vz[n] = u[3 * n + 2]; }
+        return buildStripField('fem3d', nx, rows, lay, X, Y, Z, { x: vx, y: vy, z: vz }, { nodes: conn, per: 8, eqRate, sm, szz, flow });
+      })(),
     };
   }
   /**
