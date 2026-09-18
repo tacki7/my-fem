@@ -79,6 +79,33 @@ BUR の撓みが 22 % 減った）。相手ロールの胴端（6Hi の IR 胴�
 `npm run check` には `casecheck.mjs`（ケース生成だけ: 3 形式の収束・節点数・板の荷重 = F/4（半分モデル）または
 F/2（全長）・接触の群）が入る。`fistr1` は要らない。
 
+## ジョブ: 長い計算の途中の結果を画面へ（`jobs.mjs`・`fieldframe.mjs`）
+
+照合（`/solve`）は 1 回の解の答えを最後にまとめて返す。ロールの応力を画面に実時間で描くために、FrontISTR を**ジョブ**として
+走らせ、結果ファイルが 1 つ書き終わるたびに画面へ渡す口を足した（2026-09-19）。
+
+- `POST /__frontistr/jobs { kind, params, load?, substeps?, dryRun? }` → `{ job }`。同時に 1 つ（照合も含めて。動いていれば 409）
+- `GET /__frontistr/jobs/<id>`（状態）、`/events`（server-sent events: `state`・`mesh`・`frame { k }`・`progress`）、`/mesh.bin`、`/frames/<k>.bin`、`POST …/cancel`
+- `kind: roll-elastic` は 4Hi の WR ＋ BUR（照合と同じ粗い網、接触）に板の荷重を `substeps`（既定 4）段に分けて載せ、段ごとに結果を書かせる。
+  節点の von Mises（`NodalMISES`）も出させる
+- `dryRun` は網と初期状態（frame 0: 変位 0・応力 0）だけ作って終わる（fistr1 は使わない）。計算前の画面に描く用
+- 画面側のつなぎは `src/ui3d/fistrjob.ts`（`FistrJob.start` → イベント → `mesh()`・`frame(k)`・`cancel()`）
+
+**形式（fieldframe）**: 各物体（要素グループ）の外側の面だけを、面に出る節点で番号を振り直して送る（対称面も面なので切り口が見える）。
+`mesh.bin` は 1 回、`frames/<k>.bin` は結果ファイルごと（`k` は FrontISTR の結果の番号、0 は初期状態）。先頭に u32 の JSON の長さと JSON
+（部品・対称・指標）、4 バイト境界まで 0 埋め、その後に f32 の座標／変位と節点ごとの場（`mises`、接触圧 `cpress` = 接触力 ÷ 節点の面積）、
+u32 の三角形。座標はアプリの座標（パスラインが y = 0）にずらしてある。詳しくは `fieldframe.mjs` の先頭。
+
+**書きかけの結果を読まない**: fistr1 は 1 つの結果ファイルを数百 ms かけて書く。次の番号のファイルが出たか fistr1 が終わってから読む
+（`finishedResults`）。読めなかったものは fistr1 が終わるまで読み直す。
+
+実測（2026-09-19、Apple M2・8 GB、OpenMP 4 スレッド、4Hi 既定、4 段）: 表面 6,815 節点・13,622 三角形（`mesh.bin` 246 KB、1 frame 136 KB）、
+frame 0 まで 1.3 秒、以後 1 段 約 45 秒、全体 135 秒。von Mises の最大は 2.96 GPa — 板の荷重を駅ごとの節点リングに載せているので、
+載せた節点のまわりに局所の集中が出る（荷重の載せ方を細かくすれば下がるはず。照合の撓み・線荷重には効かない）。
+
+`jobscheck.mjs`（`npm run check`）は fistr1 を使わずに確かめる: 小さな網で面の取り出し（共有面が消え、面が外向き＝囲む体積が正）、
+形式の読み戻し、書きかけのファイルを読まないこと（fistr1 の代わりの node スクリプトが結果を 2 回に分けて書く）、409、イベントの順、中止。
+
 ## 結果 1: 2Hi 既定（ワークロール 1 本、2026-09-15、FrontISTR 5.9）
 
 | 位置 x [mm] | q [kN/mm] | たわみ 梁 [µm] | たわみ FEM [µm] | 差 | 扁平 近似式 [µm] | 扁平 FEM [µm] | 差 |
