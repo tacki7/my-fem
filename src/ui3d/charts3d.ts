@@ -663,8 +663,7 @@ export class EndView {
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    const ang = stack.type === '12hi' || stack.type === '20hi' ? ` ／ 第1中間 ${((stack.angle1 * 180) / Math.PI).toFixed(1)}°` : '';
-    ctx.fillText(`接触力 [tonf] ／ 板幅 ${(width * 1e3).toFixed(0)} mm${ang}`, pad, H - 3);
+    ctx.fillText(`接触力 [tonf] ／ 板幅 ${(width * 1e3).toFixed(0)} mm`, pad, H - 3);
   }
 }
 
@@ -869,25 +868,6 @@ export class SideView {
         });
         ctx.textAlign = 'center';
         ctx.fillText(`${screwRoll.id} 支持の傾き（駆動側 − 操作側）${Math.round(housing.burTilt * 1e6) || 0} µm`, W / 2, yHead - 27);
-        // a 6Hi's intermediate chocks seated on the backup roll's: filled while a seat carries load, dashed once it has lifted
-        const ir = p.mill === '6hi' && p.irSeat ? rolls.find((r) => r.id === 'IR') : undefined;
-        if (ir && housing.seatForces.length >= 2) {
-          const yIR = py(ir.cy) - Math.max(ir.Dn * 1.3 * scale, 6) / 2, yBUR = py(screwRoll.cy) + Math.max(screwRoll.Dn * 1.3 * scale, 6) / 2;
-          const sw = Math.max(block(ir) * scale * 0.5, 5);
-          [ir.shift - ir.Ls / 2, ir.shift + ir.Ls / 2].forEach((xs, k) => {
-            if (yIR - yBUR < 3) return;
-            if (housing.seatForces[k] > 0) {
-              ctx.fillStyle = 'rgba(255, 196, 107, 0.6)';
-              ctx.fillRect(px(xs) - sw / 2, yBUR, sw, yIR - yBUR);
-            } else {
-              ctx.strokeStyle = 'rgba(220, 230, 245, 0.5)';
-              ctx.lineWidth = 1;
-              ctx.setLineDash([2, 2]);
-              ctx.strokeRect(px(xs) - sw / 2 + 0.5, yBUR + 0.5, sw - 1, yIR - yBUR - 1);
-              ctx.setLineDash([]);
-            }
-          });
-        }
         ctx.restore();
       }
       // under the pass line: the clear span between the posts' inner faces, against the strip width

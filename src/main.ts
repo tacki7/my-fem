@@ -30,7 +30,6 @@ import { probe, heap, bytes, type SysInfo } from './ui/sysinfo';
 import { installLayout, type LayoutHandle, type Theme, currentTheme } from './ui/layout';
 import * as settings from './ui/settings';
 import { installView3D, type View3DHandle } from './ui3d/view3d';
-import type { MillType } from './sim3d/stack';
 import { parseQuery, startIn3d, gaugeSchedule } from './app/query';
 import { Tracers, surfaceAt as surfaceAtOf } from './app/tracers';
 import { installLab } from './app/lab';
@@ -61,12 +60,10 @@ params.agcTargetForce = agcTargetPerWidth();
 /* ── query string overrides ──────────────────────────────────────────────── */
 // Read here, written into the state further down by `applyQuery` - after a
 // settings file has been restored, so the URL wins over the file.
-const MILL_TYPES = ['2hi', '4hi', '6hi', '12hi', '20hi'] as const;
 const Q = parseQuery(location.search, {
   fields: FIELDS.map((f) => f.value),
   colormaps: COLORMAP_NAMES,
   meshes: Object.keys(MESH_LEVELS),
-  mills: MILL_TYPES,
 }, MAX_STANDS);
 const DEBUG_TITLE = Q.debug;
 
@@ -3179,7 +3176,6 @@ const refreshTopMesh = () => {
   millMesh.title = mesh2d[1];
 };
 const view3d: View3DHandle = installView3D(document.getElementById('view3d') as HTMLElement, {
-  initialMill: Q.mill as MillType | undefined,
   onMesh: (text, detail) => { mesh3d = [text, detail]; refreshTopMesh(); },
 });
 view3dRef = view3d;
