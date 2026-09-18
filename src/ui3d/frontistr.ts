@@ -6,9 +6,6 @@
  */
 import type { Params3D, MillType } from '../sim3d/stack';
 
-/** the mills the bridge builds a case for (lib.mjs MILLS) */
-export const FISTR_MILLS: readonly MillType[] = ['2hi', '4hi', '6hi'];
-
 /** the largest difference over the stations, and it against the model's largest value */
 export interface Worst { abs: number; rel: number }
 

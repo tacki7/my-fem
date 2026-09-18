@@ -19,8 +19,6 @@ export interface QueryVocabulary {
   colormaps: readonly string[];
   /** mesh presets (`?mesh=`) */
   meshes: readonly string[];
-  /** 3D mill types (`?mill=`, matched lower-cased) */
-  mills: readonly string[];
 }
 
 export interface QueryOverrides {
@@ -53,8 +51,6 @@ export interface QueryOverrides {
   stands?: number;
   /** total load target [tonf] */
   load?: number;
-  /** 3D mill type, lower-cased */
-  mill?: string;
   /**
    * `?tab=` as given, or null when absent. Only '3d' opens the 3D tab; any
    * other value, '2d' included, forces the 2D tab over the remembered one
@@ -112,8 +108,6 @@ export function parseQuery(
   if (Number.isFinite(stands) && stands >= 1) out.stands = Math.min(maxStands, Math.round(stands));
   const load = num('load');
   if (Number.isFinite(load) && load > 0) out.load = load;
-  const mill = oneOf((qs.get('mill') ?? '').toLowerCase(), vocab.mills);
-  if (mill) out.mill = mill;
   return out;
 }
 

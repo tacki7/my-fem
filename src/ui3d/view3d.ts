@@ -6,58 +6,29 @@
  * once, the solve advances a little every frame so the picture is live, and
  * the charts are canvases that redraw while anything is moving and go quiet
  * once the solve has settled.
+ *
+ * The tab runs the 2Hi only (since 2026-09-19). `sim3d` still builds and
+ * solves the 4Hi, 6Hi, 12Hi and 20Hi - the node checks under tools/sim3d
+ * and the FrontISTR tools use them - but no control here reaches them.
  */
 
 import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, type Warning3D } from '../sim3d/solver';
 import { RemainingTime, type Eta } from '../sim3d/eta';
-import {
-  defaultParams, MILL_LABEL, ASU_RACKS, saddlePitch, type MillType, type Params3D,
-} from '../sim3d/stack';
-import { el, section, slider, select, toggle, buttonRow, StatGrid, numField, helpMark } from '../ui/controls';
+import { defaultParams, MILL_LABEL, type Params3D } from '../sim3d/stack';
+import { el, section, slider, select, toggle, buttonRow, StatGrid } from '../ui/controls';
 import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '../sim3d/housing';
-import { pingFrontistr, solveFrontistr, FistrError, FISTR_MILLS, type FistrResult } from './frontistr';
+import { pingFrontistr, solveFrontistr, FistrError, type FistrResult } from './frontistr';
 
 const TONF = 9.80665e3;
-const MILLS: MillType[] = ['2hi', '4hi', '6hi', '12hi', '20hi'];
 /** the screw dial's travel [m]; the solver itself allows −10 to 20 mm */
 const SCREW_DIAL: [number, number] = [-2e-3, 8e-3];
 /** the hints of the dials another dimension bounds (see `BOUNDS`) */
 const NECK_HINT = 'ロール直径まで（スライダーの上限がロール直径。直径を細くするとネック径も追従する）。';
 const SPAN_HINT = '軸受の中心間の距離。胴長より短くできない（スライダーの下限が胴長。胴長を支持スパンより長くすると支持スパンも伸びる）。';
 
-/**
- * Ready-made setups, one click each; every one starts from its mill's defaults. The entry crown
- * is set in the 4Hi default's proportion, 1.5 % of h₀ (on the dial's 2 µm grid): the default's
- * 30 µm on a 0.1 mm foil was a 30 % crown, and since the gauge target is h₁ mean = (1 − r)·h₀ at
- * the centre, the strip's mean reduction came out 11 % against the dial's 20 %.
- */
-interface Preset3D { name: string; note: string; mill: MillType; patch: Partial<Params3D> }
-const PRESETS: Preset3D[] = [
-  {
-    name: '冷間タンデム 4Hi', mill: '4hi',
-    note: 'W 1000 ／ 2.0 mm → 25% ／ BUR クラウン 300 µm ／ WR ベンダー 60 tonf',
-    patch: { width: 1.0, h0: 0.002, reduction: 0.25, burCrown: 300e-6, wrBender: 60 * TONF },
-  },
-  {
-    name: '薄板 6Hi', mill: '6hi',
-    note: '1.0 mm → 20% ／ IR 胴端 = 板端',
-    patch: { h0: 0.001, reduction: 0.2, irShift: 0, entryCrown: 16e-6 },
-  },
-  {
-    name: 'ステンレス 20Hi', mill: '20hi',
-    note: '0.5 mm → 20% ／ 張力 100/120 MPa ／ テーパ −50 mm',
-    patch: { h0: 0.0005, reduction: 0.2, backTension: 100e6, frontTension: 120e6, taperShift: -0.05, entryCrown: 8e-6 },
-  },
-  {
-    name: '箔 20Hi', mill: '20hi',
-    note: '0.1 mm → 20% ／ WR 径 40 mm',
-    // the neck in the 20Hi default's proportion (55 of 65 mm): left at 55 mm it was thicker than the roll
-    patch: { h0: 0.0001, reduction: 0.2, wrD: 0.04, wrDn: 0.034, entryCrown: 2e-6 },
-  },
-];
 /** solve time allowed per frame [ms] */
 const FRAME_BUDGET = 14;
 /** rows of the right panel's 板形状 and 解析 grids that the settings decide (the rest are results, faded when not this setting's) */
@@ -100,22 +71,8 @@ interface Dial {
   setRange(min: number, max: number): void;
 }
 
-/**
- * The roll dimensions belong to a mill type, not to the pass: a 500 mm 4Hi
- * work roll cannot sit in a 20Hi cluster. Switching type swaps these and
- * nothing else, and each type remembers its own set - what the dials said
- * the last time it was the active type, its defaults the first time.
- */
-const GEOMETRY_KEYS = [
-  'wrD', 'wrLb', 'wrLs', 'wrDn', 'irD', 'irLb', 'irLs', 'irDn', 'ir2D', 'ir2Lb',
-  'burD', 'burLb', 'burLs', 'burDn', 'bbD', 'bbShaft', 'bbLb', 'angle1',
-] as const;
-type GeometryKey = typeof GEOMETRY_KEYS[number];
-const pickGeometry = (p: Params3D): Pick<Params3D, GeometryKey> =>
-  Object.fromEntries(GEOMETRY_KEYS.map((k) => [k, p[k]])) as Pick<Params3D, GeometryKey>;
-
-export function installView3D(root: HTMLElement, opts: { initialMill?: MillType; onMesh?: (text: string, detail: string) => void } = {}): View3DHandle {
-  let params: Params3D = defaultParams(opts.initialMill ?? '4hi');
+export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string, detail: string) => void } = {}): View3DHandle {
+  const params: Params3D = defaultParams('2hi');
   const solver = new StackSolver(params);
   let active = false;
   // The solve runs only when asked (計算開始 or Space) and stops once it has converged. Until
@@ -130,10 +87,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   let magnify = 200;
   let sectionMagnify = 200;
   let dirty = true;
-  /* ── the FrontISTR cross-check (2Hi, 4Hi, 6Hi): once a solve has converged, the same strip load
-     on the upper half's rolls as solids, solved by fistr1 through the dev server's bridge
-     (frontistr.ts). Its deflections, contact loads and indentation or exit profile are drawn
-     over the model's and set beside them. ── */
+  /* ── the FrontISTR cross-check: once a solve has converged, the same strip load on the work
+     roll as a solid, solved by fistr1 through the dev server's bridge (frontistr.ts). Its
+     deflection and indentation are drawn over the model's and set beside them. ── */
   /** the check is switched on (解析・表示 ▸ ロールの照合) */
   let fistrOn = false;
   /** the request in flight, so a changed setting can drop it */
@@ -162,7 +118,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     return { root: c, canvas };
   };
 
-  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分を表示（IR をシフトした 6Hi は下半分も解いている） ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
+  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分を表示 ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
   // the stack is drawn either in 3D (WebGL, the default) or as the flat
   // front view; the cell holds both canvases and a label layer for the 3D one
   const stage = el('div', 'v3-stage');
@@ -242,7 +198,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     res: chip('', '残差'), ms: chip('ms', '解法'), fistr: chip('', 'FrontISTR'),
   };
   chips.fistr.hidden = true;
-  chips.fistr.title = 'ソリッド要素の FEM（FrontISTR）で解いた撓み・接触線荷重・扁平の、このモデルとの差（板中央の差と、最大差のモデル最大値に対する比）。計算が収束するたびに解き直す（2Hi 約 10 秒、4Hi・6Hi 数分）。';
+  chips.fistr.title = 'ソリッド要素の FEM（FrontISTR）で解いた撓み・扁平の、このモデルとの差（板中央の差と、最大差のモデル最大値に対する比）。計算が収束するたびに解き直す（約 10 秒）。';
   chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
   chips.conv.title = [
     '推定残り時間: ここまでの反復から外挿した、収束までの実時間（描画の時間も含む）。',
@@ -263,7 +219,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     // the tone only: 'busy' and 'v3-stale' are set by their own owners
     for (const t of ['ok', 'warn', 'bad'] as const) c.classList.toggle(t, t === tone);
   };
-  const hint = el('div', 'v3-hint', 'Space=計算開始／停止 ／ R=再初期化 ／ 1–5=ミル形式（2Hi 4Hi 6Hi 12Hi 20Hi）／ チャート上にポインタで数値読み取り');
+  const hint = el('div', 'v3-hint', 'Space=計算開始／停止 ／ R=再初期化 ／ チャート上にポインタで数値読み取り');
   centre.append(status, front.root, chartGrid, hint);
 
   const frontView = new FrontView(front.canvas);
@@ -281,7 +237,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   const redrawOnOpen = (open: boolean) => { if (open) dirty = true; };
   const loadSec = section('荷重・圧下', { open: true, onToggle: redrawOnOpen });
   const shapeSec = section('板形状', { open: true, onToggle: redrawOnOpen });
-  const numSec2 = section('解析', { open: false, onToggle: redrawOnOpen, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。IR をシフトした 6Hi は下半分のロールも解くので自由度が 2 倍になる（「上下」と表示）。' });
+  const numSec2 = section('解析', { open: false, onToggle: redrawOnOpen, hint: '外側 Newton の反復回数と相対残差、1 フレームの解法時間、全体剛性の自由度と半バンド幅、幅方向の節点数（板上のスライス数と間隔 / 全ロール共通）。' });
   const grid = (sec: { body: HTMLElement }) => { const g = el('div', 'stat-grid'); sec.body.append(g); return g; };
   const gLoad = grid(loadSec), gShape = grid(shapeSec), gNum = grid(numSec2);
   // each row of the 板形状 and 解析 grids, to fade the results in them row by row (see `SETTING_ROWS`)
@@ -302,10 +258,9 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   into(gNum, 'grid', '幅方向 節点 板上 / 全');
   const fistrSec = section('FrontISTR 照合', {
     open: true, onToggle: redrawOnOpen,
-    hint: 'このモデル（ティモシェンコ梁 ＋ Hertz の接触・扁平）と、上半分のロールをソリッド要素で解いた FrontISTR の解。板の荷重 q(x)（収束したスライスの値）を両方に同じだけ与えるので、違いはロールの力学だけ。'
-      + '撓みは圧下ロールの軸受に対する各ロール軸の値（板中央）、線荷重はロール同士の接触（下のロールの節点の接触法線力を駅ごとに集める）、扁平は板の下の局所的な沈み込み（2Hi。FEM は下面 − 上面で読み、曲げのポアソン効果を除く）、'
-      + '出側プロファイルは WR 下面の変位から（板の荷重が駅ごとの節点リングに載るので板端付近は粗い）。「最大差」の括弧はモデルの最大値に対する比。'
-      + '格子は関門と同じ 81 点・弧 8 分割、4Hi・6Hi はさらに粗い網（接触の非線形で数分）。6Hi は IR シフトで左右非対称なので全長を解く。詳細は tools/frontistr/README.md。',
+    hint: 'このモデル（ティモシェンコ梁 ＋ Hertz の接触・扁平）と、上半分の WR をソリッド要素で解いた FrontISTR の解。板の荷重 q(x)（収束したスライスの値）を両方に同じだけ与えるので、違いはロールの力学だけ。'
+      + '撓みは軸受に対する WR 軸の値（板中央）、扁平は板の下の局所的な沈み込み（FEM は下面 − 上面で読み、曲げのポアソン効果を除く）。「最大差」の括弧はモデルの最大値に対する比。'
+      + '格子は関門と同じ 81 点・弧 8 分割。詳細は tools/frontistr/README.md。',
   });
   fistrSec.root.hidden = true;
   let fistrStats = new StatGrid();
@@ -330,14 +285,14 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   const contactSec = section('接触力・支持反力', { open: true, onToggle: redrawOnOpen });
   let contactGrid = new StatGrid();
   contactSec.body.append(contactGrid.root);
-  const endSec = section('端面図（クラスタ配置）', { open: true, onToggle: redrawOnOpen });
+  const endSec = section('端面図', { open: true, onToggle: redrawOnOpen });
   const endCanvas = el('canvas');
   endCanvas.id = 'v3-end';
   endSec.body.append(endCanvas);
   const endView = new EndView(endCanvas);
   const sideSec = section('側面図（横から）', {
     open: true, onToggle: redrawOnOpen,
-    hint: '端面図のロール配置を横（オペレータ側）から見た図。上半分の各ロールの胴・ネックを実寸の比で、ロール軸方向のシフトと支持（□ チョック、赤 ▼ 圧下、黄 ● サドル、緑の矢印 ベンダー）、パスラインの板幅とともに。端面図で同じ高さに並ぶロールは重なって見える（ミル中心線に近いロールが手前）。撓みは正面図、荷重は端面図。',
+    hint: '端面図のロール配置を横（オペレータ側）から見た図。上の WR の胴・ネックを実寸の比で、支持（□ チョック、赤 ▼ 圧下）とパスラインの板幅とともに。ハウジング変形考慮モードではハウジング枠も。撓みは正面図、荷重は端面図。',
   });
   const sideCanvas = el('canvas');
   sideCanvas.id = 'v3-side';
@@ -357,7 +312,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   // scope, the panel reads exactly as it did before the mode existed.
   const housingSec = section('ハウジング', {
     open: true, onToggle: redrawOnOpen,
-    hint: 'ハウジング変形考慮モードの結果。左右（操作側 −x・駆動側 +x）のハウジング枠それぞれについて、枠が受ける荷重（上下チョック荷重の平均）と窓の開き（ポストの伸び + 上下クロスヘッドのたわみ）。圧下ロールの傾きは駆動側の支持点の鉛直変位 − 操作側。IR チョック座の力は 6Hi で着座 ON のときの圧縮力（上 −x・上 +x・下 −x・下 +x）。ミル剛性は圧延荷重 ÷ 左右の窓の開きの平均。',
+    hint: 'ハウジング変形考慮モードの結果。左右（操作側 −x・駆動側 +x）のハウジング枠それぞれについて、枠が受ける荷重（上下チョック荷重の平均）と窓の開き（ポストの伸び + 上下クロスヘッドのたわみ）。圧下ロールの傾きは駆動側の支持点の鉛直変位 − 操作側。ミル剛性は圧延荷重 ÷ 左右の窓の開きの平均。',
   });
   const housingStats = new StatGrid();
   housingStats.add('hLoad', 'ハウジング荷重 操作側 / 駆動側', 'tonf')
@@ -366,8 +321,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     .add('hTop', '　うち 上クロスヘッド 操作側 / 駆動側', 'µm')
     .add('hBottom', '　うち 下クロスヘッド 操作側 / 駆動側', 'µm')
     .add('hTilt', '圧下ロールの傾き（駆動側 − 操作側）', 'µm')
-    .add('hSeatTop', 'IR チョック座 上 −x / +x', 'tonf')
-    .add('hSeatBottom', 'IR チョック座 下 −x / +x', 'tonf')
     .add('hModulus', 'ミル剛性（荷重 ÷ 窓の開き）', 'MN/mm');
   housingSec.body.append(housingStats.root);
   right.append(loadSec.root, fistrSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
@@ -377,39 +330,19 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   let contactKeys: string[] = [];
 
   /**
-   * Dimensions the other settings bound: a neck (or a backing shaft) no thicker than its roll, a
-   * support span no shorter than its barrel - a bearing inside the barrel is no mill - and the
-   * strokes that move a barrel end along the strip: a 6Hi's intermediate shift keeps the shifted
-   * barrel end out of the middle half of the strip and the far end past the far strip edge, a
-   * 20Hi's taper starts between the mill centre and the barrel end. The bounded dial's travel
-   * ends at the bound, so it cannot be dragged, typed or stepped past it; when the bound moves
-   * past the value, the value follows. A preset or a remembered mill geometry is held to the
-   * same bounds. A bound is another setting's value or a function of the settings [SI].
+   * Dimensions the other settings bound: the work roll's neck no thicker than the roll, its
+   * support span no shorter than its barrel - a bearing inside the barrel is no mill. The
+   * bounded dial's travel ends at the bound, so it cannot be dragged, typed or stepped past it;
+   * when the bound moves past the value, the value follows. A bound is another setting's value
+   * or a function of the settings [SI].
    */
   type Bound = { key: keyof Params3D; by: keyof Params3D | ((p: Params3D) => number); side: 'max' | 'min' };
   const BOUNDS: Bound[] = [
-    { key: 'wrDn', by: 'wrD', side: 'max' }, { key: 'irDn', by: 'irD', side: 'max' },
-    { key: 'burDn', by: 'burD', side: 'max' }, { key: 'bbShaft', by: 'bbD', side: 'max' },
-    { key: 'wrLs', by: 'wrLb', side: 'min' }, { key: 'irLs', by: 'irLb', side: 'min' }, { key: 'burLs', by: 'burLb', side: 'min' },
-    // the shifted barrel end (at W/2 + irShift) no further in than a quarter of the width from
-    // the centre; the other end (W/2 + irShift − Lb) still past the other edge (−W/2)
-    { key: 'irShift', by: (p) => -p.width / 4, side: 'min' },
-    { key: 'irShift', by: (p) => p.irLb - p.width, side: 'max' },
-    // the taper's start (at W/2 + taperShift) between the mill centre and the barrel end
-    { key: 'taperShift', by: (p) => -p.width / 2, side: 'min' },
-    { key: 'taperShift', by: (p) => p.irLb / 2 - p.width / 2, side: 'max' },
-    // the saddle width (the bare shaft at each saddle) under the saddle pitch of the backing
-    // shafts (one saddle per AS-U rack, spread over their support length), with a tenth of the
-    // pitch left as a bearing ring: at the pitch itself no ring remains and the shaft supports
-    // nothing (a 700 mm shaft has a 107 mm pitch, so the 120 mm the dial allows emptied it)
-    { key: 'bbGap', by: (p) => 0.9 * saddlePitch(p.bbLb, ASU_RACKS), side: 'max' },
+    { key: 'wrDn', by: 'wrD', side: 'max' },
+    { key: 'wrLs', by: 'wrLb', side: 'min' },
   ];
   const boundOf = (p: Params3D, b: Bound) => (typeof b.by === 'function' ? b.by(p) : (p as unknown as Record<string, number>)[b.by as string]);
-  /**
-   * The parameters held to their bounds. The upper bounds go first, so where a key's two bounds
-   * cross (a barrel shorter than three quarters of the strip) the lower one - the end kept out of
-   * the middle of the strip - is the one that holds.
-   */
+  /** the parameters held to their bounds, the upper bounds first */
   const clampBounds = (p: Params3D) => {
     const pr = p as unknown as Record<string, number>;
     for (const side of ['max', 'min'] as const) {
@@ -459,7 +392,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
   };
   /** a converged solve with the check on: ask the bridge (nothing while one is running) */
   const maybeRunFistr = () => {
-    if (!fistrOn || !FISTR_MILLS.includes(params.mill) || stale || running || fistrBusy) return;
+    if (!fistrOn || stale || running || fistrBusy) return;
     const ctl = new AbortController();
     fistrBusy = ctl;
     fistrT0 = performance.now();
@@ -481,7 +414,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     dirty = true;
   };
   const setFistr = (on: boolean) => {
-    fistrOn = on && FISTR_MILLS.includes(params.mill);
+    fistrOn = on;
     chips.fistr.hidden = !fistrOn;
     fistrSec.root.hidden = !fistrOn;
     if (!fistrOn) { dropFistr(); fistrNote = ''; }
@@ -533,38 +466,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     return h.root;
   };
 
-  const geometryByMill = new Map<MillType, Pick<Params3D, GeometryKey>>();
-  /** a preset sets everything, by design - but the type it leaves keeps its remembered dimensions */
-  const applyPreset = (pr: Preset3D) => {
-    geometryByMill.set(params.mill, pickGeometry(params));
-    params = { ...defaultParams(pr.mill), ...pr.patch, asu: [...(pr.patch.asu ?? defaultParams(pr.mill).asu)], asu2: [...(pr.patch.asu2 ?? defaultParams(pr.mill).asu2)] };
-    clampBounds(params);
-    solver.setParams(params); settingsChanged(); buildLeft();
-  };
-  /** a new mill type with every other setting kept: only the roll dimensions change */
-  const switchMill = (m: MillType) => {
-    if (m === params.mill) return;
-    geometryByMill.set(params.mill, pickGeometry(params));
-    const geometry = geometryByMill.get(m) ?? pickGeometry(defaultParams(m));
-    params = { ...params, ...geometry, mill: m, asu: [...params.asu], asu2: [...params.asu2] };
-    apply();
-    buildLeft();
-  };
-
   const buildLeft = () => {
     left.replaceChildren();
-    // presets
-    const preSec = section('プリセット', { remember: false, open: false, hint: 'よくある設定をひとまとめに。形式の既定値の上に条件を載せる。' });
-    preSec.body.append(buttonRow(PRESETS.map((pr) => ({ text: pr.name, title: pr.note, onClick: () => applyPreset(pr) }))));
-    left.append(preSec.root);
-    // mill type
-    const millSec = section('ミル形式', { remember: false, open: false, hint: '上半分のみをモデル化（パスラインについて対称）。形式を変えても板・圧延条件、制御、アクチュエータ、ロールプロファイル、解析の設定はそのまま。変わるのはロール寸法だけで、形式ごとに記憶される（初めて選ぶ形式は既定寸法）。その形式の典型条件にしたいときはプリセット。' });
-    const millRow = buttonRow(MILLS.map((m) => ({ text: MILL_LABEL[m], onClick: () => switchMill(m) })));
-    [...millRow.children].forEach((b, i) => b.classList.toggle('active', MILLS[i] === params.mill));
-    millSec.body.append(millRow);
-    millSec.body.append(el('div', 'ctrl-hint', millNote(params.mill)));
-    left.append(millSec.root);
-
     // control
     const ctlSec = section('制御・目標', { remember: false, open: false });
     ctlSec.body.append(select<'gauge' | 'force' | 'screw'>('制御モード', [
@@ -587,118 +490,42 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     ctlSec.body.append(num('housingK', 'ハウジング剛性', 'MN/mm', 1, 30, 0.5, 1e9, '支持点（チョックまたはサドル）1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
     left.append(ctlSec.root);
 
-    // actuators
-    const actSec = section('アクチュエータ', { remember: false, open: false });
-    if (params.mill === '4hi' || params.mill === '6hi') {
-      actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf/chock', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
-    }
-    if (params.mill === '6hi') {
-      actSec.body.append(num('irBender', 'IR ベンダー', 'tonf/chock', 0, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 IR のチョックを持ち上げる。'));
-      actSec.body.append(num('irShift', 'IR シフト', 'mm', -150, 150, 5, 1e-3, '中間ロールの胴端の、板端からの位置。正で板端より外側、負で内側に引き込む（エッジ部の WR 支持を外す）。上 IR は +x 側の胴端を +x 側の板端に、下 IR は −x 側の胴端を −x 側の板端に合わせる（上下で逆向き＝点対称のシフト）。上下対称でなくなるので下半分のロールも一緒に解く（表示は上半分）。スライダーの範囲は板幅と IR 胴長で狭まる: 胴端は板の中央側 1/4 より内側に入れず（−板幅/4 まで）、反対側の胴端は反対の板端より外に残す（IR 胴長 − 板幅 まで）。'));
-    }
-    if (params.mill === '20hi') {
-      actSec.body.append(num('taperShift', '第1中間 テーパ位置', 'mm', -200, 200, 5, 1e-3, 'テーパ開始点の板端からの位置（板端基準）。正で板端より外側、負で板端より内側から細り始める。スライダーの範囲は板幅と胴長で狭まる: 開始点はミル中心（−板幅/2）と胴端（胴長/2 − 板幅/2）の間。'));
-      actSec.body.append(num('taperLen', 'テーパ長', 'mm', 50, 500, 10, 1e-3));
-      actSec.body.append(num('taperDepth', 'テーパ深さ（半径）', 'µm', 0, 1000, 10, 1e-6));
-    }
-    if (params.mill === '12hi' || params.mill === '20hi') {
-      // one rack row per AS-U: the 12Hi has one (B), the 20Hi two (A-B and C-D)
-      const racks: { key: 'asu' | 'asu2'; label: string; hint: string }[] = params.mill === '20hi'
-        ? [
-          { key: 'asu', label: 'AS-U 1（A–B 軸）', hint: 'バッキング A・B 軸のサドル 7 点の押し込み [µm]（正 = ワークロール側へ）。ダブル AS-U の駆動側の組。' },
-          { key: 'asu2', label: 'AS-U 2（C–D 軸）', hint: 'バッキング C・D 軸のサドル 7 点の押し込み [µm]。作業側の組。両組を同じにすれば従来の AS-U。' },
-        ]
-        : [{ key: 'asu', label: 'AS-U（B 軸）', hint: 'B 軸のバッキング軸を支えるサドルを個別に押し込む [µm]（正 = ワークロール側へ）。7 点のラックで胴長方向のクラウンを作る。' }];
-      for (const rk of racks) {
-        const asuWrap = el('div', 'ctrl');
-        const top = el('div', 'ctrl-top');
-        const lab = el('label', 'ctrl-label', rk.label);
-        lab.append(helpMark(rk.hint));
-        top.append(lab);
-        asuWrap.append(top);
-        const row = el('div', 'v3-asu');
-        params[rk.key].forEach((v, k) => {
-          row.append(numField({
-            value: v * 1e6, min: -500, max: 500, step: 10, digits: 0,
-            onChange: (x) => { params[rk.key][k] = x * 1e-6; params[rk.key] = [...params[rk.key]]; apply(); },
-          }).root);
-        });
-        asuWrap.append(row);
-        const set = (arr: number[]) => { params[rk.key] = arr; apply(); buildLeft(); };
-        asuWrap.append(buttonRow([
-          { text: 'フラット', onClick: () => set(new Array(ASU_RACKS).fill(0)) },
-          { text: '山形 +200', onClick: () => set(asuShape(200e-6)) },
-          { text: '谷形 −200', onClick: () => set(asuShape(-200e-6)) },
-        ]));
-        actSec.body.append(asuWrap);
-      }
-      if (params.mill === '20hi') {
-        // the arrow reads as the copy goes: from the first rack into the second, and back
-        actSec.body.append(buttonRow([
-          { text: '1 → 2 にコピー', title: 'AS-U 1 の値を AS-U 2 に入れる', onClick: () => { params.asu2 = [...params.asu]; apply(); buildLeft(); } },
-          { text: '2 → 1 にコピー', title: 'AS-U 2 の値を AS-U 1 に入れる', onClick: () => { params.asu = [...params.asu2]; apply(); buildLeft(); } },
-        ]));
-      }
-    }
-    if (!actSec.body.children.length) actSec.body.append(el('div', 'ctrl-hint', '2Hi にはアクチュエータがない（圧下とレベリングのみ）。'));
-    left.append(actSec.root);
-
     // housing deformation mode
-    const housingInScope = params.mill === '2hi' || params.mill === '4hi' || params.mill === '6hi';
     const hSec = section('ハウジング', {
       remember: false, open: false,
       hint: 'ハウジング変形考慮モード。OFF（既定）では圧下ロールの各チョックが独立したばね（「制御・目標」のハウジング剛性）に載る。ON では左右それぞれのハウジング枠（ポスト 2 本と上下のクロスヘッド）に載り、上下のチョックがポストでつながる。'
-        + '枠だけでは IR シフトの左右非対称は変わらない（窓の開きは左右で等しく、上下のクロスヘッドのたわみが点対称に入れ替わるだけ）。非対称を変えるのは 6Hi の IR チョックの着座（BUR チョックに圧縮だけで載る）。'
-        + '枠の寸法と座の剛性の既定は桁を見積もった仮定で、実機の図面の値ではない（docs/validation.md「ハウジング変形考慮モード」）。',
+        + '枠の寸法の既定は桁を見積もった仮定で、実機の図面の値ではない（docs/validation.md「ハウジング変形考慮モード」）。',
     });
     const modeToggle = toggle('ハウジング変形考慮モード', params.housingMode, (v) => { params.housingMode = v; apply(); syncModeDials(); },
       'ON で圧下ロールのチョックをハウジング枠に載せる。枠の剛性は下の寸法から計算する（「ハウジング剛性」は圧下ロールには使わなくなる）。');
     hSec.body.append(modeToggle.root);
-    refreshHousingHint = null;
-    if (!housingInScope) {
-      modeToggle.setEnabled(false);
-      hSec.body.append(el('div', 'ctrl-hint', `${MILL_LABEL[params.mill]} は対象外: クラスタミルはバッキング軸のサドルがハウジングに直接載り、窓の開き方が 2Hi・4Hi・6Hi の枠とは別物なので、このモードでは扱わない（ON のままでもこの形式は今の支持で解く）。`));
-    } else {
-      if (params.mill === '6hi') {
-        hSec.body.append(toggle('IR チョックの着座', params.irSeat, (v) => { params.irSeat = v; apply(); syncModeDials(); },
-          'ON で IR のチョックが BUR のチョックに載る（軸受・チョック・ライナーを直列にしたばね、圧縮だけ）。IR シフトで胴が片側へ寄ると、座の力が左右で変わる。OFF では IR は接触だけで支持される（従来どおり）。'
-          + '座は荷重を片側へ流すので、形状が悪くなることがある: 既定の 6Hi でシフト +100 mm のとき、潜在形状は着座 OFF 1282 → ON 1762 I-unit（幅方向 81 点では 973 → 1416）。').root);
-        hSec.body.append(num('irSeatK', 'IR チョック座の剛性', 'MN/mm', 0.1, 30, 0.1, 1e9, '軸受・チョック・ライナーを直列にしたばね。既定 3 MN/mm は桁の見積り（仮定）。'));
-      }
-      hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
-      hSec.body.append(num('housingPostCount', 'ポスト 本数（片側）', '本', 1, 4, 1, 1, '片側のハウジングの窓を作るポストの数。ふつうは 2 本（入側・出側）。'));
-      hSec.body.append(num('housingPostLength', 'ポスト 長さ', 'm', 1, 8, 0.1, 1, '上下のクロスヘッドの間のポストの長さ。既定 4.5 m（仮定）。'));
-      hSec.body.append(num('housingPostWidth', 'ポスト 幅（ロール軸方向）', 'm', 0.1, 1.5, 0.01, 1, '操作側・駆動側それぞれのポストの、ロール軸方向の幅。ポストは圧下ロールのチョックを中心に立つので、板が通るポスト内面の間隔 = チョック間隔 − この幅。側面図の描画と、板幅がこの間隔を超えたときの警告だけに使い、剛性には使わない（剛性は断面積から）。既定 0.7 m（500 × 700 mm の 700 側を仮定）。'));
-      hSec.body.append(num('housingCrossSpan', 'クロスヘッド スパン', 'm', 0.5, 4, 0.05, 1, 'ポスト中心の間隔（クロスヘッドはこの 2 点で支えられ、中央にチョック荷重を受ける梁）。既定 1.8 m（仮定）。'));
-      hSec.body.append(num('housingCrossI', 'クロスヘッド 断面二次モーメント', 'm⁴', 1e-4, 5e-2, 1e-4, 1, '曲げのたわみ F S³ / (48 E I)。既定 4.5×10⁻³ m⁴（700 × 420 mm の断面を仮定）。', true, (v) => v.toExponential(2)));
-      hSec.body.append(num('housingCrossShearArea', 'クロスヘッド せん断断面積', 'm²', 0.05, 1.5, 0.01, 1, 'せん断のたわみ F S / (4 G A_s)。既定 0.3 m²（仮定）。'));
-      hSec.body.append(num('housingE', 'ハウジング ヤング率', 'GPa', 100, 250, 1, 1e9, '鋳鋼・鋼板のハウジング。既定 206 GPa。'));
-      const derived = el('div', 'ctrl-hint');
-      refreshHousingHint = () => {
-        const c = housingCompliance(params);
-        const k = halfStiffness(c);
-        const screwRoll = solver.stack.rolls.find((r) => r.support === 'screw');
-        const plan = screwRoll ? housingPlan(params, screwRoll) : null;
-        derived.textContent = `片側の鉛直剛性（上下対称なときの 1 チョック）: ${(k / 1e9).toFixed(2)} MN/mm ／ `
-          + `ポスト ${(c.post * 1e12).toFixed(2)} µm/MN・クロスヘッド ${(c.crosshead * 1e12).toFixed(2)} µm/MN（荷重あたりの伸び・たわみ）。`
-          + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。'
-          + (plan ? ` ポスト内面の間隔 ${((plan.inner[1] - plan.inner[0]) * 1e3).toFixed(0)} mm（板幅 ${(params.width * 1e3).toFixed(0)} mm${plan.stripOverlap > 0 ? '、⚠ 板がポストに当たる' : ''}）。` : '');
-      };
-      refreshHousingHint();
-      hSec.body.append(derived);
-    }
+    hSec.body.append(num('housingPostArea', 'ポスト 断面積（1 本）', 'm²', 0.05, 1.5, 0.01, 1, '片側のハウジングのポスト 1 本の断面積。既定 0.35 m²（500 × 700 mm を仮定。図面の値ではない）。'));
+    hSec.body.append(num('housingPostCount', 'ポスト 本数（片側）', '本', 1, 4, 1, 1, '片側のハウジングの窓を作るポストの数。ふつうは 2 本（入側・出側）。'));
+    hSec.body.append(num('housingPostLength', 'ポスト 長さ', 'm', 1, 8, 0.1, 1, '上下のクロスヘッドの間のポストの長さ。既定 4.5 m（仮定）。'));
+    hSec.body.append(num('housingPostWidth', 'ポスト 幅（ロール軸方向）', 'm', 0.1, 1.5, 0.01, 1, '操作側・駆動側それぞれのポストの、ロール軸方向の幅。ポストは圧下ロールのチョックを中心に立つので、板が通るポスト内面の間隔 = チョック間隔 − この幅。側面図の描画と、板幅がこの間隔を超えたときの警告だけに使い、剛性には使わない（剛性は断面積から）。既定 0.7 m（500 × 700 mm の 700 側を仮定）。'));
+    hSec.body.append(num('housingCrossSpan', 'クロスヘッド スパン', 'm', 0.5, 4, 0.05, 1, 'ポスト中心の間隔（クロスヘッドはこの 2 点で支えられ、中央にチョック荷重を受ける梁）。既定 1.8 m（仮定）。'));
+    hSec.body.append(num('housingCrossI', 'クロスヘッド 断面二次モーメント', 'm⁴', 1e-4, 5e-2, 1e-4, 1, '曲げのたわみ F S³ / (48 E I)。既定 4.5×10⁻³ m⁴（700 × 420 mm の断面を仮定）。', true, (v) => v.toExponential(2)));
+    hSec.body.append(num('housingCrossShearArea', 'クロスヘッド せん断断面積', 'm²', 0.05, 1.5, 0.01, 1, 'せん断のたわみ F S / (4 G A_s)。既定 0.3 m²（仮定）。'));
+    hSec.body.append(num('housingE', 'ハウジング ヤング率', 'GPa', 100, 250, 1, 1e9, '鋳鋼・鋼板のハウジング。既定 206 GPa。'));
+    const derived = el('div', 'ctrl-hint');
+    refreshHousingHint = () => {
+      const c = housingCompliance(params);
+      const k = halfStiffness(c);
+      const screwRoll = solver.stack.rolls.find((r) => r.support === 'screw');
+      const plan = screwRoll ? housingPlan(params, screwRoll) : null;
+      derived.textContent = `片側の鉛直剛性（上下対称なときの 1 チョック）: ${(k / 1e9).toFixed(2)} MN/mm ／ `
+        + `ポスト ${(c.post * 1e12).toFixed(2)} µm/MN・クロスヘッド ${(c.crosshead * 1e12).toFixed(2)} µm/MN（荷重あたりの伸び・たわみ）。`
+        + '既定の寸法は、この値が OFF のときのハウジング剛性の既定（6.04 MN/mm）と揃うように選んである。'
+        + (plan ? ` ポスト内面の間隔 ${((plan.inner[1] - plan.inner[0]) * 1e3).toFixed(0)} mm（板幅 ${(params.width * 1e3).toFixed(0)} mm${plan.stripOverlap > 0 ? '、⚠ 板がポストに当たる' : ''}）。` : '');
+    };
+    refreshHousingHint();
+    hSec.body.append(derived);
     left.append(hSec.root);
 
     // profiles
     const profSec = section('ロールプロファイル', { remember: false, open: false });
     profSec.body.append(num('wrCrown', 'WR 研削クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン: 中央と胴端の直径差。正で中央が太い（放物線）。'));
     profSec.body.append(num('wrThermal', 'WR サーマルクラウン', 'µm', 0, 200, 5, 1e-6, '熱膨張による直径クラウン（入力値。温度分布は解かない）。'));
-    if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
-      profSec.body.append(num('irCrown', params.mill === '20hi' ? '第1中間 クラウン' : 'IR クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン。'));
-    }
-    if (params.mill === '4hi' || params.mill === '6hi') {
-      profSec.body.append(num('burCrown', 'BUR クラウン', 'µm', -600, 1000, 10, 1e-6, '直径クラウン。'));
-    }
     left.append(profSec.root);
 
     // strip
@@ -764,33 +591,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     geoSec.body.append(num('wrLb', 'WR 胴長', 'mm', 500, 2500, 10, 1e-3));
     geoSec.body.append(num('wrLs', 'WR 支持スパン', 'mm', 600, 3000, 10, 1e-3, SPAN_HINT));
     geoSec.body.append(num('wrDn', 'WR ネック径', 'mm', 20, 700, 5, 1e-3, NECK_HINT));
-    if (params.mill === '6hi' || params.mill === '12hi' || params.mill === '20hi') {
-      geoSec.body.append(num('irD', params.mill === '20hi' ? '第1中間 直径' : 'IR 直径', 'mm', 50, 900, 5, 1e-3));
-      geoSec.body.append(num('irLb', params.mill === '20hi' ? '第1中間 胴長' : 'IR 胴長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('irLs', params.mill === '20hi' ? '第1中間 支持スパン' : 'IR 支持スパン', 'mm', 600, 3000, 10, 1e-3, SPAN_HINT));
-      // the neck had no dial: a thinner IR pulled it down (the bound), and it stayed thin when the IR grew back
-      geoSec.body.append(num('irDn', params.mill === '20hi' ? '第1中間 ネック径' : 'IR ネック径', 'mm', 20, 700, 5, 1e-3, NECK_HINT));
-    }
-    if (params.mill === '20hi') {
-      geoSec.body.append(num('ir2D', '第2中間 直径', 'mm', 80, 400, 5, 1e-3));
-      geoSec.body.append(num('ir2Lb', '第2中間 胴長', 'mm', 500, 2500, 10, 1e-3));
-    }
-    if (params.mill === '4hi' || params.mill === '6hi') {
-      geoSec.body.append(num('burD', 'BUR 直径', 'mm', 400, 2000, 10, 1e-3));
-      geoSec.body.append(num('burLb', 'BUR 胴長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(num('burLs', 'BUR 支持スパン', 'mm', 600, 3200, 10, 1e-3, SPAN_HINT));
-      geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3, NECK_HINT));
-    }
-    if (params.mill === '12hi' || params.mill === '20hi') {
-      geoSec.body.append(num('bbD', 'バッキング 外径', 'mm', 100, 600, 5, 1e-3, 'バッキングベアリングの外径。'));
-      geoSec.body.append(num('bbShaft', 'バッキング軸 径', 'mm', 50, 400, 5, 1e-3, 'バッキング外径まで（スライダーの上限が外径。外径を小さくすると軸径も追従する）。'));
-      geoSec.body.append(num('bbLb', 'バッキング軸 支持長', 'mm', 500, 2500, 10, 1e-3));
-      geoSec.body.append(toggle('バッキング軸受を分割', params.bbSegmented, (v) => { params.bbSegmented = v; apply(); },
-        'ON: 軸受はサドル間ごとの独立したリング（サドル幅の隙間では接触しない）。OFF: 一本の連続胴として扱う。').root);
-      geoSec.body.append(num('bbGap', 'サドル幅（軸受間の隙間）', 'mm', 5, 120, 5, 1e-3, '隣り合う軸受リングの間で軸がむき出しになる幅。ここでは第 2 中間ロールと接触しない。'));
-      geoSec.body.append(num('angle1', '第1中間 配置角', '°', 10, 60, 1, Math.PI / 180, '鉛直からの角度。左右の中間ロールが触れ合わない最小角より小さければ、その最小角に引き上げられる（端面図に実際の角を表示）。'));
-      geoSec.body.append(num('clearance', '隣接ロールのクリアランス', 'mm', 0.5, 20, 0.5, 1e-3, '同じ段に並ぶロール同士（第1中間の左右、第2中間、バッキング）に空ける隙間。'));
-    }
     geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 1, 1e9));
     left.append(geoSec.root);
 
@@ -805,24 +605,20 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     numSec.body.append(toggle('扁平の幅方向の広がり（非局所）', params.flatNonlocal, (v) => { params.flatNonlocal = v; apply(); },
       'ON: WR と板の扁平を、そのスライスの荷重だけでなく隣のスライスの荷重によるへこみも足して求める。半無限体の表面変位（Boussinesq、Johnson "Contact Mechanics" §3.2。板プロフィルの理論の戸澤・上田 1970 と同じ積分）をロール軸方向に重ね、一様な荷重では上の扁平モデルの値に戻るように |s| = 0.446 R で打ち切る。'
       + '板の外の胴は荷重を受けないので、板端から約 0.45 R の範囲で扁平が小さくなり、エッジドロップと板端の伸びが増える（4Hi・301 点・前後の平均の張力・座屈限界の頭打ちで、エッジドロップ 40 → 94 µm、C25 54 → 86 µm、潜在形状 1481 → 2847 I-unit。板の中央部は変わらない）。'
-      + 'ON が既定。OFF: 各スライスが自分の荷重だけで扁平する。ON では外側の反復が 3〜5 割増える。ロール間の接触（WR–BUR など）の扁平はどちらでもスライスごと。').root);
+      + 'ON が既定。OFF: 各スライスが自分の荷重だけで扁平する。ON では外側の反復が 3〜5 割増える。').root);
     {
-      // the check is for the stacked mills: a cluster mill switches it off before the select is built
-      const served = FISTR_MILLS.includes(params.mill);
-      if (!served && fistrOn) setFistr(false);
-      else if (fistrOn) buildFistrRows();
+      if (fistrOn) buildFistrRows();
       const fs = select<'off' | 'on'>('ロールの照合', [
         { value: 'off', text: 'なし' },
         { value: 'on', text: 'FrontISTR（ソリッド要素）' },
       ], fistrOn ? 'on' : 'off', (v) => setFistr(v === 'on'),
-      '収束のたびに、同じ板の荷重を上半分のロール（ソリッド要素、ロール同士は接触解析）に載せて FrontISTR で解き、撓み・線荷重・扁平（2Hi）・出側プロファイルをグラフに白の破線で重ね、右の「FrontISTR 照合」に並べる。'
-        + '2Hi・4Hi・6Hi（12Hi・20Hi のクラスタは未対応）。npm run dev の橋渡し（tools/frontistr/bridge.mjs）と手元の fistr1 が要る。1 回 2Hi 約 10 秒、4Hi・6Hi は数分（粗い網）。');
+      '収束のたびに、同じ板の荷重を上半分の WR（ソリッド要素）に載せて FrontISTR で解き、撓み・扁平をグラフに白の破線で重ね、右の「FrontISTR 照合」に並べる。'
+        + 'npm run dev の橋渡し（tools/frontistr/bridge.mjs）と手元の fistr1 が要る。1 回 約 10 秒。');
       fs.root.dataset.key = 'fistr';
-      if (!served) { fs.root.classList.add('disabled'); fs.root.title = '2Hi・4Hi・6Hi のみ'; }
       numSec.body.append(fs.root);
     }
     if (params.flatModel === 'ring') {
-      numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。既定 800 × 半径方向 12（20Hi は 1600 × 16）。接触半幅（数 mm）を数節点で解像するには 400 以上。潜在形状が収束値から 2 % 以内に入るのは、4Hi・6Hi で 800 × 12、20Hi で 1600 × 16 から（400 × 8 では 4Hi で 5 %、20Hi で 7 % 大きい。旧既定の局所扁平で測定）。'));
+      numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。既定 800 × 半径方向 12。接触半幅（数 mm）を数節点で解像するには 400 以上。'));
       numSec.body.append(num('ringNr', 'ロール 半径方向 分割 nr', '', 2, 24, 1, 1));
       numSec.body.append(num('ringGrade', '半径方向グレーディング', '', 1, 5, 0.1, 1, '1 で等間隔、大きいほど胴表面に要素を寄せる。'));
       numSec.body.append(num('ringHub', '剛体ハブ半径 / R', '', 0.05, 0.85, 0.05, 1, 'ロール本体のうち軸として扱う部分。バッキングベアリングは軸径で決まる。'));
@@ -847,7 +643,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     // with it on the screw roll no longer sits on the per-support stiffness
     const housingOn = housingInScope(params);
     for (const k of ['housingPostArea', 'housingPostCount', 'housingPostLength', 'housingPostWidth', 'housingCrossSpan', 'housingCrossI', 'housingCrossShearArea', 'housingE']) on(k, params.housingMode);
-    on('irSeatK', params.housingMode && params.irSeat);
     // the load formula's tension only acts with the tension feedback on
     on('slabTension', params.tensionFeedback);
     // without the feedback no slice buckles (the tension is the set one everywhere)
@@ -1069,7 +864,7 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     // both from the result on show: after a change that keeps the mesh it is the last solve's, faded
     stats.set('iter', dash(`${R.solveIterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
     stats.set('ms', dash(R.solveMs.toFixed(1)));
-    stats.set('dof', `${R.dof} / ${R.bandwidth}${solver.wrLower >= 0 ? '（上下）' : ''}`);
+    stats.set('dof', `${R.dof} / ${R.bandwidth}`);
     stats.set('grid', `${solver.slices.length}（${(solver.grid.dxStrip * 1e3).toFixed(1)} mm）/ ${R.x.length}`);
     {
       const ring = solver.ringFor(st.rolls[st.wr]);
@@ -1111,9 +906,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
       housingStats.set('hTop', pair((sd) => sd.crossheadTop, 1e6, 1));
       housingStats.set('hBottom', pair((sd) => sd.crossheadBottom, 1e6, 1));
       housingStats.set('hTilt', (h.burTilt * 1e6).toFixed(1));
-      const seats = (from: number) => (h.seatForces.length ? h.seatForces.slice(from, from + 2).map((f) => (f / TONF).toFixed(1)).join(' / ') : '—（座なし）');
-      housingStats.set('hSeatTop', seats(0), undefined, h.seatForces.length > 0);
-      housingStats.set('hSeatBottom', seats(2), undefined, h.seatForces.length > 0);
       housingStats.set('hModulus', (h.millModulus / 1e9).toFixed(2));
     } else if (housingSec.root.isConnected) {
       housingSec.root.remove();
@@ -1308,8 +1100,8 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
     relayout() { dirty = true; },
   };
 
-  // keyboard: Space starts or stops the solve, R starts over, 1-5 pick the mill. A field that takes
-  // typed text keeps its keys (Space, R and the digits are characters there). A button or a toggle
+  // keyboard: Space starts or stops the solve, R starts over. A field that takes
+  // typed text keeps its keys (Space and R are characters there). A button or a toggle
   // reached with Tab keeps them too - Space is how one presses or flips it from the keyboard - but
   // one the pointer clicked last only holds the focus Chrome leaves there: the keys are the view's,
   // with the browser's own action held back (Space used to flip a clicked toggle back instead of
@@ -1328,9 +1120,6 @@ export function installView3D(root: HTMLElement, opts: { initialMill?: MillType;
       e.preventDefault();
       solver.reset();
       settingsChanged();
-    } else {
-      const k = Number(e.key);
-      if (k >= 1 && k <= MILLS.length) { e.preventDefault(); switchMill(MILLS[k - 1]); }
     }
   });
   void idleFrames;
@@ -1356,22 +1145,4 @@ function takesTyping(t: EventTarget | null): boolean {
   if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return true;
   if (t instanceof HTMLInputElement) return !NON_TEXT_INPUTS.has(t.type);
   return t instanceof HTMLElement && t.isContentEditable;
-}
-
-function millNote(m: MillType): string {
-  switch (m) {
-    case '2hi': return 'ワークロールを直接圧下する 2 段ミル。胴長に対して細いロールは大きく撓む（クラウン制御手段なし）。';
-    case '4hi': return 'ワークロール + バックアップロール。WR ベンダーと BUR/WR クラウンで形状を作る。';
-    case '6hi': return 'WR + 中間ロール + BUR。IR シフトで板端外の WR 支持を外し、IR/WR ベンダーと合わせて幅ごとの形状制御。';
-    case '12hi': return '1-2-3 クラスタ（ゼンジミア型）。小径 WR を 2 本の中間ロールと 3 本のバッキング軸で支える。中央 B 軸に AS-U。';
-    case '20hi': return '1-2-3-4 クラスタ（ゼンジミア 20 段）。第1中間のテーパ部シフトでエッジ、B・C 軸の AS-U で胴方向のクラウンを制御。';
-  }
-}
-
-/** a parabolic AS-U setting: `amp` at the centre rack, 0 at the ends */
-function asuShape(amp: number): number[] {
-  return Array.from({ length: ASU_RACKS }, (_, k) => {
-    const t = -1 + (2 * k) / (ASU_RACKS - 1);
-    return amp * (1 - t * t);
-  });
 }
