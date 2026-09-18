@@ -35,7 +35,8 @@ export interface FistrResult {
   solveSeconds: number | null;
 }
 
-const base = (): string => {
+/** the bridge's root: this page's own origin under `/__frontistr`, or the one `?fistr=` names */
+export const bridgeBase = (): string => {
   try {
     const q = new URLSearchParams(location.search).get('fistr');
     if (q) return q.replace(/\/$/, '') + '/__frontistr';
@@ -48,7 +49,7 @@ export interface FistrPing { ok: boolean; fistr1: boolean; busy: boolean }
 /** null when nothing answers (a built app without the bridge) */
 export async function pingFrontistr(): Promise<FistrPing | null> {
   try {
-    const r = await fetch(`${base()}/ping`, { cache: 'no-store' });
+    const r = await fetch(`${bridgeBase()}/ping`, { cache: 'no-store' });
     if (!r.ok) return null;
     return (await r.json()) as FistrPing;
   } catch {
@@ -64,7 +65,7 @@ export class FistrError extends Error {
 export async function solveFrontistr(mill: MillType, params: Params3D, signal: AbortSignal): Promise<FistrResult> {
   let r: Response;
   try {
-    r = await fetch(`${base()}/solve`, {
+    r = await fetch(`${bridgeBase()}/solve`, {
       method: 'POST', signal, cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mill, params }),
