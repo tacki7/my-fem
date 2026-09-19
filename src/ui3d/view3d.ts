@@ -12,7 +12,7 @@
  * and the FrontISTR tools use them - but no control here reaches them.
  */
 
-import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, type Warning3D } from '../sim3d/solver';
+import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, stallText, slowText, type Warning3D } from '../sim3d/solver';
 import { RemainingTime, type Eta } from '../sim3d/eta';
 import { defaultParams, MILL_LABEL, type Params3D } from '../sim3d/stack';
 import { el, section, slider, select, toggle, buttonRow, helpMark, StatGrid, type SectionHandle } from '../ui/controls';
@@ -277,7 +277,10 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   const state = el('div', 'v3-state');
   const stateDetail = el('div', 'v3-state-detail');
   stateDetail.append(chips.res, chips.ms);
-  state.append(chips.conv, stateDetail, coupled.row);
+  // while a solve goes a third of the way to being given up without moving on: for how long, in counts
+  const slowRow = el('div', 'v3-slow');
+  slowRow.hidden = true;
+  state.append(chips.conv, stateDetail, slowRow, coupled.row);
   runBox.append(runBtn, state);
   const readout = el('div', 'v3-readout');
   readout.append(chips.force, chips.h1, chips.crown, chips.manifest, chips.fistr);
@@ -518,6 +521,8 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     if (running || coupled.busy) return;
     // converged, the coupling's rounds not finished (stopped or failed): on with the next round
     if (!stale) { coupled.resume(); dirty = true; return; }
+    // a solve given up waits for a change of the settings (see `solver.stall`)
+    if (solver.stall) return;
     running = true;
     coupled.begin();
     dirty = true;
@@ -1021,7 +1026,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     }
     stats.set('latent', dash(R.latentIU.toFixed(0)), none ? undefined : R.latentIU < 40 ? 'ok' : R.latentIU < 100 ? 'warn' : 'bad');
     stats.set('manifest', dash(R.manifestIU.toFixed(0)), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    stats.set('conv', running ? '反復中' : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
+    stats.set('conv', running ? '反復中' : !stale ? '収束' : solver.stall ? '計算停止（解けない）' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : solver.stall ? 'bad' : undefined);
     // both from the result on show: after a change that keeps the mesh it is the last solve's, faded
     stats.set('iter', dash(`${R.solveIterations} / ${Number.isFinite(R.residual) ? R.residual.toExponential(1) : '—'}`));
     stats.set('ms', dash(R.solveMs.toFixed(1)));
@@ -1077,20 +1082,29 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     setChip(chips.h1, none ? '—' : (R.h1Mean * 1e3).toFixed(3));
     setChip(chips.crown, none ? '—' : (R.crown * 1e6).toFixed(0));
     setChip(chips.manifest, none ? '—' : R.manifestIU.toFixed(0), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    setChip(chips.conv, running ? `反復中 ${etaText(eta)}` : coupled.busy ? 'ロールを計算中（FrontISTR）' : !stale ? '収束' : iterated ? '停止' : '未計算',
-      running || coupled.busy ? 'warn' : !stale ? 'ok' : undefined);
+    setChip(chips.conv, running ? `反復中 ${etaText(eta)}` : coupled.busy ? 'ロールを計算中（FrontISTR）' : !stale ? '収束' : solver.stall ? '計算停止（解けない）' : iterated ? '停止' : '未計算',
+      running || coupled.busy ? 'warn' : !stale ? 'ok' : solver.stall ? 'bad' : undefined);
     chips.conv.classList.toggle('busy', running || coupled.busy);
+    {
+      const slow = running ? slowText(solver.progress()) : null;
+      slowRow.hidden = !slow;
+      if (slow && slowRow.textContent !== slow) slowRow.textContent = slow;
+    }
     {
       // a coupled calculation is busy through its FrontISTR rounds as well as the app's solves
       const busy = running || coupled.busy;
-      const label = busy ? '■ 停止' : coupled.resumable ? '▶ 連成を続ける' : !stale ? '✓ 計算済み' : iterated ? '▶ 計算再開' : '▶ 計算開始';
+      const label = busy ? '■ 停止' : coupled.resumable ? '▶ 連成を続ける' : !stale ? '✓ 計算済み' : solver.stall ? '× 計算停止' : iterated ? '▶ 計算再開' : '▶ 計算開始';
       if (runBtn.textContent !== label) runBtn.textContent = label;
-      runBtn.disabled = !busy && !stale && !coupled.resumable;
+      // given up: nothing to press until a setting changes
+      runBtn.disabled = !busy && !coupled.resumable && (!stale || !!solver.stall);
       runBtn.classList.toggle('running', busy);
       // results that are not this setting's solution are faded until a solve has run on it
       const faded = stale && !running;
       staleTag.hidden = !faded;
-      const tagText = iterated ? '停止中: 今の条件を途中まで解いた変形と荷重（「計算再開」で続き）'
+      // given up: why, and what to change; the numbers on show are where it stopped, not a solution
+      const st = solver.stall && stallText(solver.stall, params);
+      const tagText = st ? `計算停止: ${st.why}。表示は止まったときの途中の値。${st.change}`
+        : iterated ? '停止中: 今の条件を途中まで解いた変形と荷重（「計算再開」で続き）'
         : R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）'
           : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
       if (staleTag.textContent !== tagText) staleTag.textContent = tagText;
@@ -1241,6 +1255,8 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       iterated = true;
       // converged: the results are this setting's, and the solve waits for the next 計算開始
       if (solver.isConverged) { running = false; stale = false; dirty = true; coupled.converged(); maybeRunFistr(); }
+      // given up as not moving: the solve stops where it stands, the coupling with it, and the state says why
+      else if (solver.stall) { running = false; coupled.stop(); dirty = true; }
     } else {
       lastSolveEnd = 0;
     }
