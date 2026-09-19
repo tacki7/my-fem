@@ -32,9 +32,9 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, wri
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJobs } from './jobs.mjs';
+import { sim3dBuild } from './sim3dbuild.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 export function frontistrHandler(opts = {}) {
   const fistr1 = opts.fistr1 ?? process.env.FISTR1 ?? `${process.env.HOME}/.local/bin/fistr1`;
@@ -66,13 +66,13 @@ export function frontistrHandler(opts = {}) {
   /** the kinds of job this bridge can build a case for */
   const kinds = opts.kinds ?? {
     'roll-elastic': async (body, dir) => {
-      await run(process.execPath, ['tools/build-esm.mjs', 'sim3d'], ROOT);
+      const model = await sim3dBuild({ runDir });
       const { buildCase, QUICK } = await import(new URL(`./lib.mjs?v=${Date.now()}`, import.meta.url));
       const params = { ...(body.params && typeof body.params === 'object' ? body.params : {}), stations: 81, stripStations: 0, stripNz: 8 };
       const substeps = Math.max(1, Math.min(20, Math.round(Number(body.substeps) || 4)));
       // `load` (the app's strip load per station) is passed on for a buildCase that takes it; one
       // that does not solves its own pass from `params`, as the cross-check does
-      const { ref } = await buildCase('4hi', params, dir, { ...(QUICK['4hi'] ?? {}), substeps, load: body.load });
+      const { ref } = await buildCase('4hi', params, dir, { ...(QUICK['4hi'] ?? {}), substeps, load: body.load, model: model.url });
       // the von Mises stress at the nodes, for the rolls' stress contours
       const cnt = readFileSync(`${dir}/roll.cnt`, 'utf8');
       // (the case lists `NMISES, OFF`; a later line of the block wins, so it is that line that is turned on)
@@ -98,10 +98,12 @@ export function frontistrHandler(opts = {}) {
    * work roll's surface where the strip leaves it comes back as result.json { x, v }.
    */
   kinds['roll-coupled'] ??= async (body, dir) => {
-    await run(process.execPath, ['tools/build-esm.mjs', 'sim3d'], ROOT);
+    // the roll model as src/sim3d is now (built when it changed; a new build is a new directory, so
+    // this long-running process imports it afresh - see sim3dbuild.mjs)
+    const model = await sim3dBuild({ runDir });
     const v = Date.now();
-    const { StackSolver } = await import(new URL(`../sim3d/build/solver.js?v=${v}`, import.meta.url));
-    const { radiusProfile } = await import(new URL(`../sim3d/build/stack.js?v=${v}`, import.meta.url));
+    const { StackSolver } = await import(new URL('solver.js', model.url));
+    const { radiusProfile } = await import(new URL('stack.js', model.url));
     const { buildRollCase, readRollSurface } = await import(new URL(`./rollcase.mjs?v=${v}`, import.meta.url));
     const { parseRes } = await import(new URL(`./lib.mjs?v=${v}`, import.meta.url));
     const params = body.params && typeof body.params === 'object' ? body.params : null;
@@ -196,8 +198,8 @@ export function frontistrHandler(opts = {}) {
       const body = JSON.parse((await readBody(req)) || '{}');
       const mill = body.mill ?? '2hi';
       if (!existsSync(fistr1)) return json(res, 500, { error: `fistr1 not found (${fistr1}); see tools/frontistr/README.md` });
-      // the roll model as the app has it now: rebuilt from src/ each time (under a second)
-      await run(process.execPath, ['tools/build-esm.mjs', 'sim3d'], ROOT, ctl.signal);
+      // the roll model as the app has it now (built when src/sim3d changed, sim3dbuild.mjs)
+      const model = await sim3dBuild({ runDir, signal: ctl.signal });
       const { buildCase, readResult, compareStack, MILLS, QUICK } = await import(new URL(`./lib.mjs?v=${Date.now()}`, import.meta.url));
       if (!MILLS[mill]) return json(res, 400, { error: `mill ${mill}: ${Object.keys(MILLS).join(', ')} are served` });
       const dir = `${runDir}/app-${mill}`;
@@ -206,7 +208,7 @@ export function frontistrHandler(opts = {}) {
       // elements along the arc): the app's 301 stations would make a 176k-node solid and a
       // minute's solve for the same answer. With contacts, the coarser mesh as well.
       const params = { ...(body.params && typeof body.params === 'object' ? body.params : {}), stations: 81, stripStations: 0, stripNz: 8 };
-      const { ref, summary } = await buildCase(mill, params, dir, QUICK[mill] ?? {});
+      const { ref, summary } = await buildCase(mill, params, dir, { ...(QUICK[mill] ?? {}), model: model.url });
       const tCase = Date.now();
       const log = await run(fistr1, [], dir, ctl.signal);
       writeFileSync(`${dir}/fistr.log`, log);

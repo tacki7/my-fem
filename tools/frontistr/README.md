@@ -58,6 +58,18 @@ node tools/frontistr/compare.mjs tools/frontistr/run/4hi
 ケースは `tools/frontistr/run/app-<mill>/` に残るので、`compare.mjs` で表にもできる。
 `fistr1` の場所は既定 `~/.local/bin/fistr1`、環境変数 `FISTR1` で変えられる。
 
+橋渡しのロールのモデル（`src/sim3d` を node 用に書き出したもの）は `sim3dbuild.mjs` が用意する。ビルドは版ごとに
+`tools/frontistr/run/sim3d/<id>/` へ作り、ソース（コンパイルした全ファイルのハッシュ、`build-esm.mjs` と TypeScript の版）が
+変わらないうちは使い回す。前は照合・ジョブのたびに `tools/sim3d/build/` を作り直していた（dry run 1 回 3〜4 s のうち 2.5 s がそれ）。
+それをやめた理由は 2 つ:
+
+- node は一度読んだモジュールを URL ごとに持ち続けるので、同じ場所に作り直しても、動いている dev サーバーには最初のケースの後は届いていなかった
+  （入口の `?v=` は入口のファイルにしか効かない）。版ごとのディレクトリは新しい URL なので読み直される
+- 同じ作業ツリーで `npm run check` を回すと、tsc が書いた直後・import を直す前のファイルを check が読んで落ちた
+  （`Cannot find module …/build/sim3d/ring`）。橋渡しは `tools/sim3d/build/` をもう触らない
+
+古いビルドは `run/jobs/` と同じく残る（git 管理外。要らなければ手で消す）。確かめは `sim3dbuildcheck.mjs`（`npm run check` に入る）。
+
 | 形式 | 網 | 節点 | 時間 | モデルとの差（既定条件） |
 |---|---|---|---|---|
 | 2Hi | 細（下の結果 1 と同じ） | 34,099 | 約 10 秒 | 撓み +65 µm（2.2 %）、扁平 ±10 µm |

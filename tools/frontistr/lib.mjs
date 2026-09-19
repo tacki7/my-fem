@@ -1,7 +1,7 @@
 // The FrontISTR cross-check as functions: build a case from the roll model's converged pass,
 // read FrontISTR's result, and set the two side by side. case.mjs and compare.mjs are the
 // command-line faces of these; bridge.mjs serves them to the app.
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { halfCylinderMesh, meshText } from './mesh.mjs';
 
 const B = new URL('../sim3d/build/', import.meta.url);
@@ -10,13 +10,13 @@ export const TONF = 9.80665e3;
 const K_CHOCK = 1e6;
 
 /**
- * The roll model, from tools/sim3d/build (node tools/build-esm.mjs sim3d). Imported under the
- * build's own modification time, so a rebuilt solver is picked up by a long-running process.
+ * The roll model, from tools/sim3d/build (node tools/build-esm.mjs sim3d) or from the build at
+ * `base`. A long-running process (the bridge) passes a build of its own (sim3dbuild.mjs): node
+ * keeps the modules it has imported, so a build rebuilt under the same path would not reach it.
  */
-export async function loadModel() {
-  const v = statSync(new URL('solver.js', B)).mtimeMs;
-  const { StackSolver } = await import(new URL(`solver.js?v=${v}`, B));
-  const { defaultParams, radiusProfile } = await import(new URL(`stack.js?v=${v}`, B));
+export async function loadModel(base = B) {
+  const { StackSolver } = await import(new URL('solver.js', base));
+  const { defaultParams, radiusProfile } = await import(new URL('stack.js', base));
   return { StackSolver, defaultParams, radiusProfile };
 }
 
@@ -63,14 +63,15 @@ export const MILLS = { '2hi': { full: false }, '4hi': { full: false }, '6hi': { 
  * `patch` overrides the mill's default parameters; the grid is the gate's (81 stations, the
  * strip on the roll's nodes, 8 elements along the arc) unless the patch says otherwise.
  * `opts.mesh` overrides the mesh's cell sizes (a coarser solid for a quicker answer),
- * `opts.substeps` the contact's load steps (4), `opts.full` whether to span the whole length.
+ * `opts.substeps` the contact's load steps (4), `opts.full` whether to span the whole length,
+ * `opts.model` the roll model's build (`loadModel`).
  */
 export async function buildCase(mill, patch, out, opts = {}) {
   if (!MILLS[mill]) throw new Error(`mill: ${Object.keys(MILLS).join(', ')}`);
   const full = opts.full ?? MILLS[mill].full;
   const substeps = opts.substeps ?? 4;
   mkdirSync(out, { recursive: true });
-  const { StackSolver, defaultParams, radiusProfile } = await loadModel();
+  const { StackSolver, defaultParams, radiusProfile } = await loadModel(opts.model);
 
   // ── the roll model's pass ──
   const p = { ...defaultParams(mill), stations: 81, stripStations: 0, stripNz: 8, ...patch, ...(opts.stations ? { stations: opts.stations } : {}), mill };
