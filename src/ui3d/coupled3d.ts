@@ -312,7 +312,7 @@ export class CoupledRun {
           onMesh: () => { void this.loadMesh(job, key); },
           onFrame: (k) => { if (k > 0) void this.loadFrame(job, key, k, round); },
           onState: (st) => { void this.jobState(job, st.state, st.message, round); },
-          onDisconnect: () => { if (this.job === job) this.fail('橋渡しとの接続が切れた（dev サーバーが止まった？）— 計算開始で今の回からやり直す'); },
+          onDisconnect: () => { if (this.job === job) this.fail('橋渡しに 5 分つながらないか、ジョブが無くなった（dev サーバーを再起動した？）— 計算開始で今の回からやり直す'); },
         });
         break;
       } catch (e) {
@@ -331,15 +331,19 @@ export class CoupledRun {
     if (state === 'failed') { this.fail(`FrontISTR が失敗: ${message || '理由不明'}（アプリだけの結果は残した）`); return; }
     if (state === 'cancelled') return;
     if (state !== 'done') { this.render(); return; }
+    // the job is over: off the books before its answer is fetched, so a 'done' heard again (after a
+    // cut the events resume from the start) is not taken twice
+    this.job = null;
+    const coupling = this.coupling;
     let res: CoupledResult;
     try {
       res = await job.result<CoupledResult>();
     } catch (e) {
-      this.fail(`FrontISTR の結果を読めない: ${(e as Error).message}`);
+      if (this.coupling === coupling && this.phase === 'fistr') this.fail(`FrontISTR の結果を読めない: ${(e as Error).message}`);
       return;
     }
-    if (this.job !== job || !this.coupling) return;
-    this.job = null;
+    // stopped, or the settings changed, while the answer was on its way
+    if (!coupling || this.coupling !== coupling || this.phase !== 'fistr') return;
     const sv = this.host.solver, R = sv.result;
     const fem = Float64Array.from(sv.x, (x, s) => (R.q[s] > 0 ? interpolateProfile(res.x, res.v, x) : NaN));
     const model = modelRollSurface(sv);
@@ -445,7 +449,7 @@ export class CoupledRun {
     try {
       const f = decodeFrame(await job.frame(k), m.header.nodeCount);
       // (the round may have ended while the frame was on its way: the label is the rounds' as they stand)
-      const label = this.phase === 'fistr' && this.job === job ? { state: 'running' as const, text: `連成 ${round} 回目　荷重 ${k}/${SUBSTEPS}` } : this.rollsLabel();
+      const label = this.phase === 'fistr' && this.rounds.length < round ? { state: 'running' as const, text: `連成 ${round} 回目　荷重 ${k}/${SUBSTEPS}` } : this.rollsLabel();
       for (const h of m.header.parts) this.view.update(h.name, { ...partValues(m, f, h.name), label });
     } catch (e) {
       console.warn('contour: rolls frame', e);
