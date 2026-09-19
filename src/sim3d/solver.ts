@@ -61,6 +61,8 @@ const STEP_CLIP = 0.25e-3;
 const KT_FLOOR = 1e9;
 /** the slice's load fixed point is solved to this fraction of the load (see `sliceCore`) */
 const SLICE_TOL = 1e-9;
+/** a slice solve whose exit thickness is under this fraction of the entry looks for a larger root (see `sliceCore`) */
+const HEAVY_EXIT = 0.4;
 /** the thinnest exit a slice may report, as a fraction of its entry thickness */
 const H_MIN_FRAC = 0.05;
 /**
@@ -471,6 +473,28 @@ export interface HousingResult {
   millModulus: number;
 }
 
+/**
+ * The slices' warm starts (load and arc) and the strip's tension where an
+ * outer iteration started, for its line search to start every trial from
+ * (see `iterate`).
+ */
+class TrialStart {
+  private q = new Float64Array(0);
+  private arc = new Float64Array(0);
+  private sigma = new Float64Array(0);
+  save(slices: Slice[], sigmaF: Float64Array): void {
+    const n = slices.length;
+    if (this.q.length !== n) { this.q = new Float64Array(n); this.arc = new Float64Array(n); }
+    if (this.sigma.length !== sigmaF.length) this.sigma = new Float64Array(sigmaF.length);
+    slices.forEach((sl, i) => { this.q[i] = sl.q; this.arc[i] = sl.arc; });
+    this.sigma.set(sigmaF);
+  }
+  restore(slices: Slice[], sigmaF: Float64Array): void {
+    slices.forEach((sl, i) => { sl.q = this.q[i]; sl.arc = this.arc[i]; });
+    sigmaF.set(this.sigma);
+  }
+}
+
 interface SliceState {
   q: number;
   h1: number;
@@ -567,6 +591,7 @@ export class StackSolver {
   private bScrew!: Float64Array;
   private x2!: Float64Array;
   private duPlain!: Float64Array;
+  private warmTrial = new TrialStart();
   /** the Anderson history of the FEM correction: scaled iterates and their residuals */
   private aaX: Float64Array[] = [];
   private aaF: Float64Array[] = [];
@@ -1183,6 +1208,22 @@ export class StackSolver {
     const base = this.uTrial;
     base.set(u);
     const baseS = this.screw;
+    // Every trial starts its slices and its tension from where this
+    // iteration started, not from the trial before it. A slice solve is
+    // warm-started, and a slice can have two roots: at a heavy pass's edge
+    // under a compressive front tension the slab load is not monotone in
+    // the exit thickness, and next to the rolled root (1.20 mm at 71 kN/mm)
+    // sits a collapsed one (0.31 mm at 22 kN/mm) that the tension then
+    // holds (the thin edge over-elongates, its compression puts every
+    // thicker exit past Stone's limit). A full step that jumped a slice
+    // onto the collapsed root left it there for the shortened trials, none
+    // of which could bring the merit down, and the iteration ended on it.
+    const warm = this.warmTrial;
+    let trials = 0;
+    const startTrial = () => {
+      if (trials++ === 0) { warm.save(this.slices, this.sigmaF); return; }
+      warm.restore(this.slices, this.sigmaF);
+    };
     /**
      * Backtracking along (step, dS): the merit has to come down, or the step
      * is shortened (a contact opening or the strip lifting off is not
@@ -1200,6 +1241,7 @@ export class StackSolver {
       for (let tries = 0; tries < 5; tries++) {
         for (let i = 0; i < u.length; i++) u[i] = base[i] + alpha * step[i];
         this.screw = baseS + alpha * ds;
+        startTrial();
         this.stripSolve(false);
         res = this.assemble(false);
         c = this.targetValue();
@@ -1437,7 +1479,69 @@ export class StackSolver {
     }
     if (h1 >= sl.h0) { q = 0; h1 = Math.min(h1, sl.h0); }
     if (this.counters) { this.counters.coreIts += itDone; this.counters.coreCalls++; if (itDone >= 25) this.counters.coreCap++; }
+    // φ need not be increasing: the slab load is not monotone in the exit
+    // thickness at a heavy pass's edge under a compressive front tension
+    // (74 kN/mm at 1.4 mm, past Stone's limit at 1.0, 193 at 0.8, 50 at
+    // 0.5 on a 4Hi at μ 0.215 - the back tension's relief grows with the
+    // friction hill), and then φ has a second root far below the rolled
+    // one: the edge collapsed to 0.3 mm at a third of the load. The strip
+    // is rolled down from its entry thickness and stops at the first
+    // balance it meets, which is the largest root (the exit thickness
+    // grows with the load). A root well below the warm start is where a
+    // lost rolled root shows (the warm start sits on the last one), and a
+    // root that thins the slice past `HEAVY_EXIT` of its entry is where a
+    // collapsed one sits (0.15-0.26 of it, against half for the rolled
+    // edge of that pass): there the loads above it are searched for a
+    // larger sign change.
+    if (q > 0 && ((qStart > 0 && q < 0.5 * qStart) || h1 < HEAVY_EXIT * sl.h0)) {
+      const up = this.largerRoot(sl, g, sigmaF, k, Math.max(q, 1e-3 * qStart));
+      if (up) ({ q, h1, flat, arc, runaway } = up);
+    }
     return { q, h1, flat, arc, runaway };
+  }
+
+  /**
+   * The largest root of φ(q) = q − k P(h1(q)) above `from`, if there is one
+   * above it (see `sliceCore`): loads up a ladder of ×1.25 to the one that
+   * opens the gap past the entry thickness, the highest rung where φ < 0,
+   * and a bisection between it and the rung above. The sign change may be
+   * a jump (P steps up to its cap past Stone's limit), where the bisection
+   * lands on the step: a slice held at the thickness it cannot be rolled
+   * past, carrying what the gap asks.
+   */
+  private largerRoot(sl: Slice, g: number, sigmaF: number, k: number, from: number): SliceState | null {
+    const p = this.p;
+    const law = this.law;
+    const ws = this.wsLaw;
+    ws.bFloor = Math.max(0, sl.arc / 2);
+    const off = sl.nlOff ?? 0;
+    const hMin = H_MIN_FRAC * sl.h0;
+    const at = (q: number) => {
+      const [d] = approach(ws, q);
+      const flat = off === 0 ? d : d + off;
+      const hRigid = Math.max(g + 2 * flat, hMin);
+      const h1 = hRigid + springback(law, Math.min(hRigid, sl.h0), kfExitOf(law, sl.h0, hRigid), sigmaF);
+      if (h1 >= sl.h0) return { phi: q, q, h1, flat, arc: 0, runaway: false, open: true };
+      // started from the load in question, as `sliceCore` starts it: from nothing a pass near Stone's limit can run off to the cap past a root
+      const r = sliceLoad(law, sl.h0, h1, p.backTension, sigmaF, q / k);
+      return { phi: q - k * r.q, q, h1, flat, arc: r.arc, runaway: r.runaway, open: false };
+    };
+    let neg = -1;
+    let q = from * 1.25;
+    for (let j = 0; j < 60; j++, q *= 1.25) {
+      const e = at(q);
+      if (e.phi < 0) neg = q;
+      if (e.open) break;
+    }
+    if (neg < 0) return null;
+    let lo = neg, hi = 1.25 * neg;
+    let e = at(hi);
+    for (let it = 0; it < 50 && hi - lo > SLICE_TOL * hi; it++) {
+      const mid = 0.5 * (lo + hi);
+      const m = at(mid);
+      if (m.phi < 0) lo = mid; else { hi = mid; e = m; }
+    }
+    return { q: e.open ? 0 : e.q, h1: Math.min(e.h1, sl.h0), flat: e.flat, arc: e.arc, runaway: e.runaway };
   }
 
   /**
@@ -2110,6 +2214,9 @@ export class StackSolver {
         let femSettled = true;
         if (this.p.stripModel !== 'slab') {
           const change = this.femCorrection(this.sigmaSlices());
+          // a round taken from an unsettled Newton (the escape) is no point
+          // of the correction's map: its residual is kept out of the history
+          if (!settled) { this.aaX = []; this.aaF = []; }
           this.femRounds++;
           this.femLastChange = change;
           // the correction moved the loads: the Newton's merit starts over
