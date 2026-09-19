@@ -54,6 +54,25 @@ const RETRY_MS = 2000;
 const RETRY_FOR_MS = 60_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** the jobs this page started that have not ended (heard to end, or cancelled) */
+const live = new Set<FistrJob>();
+let hooked = false;
+/**
+ * A page going away - reloaded, closed, navigated off - takes its jobs with it. Nothing else stops
+ * them: a broken events stream is not the end of a job (a sleep must not end one, see `listen`),
+ * and a round left running holds the bridge - one job at a time - against the next page for the
+ * rest of its fistr1 run, minutes. A beacon, as a fetch does not outlive the page. A sleep sends no
+ * pagehide; a page kept whole in the back-forward cache (`persisted`) keeps its jobs.
+ */
+function stopJobsWithThePage(): void {
+  if (hooked || typeof window === 'undefined') return;
+  hooked = true;
+  window.addEventListener('pagehide', (e) => {
+    if ((e as PageTransitionEvent).persisted) return;
+    for (const j of live) j.leave();
+  });
+}
+
 export class FistrJob {
   private source: EventSource | null = null;
   state: JobState = 'queued';
@@ -78,6 +97,8 @@ export class FistrJob {
     const answer = (await r.json().catch(() => ({}))) as { job?: JobStatus; error?: string; running?: unknown };
     if (!r.ok || !answer.job) throw new FistrError(r.status === 409 ? '別の FrontISTR の計算が動いている' : answer.error ?? `HTTP ${r.status}`);
     const job = new FistrJob(answer.job.id, root);
+    live.add(job);
+    stopJobsWithThePage();
     job.listen(handlers);
     return job;
   }
@@ -92,6 +113,7 @@ export class FistrJob {
     const on = <T>(type: string, f: (d: T) => void) => es.addEventListener(type, (e) => f(JSON.parse((e as MessageEvent).data) as T));
     on<{ state: JobState; message: string; frames: number }>('state', (d) => {
       this.state = d.state;
+      if (ENDED.includes(d.state)) live.delete(this);
       h.onState?.(d);
       if (ENDED.includes(d.state)) this.close();
     });
@@ -169,7 +191,15 @@ export class FistrJob {
 
   /** stop the job's fistr1; the 'cancelled' state follows on the events */
   async cancel(): Promise<void> {
+    live.delete(this);
     await fetch(`${this.root}/jobs/${this.id}/cancel`, { method: 'POST', cache: 'no-store' }).catch(() => undefined);
+  }
+
+  /** the page is going: stop the job by a request that outlives it */
+  leave(): void {
+    live.delete(this);
+    const url = `${this.root}/jobs/${this.id}/cancel`;
+    if (!navigator.sendBeacon?.(url)) void fetch(url, { method: 'POST', keepalive: true }).catch(() => undefined);
   }
 
   /** stop listening (the job runs on) */
