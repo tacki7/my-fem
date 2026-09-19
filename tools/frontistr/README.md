@@ -84,7 +84,7 @@ F/2（全長）・接触の群）が入る。`fistr1` は要らない。
 照合（`/solve`）は 1 回の解の答えを最後にまとめて返す。ロールの応力を画面に実時間で描くために、FrontISTR を**ジョブ**として
 走らせ、結果ファイルが 1 つ書き終わるたびに画面へ渡す口を足した（2026-09-19）。
 
-- `POST /__frontistr/jobs { kind, params, load?, substeps?, dryRun? }` → `{ job }`。同時に 1 つ（照合も含めて。動いていれば 409）
+- `POST /__frontistr/jobs { kind, params, load?, substeps?, dryRun? }` → `{ job }`。同時に 1 つ（照合も含めて。動いていれば 409 — ブラウザは 409 を console に 1 行ずつ書くので、ページの `FistrJob.start` は先に `/ping` の `busy` を見て、使用中なら POST しない）
 - `GET /__frontistr/jobs/<id>`（状態）、`/events`（server-sent events: `state`・`mesh`・`frame { k }`・`progress`）、`/mesh.bin`、`/frames/<k>.bin`、`POST …/cancel`
 - `kind: roll-elastic` は 4Hi の WR ＋ BUR（照合と同じ粗い網、接触）に板の荷重を `substeps`（既定 4）段に分けて載せ、段ごとに結果を書かせる。
   節点の von Mises（`NodalMISES`）も出させる

@@ -4,7 +4,7 @@
  * written, stop it. The buffers are the fieldframe format (tools/frontistr/fieldframe.mjs);
  * this file does not decode them - that is the drawing's (fieldframe.ts).
  */
-import { bridgeBase, FistrError } from './frontistr';
+import { bridgeBase, pingFrontistr, FistrError } from './frontistr';
 
 export type JobState = 'queued' | 'meshing' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -82,9 +82,16 @@ export class FistrJob {
 
   private constructor(readonly id: string, private readonly root: string) {}
 
-  /** start a job and listen to it; throws FistrError when the bridge says no (409 while another runs) */
+  /** start a job and listen to it; throws FistrError when the bridge says no (another job running) */
   static async start(kind: string, body: JobBody, handlers: JobHandlers = {}): Promise<FistrJob> {
     const root = bridgeBase();
+    // The bridge runs one job at a time and answers another with 409, which the browser logs as a
+    // failed request - a line in the console each time the caller tries again (coupled3d.ts does,
+    // every few seconds, while a cancelled job winds down). So ask first. A job can still slip in
+    // between the two requests: then the 409 below, rarely.
+    const ping = await pingFrontistr();
+    if (!ping) throw new FistrError('接続なし（npm run dev の橋渡しが要る）');
+    if (ping.busy) throw new FistrError('別の FrontISTR の計算が動いている');
     let r: Response;
     try {
       r = await fetch(`${root}/jobs`, {
