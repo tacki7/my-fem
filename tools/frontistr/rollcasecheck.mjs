@@ -11,6 +11,8 @@
 //    thermal crown alone on the default, 10 µm; with a 300 µm BUR crown 160 µm; a negative WR
 //    crown takes off), and the surface read back is the solids' displacement less it - so that a
 //    BUR crown does not shift the whole correction by its own size.
+// 4. The work roll's bender goes on the chock section at half the chock's force: the section is
+//    the z ≥ 0 half of the roll's (the whole force bent the solid with twice the model's bender).
 //
 // @check
 // @check-build sim3d
@@ -56,6 +58,14 @@ for (const [patch, want] of [[{}, 10e-6], [{ burCrown: 300e-6 }, 160e-6], [{ wrC
   for (const n of ref.wr.bottom) node.set(n, { [lab]: [0, 5e-4, 0] });
   const surf = readRollSurface(ref, { labels: [lab], node });
   check(`the surface read less the offset ${JSON.stringify(patch)}`, surf.v.every((v) => Math.abs(v - (5e-4 - want)) < 1e-12), `${um(surf.v[0])} µm (want ${um(5e-4 - want)})`);
+}
+
+// 4. The work roll's bender: half the chock's force on the half chock section (lib.mjs, T101)
+{
+  const Fb = 60 * 9.80665e3;
+  const sv = converge({ ...defaultParams('4hi'), ...GATE, wrBender: Fb });
+  const ref = buildRollCase(sv, radiusProfile, join(dir, 'bender'), {});
+  check('bender: half the chock\'s force on its half section', Math.abs(ref.benderSumY - Fb / 2) < 1e-6 * Fb, `${(ref.benderSumY / 9.80665e3).toFixed(3)} tonf (want ${(Fb / 2 / 9.80665e3).toFixed(3)})`);
 }
 
 if (failed) { console.log(`\n${failed} FAIL`); process.exit(1); }

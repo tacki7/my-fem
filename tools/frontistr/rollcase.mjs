@@ -13,7 +13,7 @@
 // The rest is the cross-check's: the upper half's rolls as stepped half-cylinders (z ≥ 0, the
 // plane of the roll axes a plane of symmetry; x ≥ 0), the rolls touching on the centre line in
 // frictionless contact, the screw roll's bearing sections held, a chocked roll's chock sections
-// on the model's chock spring with its bender force, the strip load as a Hertz ellipse over the
+// on the model's chock spring with its bender force (halved with the section), the strip load as a Hertz ellipse over the
 // half-width the model flattens with, ramped over `substeps`.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { halfCylinderMesh, meshText } from './mesh.mjs';
@@ -159,13 +159,15 @@ export function buildRollCase(sv, radiusProfile, out, o = {}) {
     lists[r] = L;
   }
   ng.BRG = lists[screwIdx].support;
+  // the chock section is the z ≥ 0 half of the roll's: half the chock's spring and bender (lib.mjs)
   const springs = [], benders = [];
+  let benderSumY = 0;
   for (let r = 0; r < up; r++) {
     if (defs[r].support !== 'chock') continue;
     const sec = lists[r].support;
     ng[up === 2 ? 'CHOCK' : `CHOCK_${defs[r].id}`] = sec;
-    for (const n of sec) springs.push([n, K_CHOCK / sec.length]);
-    if (defs[r].benderForce) for (const n of sec) benders.push([n, defs[r].benderForce / sec.length]);
+    for (const n of sec) springs.push([n, K_CHOCK / 2 / sec.length]);
+    if (defs[r].benderForce) for (const n of sec) { benders.push([n, defs[r].benderForce / 2 / sec.length]); benderSumY += defs[r].benderForce / 2 / sec.length; }
   }
   const sg = {}, cpairs = {};
   pairs.forEach(([a, b], q) => {
@@ -219,7 +221,7 @@ export function buildRollCase(sv, radiusProfile, out, o = {}) {
   let stackOffset = 0;
   for (let r = 1; r <= screwIdx; r++) stackOffset += radiusProfile(defs[r - 1], 0) + radiusProfile(defs[r], 0);
   const ref = {
-    mill: st.type, halfW, force: R.force, quarterForce: R.force / 4, loadSumY: Fsum, nodes: nn, loadedNodes: loads.length,
+    mill: st.type, halfW, force: R.force, quarterForce: R.force / 4, loadSumY: Fsum, benderSumY, nodes: nn, loadedNodes: loads.length,
     wr: { x: W.xs, bottom: lists[0].bottom, D: wrDef.D }, stackOffset,
     mesh: bodies.map((b) => ({ name: b.name, nodes: b.mesh.nodes.length, stations: b.mesh.ni, layers: b.mesh.nr, angles: b.mesh.nk - 1 })),
   };
