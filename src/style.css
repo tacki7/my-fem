@@ -1138,8 +1138,10 @@ body.resizing * { cursor: inherit !important; }
 .v3-conv b { font-weight: 600; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .v3-conv.ok b { color: var(--green); }
 .v3-conv.warn b { color: var(--amber); }
+.v3-conv.bad b { color: var(--red); }
 .v3-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); flex: none; }
 .v3-conv.ok .v3-dot { background: var(--green); }
+.v3-conv.bad .v3-dot { background: var(--red); }
 .v3-conv.busy .v3-dot { background: var(--amber); animation: v3-pulse 1s ease-in-out infinite; }
 @keyframes v3-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 .v3-state-detail { display: flex; flex-wrap: wrap; gap: 0 12px; font-size: 10.5px; color: var(--fg-dim); }
@@ -1150,6 +1152,8 @@ body.resizing * { cursor: inherit !important; }
 .v3-detail.ok b { color: var(--green); }
 .v3-detail.warn b { color: var(--amber); }
 .v3-detail.bad b { color: var(--red); }
+/* a solve on its way to being given up: how long it has not moved on */
+.v3-slow { font-size: 10.5px; color: var(--amber); }
 .v3-readout { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 30px; min-width: 0; }
 .v3-fig { display: flex; flex-direction: column; gap: 2px; }
 .v3-fig-label {

@@ -102,6 +102,26 @@ const STEP_ESCAPE_ITERS = 60;
 const SETTLED_RESIDUAL = 2e-6;
 const SETTLED_STEP = 5e-9;
 const NEAR_SETTLED = 1e-2;
+/**
+ * Giving up (see `trackStall`). Outer iterations without the merit - the force residual plus the
+ * target's miss, what the Newton's line search brings down - halving, after which the solve is
+ * called not moving. Longer than `STEP_ESCAPE_ITERS`: a nearly settled Newton moves on to a
+ * correction round by then, and a round starts the count again.
+ */
+const STALL_ITERS = 100;
+/**
+ * Correction rounds without the smallest change so far halving, after which the correction is
+ * called cycling. Twice the most a converging solve went on the stress cases: the 4Hi with a
+ * 900 mm WR and the one with a +1000 µm BUR crown converged after 9 (36 and 28 rounds in all);
+ * friction 0.01 or a 30 mm WR cycle for 90 rounds and more without ever converging.
+ */
+const STALL_ROUNDS = 20;
+/**
+ * Screw steps (the fallback when the Newton settles off target) without the target's miss halving,
+ * after which the target is called out of reach: the screw walks, or sits at the end of its travel,
+ * and the gauge or the load does not follow.
+ */
+const STALL_SCREW_STEPS = 10;
 
 /**
  * The convergence rules `advance` applies, for anything that has to reason
@@ -139,6 +159,37 @@ export interface SolveProgress {
   /** the solve started from a kept correction (a dial change on the same mesh), not from scratch */
   warm: boolean;
   converged: boolean;
+  /** given up as not moving (`StackSolver.stall`) */
+  stalled: boolean;
+  /**
+   * How long the solve has gone without moving on, as the give-up counts it (see `trackStall`):
+   * iterations since the merit halved, correction rounds since their change did, screw steps
+   * since the target's miss did - and whether the Newton, quiet as it is, still creeps somewhere
+   * (reported once it has been quiet a third of the way to giving up; false before).
+   */
+  quietIters: number;
+  quietRounds: number;
+  quietSteps: number;
+  creeping: boolean;
+}
+
+/** the give-up's limits: iterations, correction rounds, screw steps without progress (see `trackStall`) */
+export const STALL = { iters: STALL_ITERS, rounds: STALL_ROUNDS, steps: STALL_SCREW_STEPS } as const;
+
+/**
+ * The status line's warning that a solve is moving slowly, once any of its quiet counts has gone
+ * a third of the way to giving up: what has not halved for how long, and how far is left before it
+ * is given up. Counts only - no time, which the machine's load would make different every run.
+ * Null while the solve moves on.
+ */
+export function slowText(pr: SolveProgress): string | null {
+  const share = (n: number, limit: number) => n / limit;
+  const it = share(pr.quietIters, STALL_ITERS), ro = share(pr.quietRounds, STALL_ROUNDS), st = share(pr.quietSteps, STALL_SCREW_STEPS);
+  if (pr.converged || pr.stalled || Math.max(it, ro, st) < 1 / 3) return null;
+  if (st >= it && st >= ro) return `進みが遅い（圧下位置を ${pr.quietSteps} 回動かしても目標とのずれが半分にならない／見切りまで ${STALL_SCREW_STEPS - pr.quietSteps} 回）`;
+  if (ro >= it) return `進みが遅い（材料 FEM の補正の変化が ${pr.quietRounds} ラウンド半分にならない／見切りまで ${STALL_ROUNDS - pr.quietRounds} ラウンド）`;
+  if (pr.creeping) return `進みが遅い（残差と目標のずれが ${pr.quietIters} 反復半分にならないが、解は一方向に動いている）`;
+  return `進みが遅い（残差と目標のずれが ${pr.quietIters} 反復半分にならない／見切りまで ${Math.max(STALL_ITERS + 1 - pr.quietIters, 0)} 反復）`;
 }
 /**
  * Anderson acceleration of the FEM correction (see `andersonStep`): the
@@ -256,6 +307,24 @@ export interface ContactState {
   total: number;
 }
 
+/**
+ * Why a solve was given up (`StackSolver.stall`): the Newton stopped bringing the residual and the
+ * target's miss down (`newton`), the strip FEM's correction keeps changing by as much round after
+ * round (`correction`), or the screw sits at the end of its travel short of the target (`target`).
+ */
+export interface Stall {
+  reason: 'newton' | 'correction' | 'target';
+  /** the outer iteration it was given up at */
+  iterations: number;
+  /** iterations since the merit last halved, correction rounds and screw steps since their change or miss last did */
+  quietIters: number;
+  quietRounds: number;
+  quietSteps: number;
+  /** the force residual and the screw position [m] when it was given up */
+  residual: number;
+  screw: number;
+}
+
 export type Warning3D = 'stone' | 'bite' | 'gapClosed' | 'tensionYield' | 'stuck' | 'target' | 'layout' | 'openContact' | 'fem' | 'wrTouch' | 'stripWide' | 'housingScope' | 'housingStrip' | 'entryThin';
 /** `tensionYield` is raised when the larger set tension passes this share of the tension cap `TENSION_CAP`·k̄f */
 const TENSION_YIELD_FRAC = 0.9;
@@ -270,7 +339,7 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   bite: '噛み込み限界超過 (μ < tan α)',
   gapClosed: 'ロールギャップが閉じている（圧下位置が深すぎる）',
   tensionYield: `張力が降伏に近い（設定張力が変形抵抗の ${Math.round(TENSION_YIELD_FRAC * TENSION_CAP * 100)} % 超）`,
-  stuck: '未収束（残差が下がらない）',
+  stuck: '未収束（計算が収まらない）',
   target: '制御目標に届かない',
   layout: 'ロール配置が成立していない（個々の指摘は隣のチップ。ロールどうしの干渉は端面図の赤い線）',
   openContact: '上下のロールが離れている接触がある（端面図の破線）',
@@ -281,6 +350,31 @@ export const WARNING_TEXT: Record<Warning3D, string> = {
   housingStrip: '板幅がハウジングのポスト内面の間隔（操作側–駆動側）より広い — 板がポストに当たる（側面図の赤いポスト）',
   entryThin: `入側の板厚プロファイルが板端で h₀ の ${ENTRY_FLOOR_FRAC * 100} % を下回る（その分は ${ENTRY_FLOOR_FRAC * 100} % で頭打ちにして解いている）`,
 };
+
+/**
+ * What the page says when a solve is given up (`StackSolver.stall`): why, as the stall shows it,
+ * and what to change - only what was seen to bring such a solve home. A Newton or a correction
+ * that stops moving is not called a target out of reach: the 4Hi at μ 0.215 with the housing
+ * frame that circles on the default grid converges on the slab model and on a 161- or 81-station
+ * grid, and a pass the slab model circles on at 81 stations converges at 21.
+ */
+export function stallText(st: Stall, p: Params3D): { why: string; change: string } {
+  if (st.reason === 'target') {
+    const what = p.mode === 'force' ? '荷重' : '出側板厚';
+    const end = st.screw <= SCREW_MIN + 1e-9 || st.screw >= SCREW_MAX - 1e-9;
+    return {
+      why: `${what}が目標に届かない（圧下位置 ${(st.screw * 1e3).toFixed(2)} mm${end ? '、可動範囲の端' : ''}。${st.quietSteps > 0 ? `${st.quietSteps} 回動かしても目標とのずれが縮まない` : '圧下位置を動かせない'}）`,
+      change: p.mode === 'force' ? '目標荷重を見直す' : '圧下率を下げるか、制御モードを荷重一定・圧下位置 手動にして様子を見る',
+    };
+  }
+  const why = st.reason === 'correction'
+    ? `計算が収まらない（材料 FEM の補正が ${st.quietRounds} ラウンド小さくならない）`
+    : `計算が収まらない（残差 ${st.residual.toExponential(1)} から ${st.quietIters} 反復進まない）`;
+  const change = p.stripModel === 'slab'
+    ? '幅方向の分割数（解析・表示）を変えると収まることがある'
+    : '幅方向の分割数（解析・表示）を減らすか、材料の変形計算をスラブ法にすると収まることがある';
+  return { why, change };
+}
 
 export interface Result3D {
   x: Float64Array;
@@ -509,6 +603,25 @@ export class StackSolver {
   private warmStart = false;
   /** solves started so far: one more for every change of inputs */
   private solveCount = 0;
+  /**
+   * Progress, for giving up (`trackStall`): the smallest merit since the problem last changed (a
+   * new solve, a correction round, a screw step) and the iteration it last halved at; the rounds
+   * this solve has run and the round their smallest change last halved at.
+   */
+  private bestMerit = Infinity;
+  private bestMeritAt = 0;
+  /** the displacements and the screw where the merit last halved, and the path the steps have walked since (see `creeping`) */
+  private meritU: Float64Array | null = null;
+  private meritScrew = 0;
+  private meritPath = 0;
+  private roundsRun = 0;
+  private bestChange = Infinity;
+  private bestChangeRound = 0;
+  /** screw steps this solve, and the step the target's miss last halved at */
+  private screwSteps = 0;
+  private bestScrewMiss = Infinity;
+  private bestScrewStep = 0;
+  private stalled: Stall | null = null;
   private iterations = 0;
   private residual = Infinity;
   private stepMax = Infinity;
@@ -540,6 +653,7 @@ export class StackSolver {
     this.solveCount++;
     this.aaX = []; this.aaF = [];
     this.sinceStep = 0; this.femRounds = 0; this.femLooseRuns = 0;
+    this.freshProgress();
   }
 
   private rebuild(): void {
@@ -762,6 +876,7 @@ export class StackSolver {
     this.converged = false;
     this.yAge = -1;
     this.iterations = 0;
+    this.freshProgress();
   }
 
   /** the correction in force, per station [m], or null */
@@ -1891,11 +2006,87 @@ export class StackSolver {
     return Math.abs(this.forceTotal - p.targetForce) < 2e-3 * Math.max(p.targetForce, 1);
   }
 
+  /** a new problem for the progress counts: no merit and no round seen yet, and not given up */
+  private freshProgress(): void {
+    this.bestMerit = Infinity;
+    this.markMerit();
+    this.roundsRun = 0;
+    this.bestChange = Infinity;
+    this.bestChangeRound = 0;
+    this.screwSteps = 0;
+    this.bestScrewMiss = Infinity;
+    this.bestScrewStep = 0;
+    this.stalled = null;
+  }
+
+  /** where the merit last halved (or the count started over): the iteration, the displacements, the screw */
+  private markMerit(): void {
+    this.bestMeritAt = this.iterations;
+    this.meritPath = 0;
+    if (!this.u) return;
+    if (!this.meritU || this.meritU.length !== this.u.length) this.meritU = new Float64Array(this.u.length);
+    this.meritU.set(this.u);
+    this.meritScrew = this.screw;
+  }
+
+  /**
+   * Whether the Newton, its merit not halving, is still getting somewhere: the solution has moved
+   * on net by more than half the path its steps walked since the merit last halved. A stack
+   * opened past the touching position closes its gap that way - the line search finds no step
+   * that brings the merit down, takes its shortest, and the rolls creep 2.6 µm an iteration for
+   * 170 iterations at a residual of 1.2 before they meet and the solve converges in a dozen more.
+   * A Newton that goes back and forth walks a long path and gets nowhere on net.
+   */
+  private creeping(): boolean {
+    const u0 = this.meritU;
+    if (!u0 || u0.length !== this.u.length || !(this.meritPath > 0)) return false;
+    let net = Math.abs(this.screw - this.meritScrew);
+    for (let i = 0; i < u0.length; i++) {
+      const d = this.u[i] - u0[i];
+      // scaled as the line search's clip scales a step (see `iterate`)
+      net = Math.max(net, Math.abs(i % 2 === 0 ? d : d * this.slopeLen[i]));
+    }
+    return net > 0.5 * this.meritPath;
+  }
+
+  /**
+   * Give the solve up once it has stopped moving, judged by how it moves rather than by how long it
+   * has run: the merit (force residual plus the target's miss) not halving for `STALL_ITERS`
+   * iterations while the solution goes nowhere on net (`creeping`), the correction's change not halving for `STALL_ROUNDS` rounds, or the target's miss
+   * not halving over `STALL_SCREW_STEPS` screw steps. A solve that converges slowly still halves
+   * them (a 50 µm foil crawls to its gauge at a halving every 55 iterations); one that circles does
+   * not, and was left iterating for up to 800 iterations (half an hour on a heavy 4Hi) before
+   * anything said so. The reason is `target` when the screw steps get the miss no smaller or the
+   * screw sits at the end of its travel short of the target. Returns whether it gave up.
+   */
+  private trackStall(): boolean {
+    if (this.converged) return false;
+    const quietIters = this.iterations - this.bestMeritAt;
+    const quietRounds = this.roundsRun - this.bestChangeRound;
+    const quietSteps = this.screwSteps - this.bestScrewStep;
+    const newton = quietIters > STALL_ITERS && !this.creeping();
+    const rounds = quietRounds >= STALL_ROUNDS, steps = quietSteps >= STALL_SCREW_STEPS;
+    if (!newton && !rounds && !steps) return false;
+    const pinned = this.p.mode !== 'screw' && !this.screwSettled()
+      && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9);
+    this.stalled = {
+      reason: pinned || steps ? 'target' : newton ? 'newton' : 'correction',
+      iterations: this.iterations, quietIters, quietRounds, quietSteps, residual: this.residual, screw: this.screw,
+    };
+    return true;
+  }
+
+  /** why the solve was given up, or null while it is still going or converged */
+  get stall(): Stall | null { return this.stalled; }
+
   /**
    * Advance the solution: Newton iterations until converged or the time
    * budget is spent, then a screw step. Returns whether anything moved.
+   * A solve given up (`stall`) does nothing more until its inputs change.
    */
   advance(budgetMs: number, maxIter = 12): boolean {
+    // given up: nothing more until the inputs change (`setParams`, `reset`, a roll correction)
+    if (this.stalled) return false;
     const t0 = performance.now();
     let n = 0;
     let moved = false;
@@ -1904,6 +2095,9 @@ export class StackSolver {
       n++;
       moved = true;
       this.sinceStep++;
+      const merit = this.residual + this.targetResidual;
+      this.meritPath += this.stepMax;
+      if (merit < 0.5 * this.bestMerit) { this.bestMerit = merit; this.markMerit(); }
       // The screw moves inside the Newton, so a settled Newton is on target
       // unless the screw is at its travel limit or has had no contact to
       // steer by. A Newton that cannot settle for a long while (a barely
@@ -1918,6 +2112,11 @@ export class StackSolver {
           const change = this.femCorrection(this.sigmaSlices());
           this.femRounds++;
           this.femLastChange = change;
+          // the correction moved the loads: the Newton's merit starts over
+          // a round with nothing loaded changes nothing (the first settle of an untouched stack): not a measure
+          this.roundsRun++;
+          if (change > 0 && change < 0.5 * this.bestChange) { this.bestChange = change; this.bestChangeRound = this.roundsRun; }
+          this.bestMerit = Infinity; this.markMerit();
           // Settled tightly, or loosely for several rounds running: the
           // correction can hold a small limit cycle (a slice's load flipping
           // on a one-sided contact) that never dies but changes nothing
@@ -1932,13 +2131,20 @@ export class StackSolver {
         // off target with the Newton settled: the screw at a limit, or no
         // contact yet - the secant step as a fallback
         if (settled && !onTarget && this.p.mode !== 'screw') {
+          const miss = Math.abs(this.targetValue());
+          this.screwSteps++;
+          if (miss < 0.5 * this.bestScrewMiss) { this.bestScrewMiss = miss; this.bestScrewStep = this.screwSteps; }
           this.stepScrew();
           this.femRounds = 0;
           this.femLooseRuns = 0;
           this.aaX = []; this.aaF = [];
+          // a new screw position is a new problem for the Newton and the correction alike
+          this.bestMerit = Infinity; this.markMerit();
+          this.roundsRun = 0; this.bestChange = Infinity; this.bestChangeRound = 0;
         }
         this.converged = false;
       }
+      if (this.trackStall()) break;
       if (performance.now() - t0 > budgetMs) break;
     }
     this.collect(n, performance.now() - t0);
@@ -2399,9 +2605,9 @@ export class StackSolver {
     // roll above has lifted off, which no cluster is built to do
     if (this.converged && this.contacts.some((c) => c.total <= 0)) w.push('openContact');
     const stuckAt = (p.stripModel === 'fem' || p.stripModel === 'fem3d') ? STUCK_ITERS_FEM : STUCK_ITERS;
-    if (this.iterations > stuckAt && !this.converged) w.push('stuck');
-    if (p.mode !== 'screw' && this.iterations > stuckAt && !this.screwSettled()
-      && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9)) w.push('target');
+    if ((this.iterations > stuckAt || this.stalled) && !this.converged) w.push('stuck');
+    if (this.stalled?.reason === 'target' || (p.mode !== 'screw' && this.iterations > stuckAt && !this.screwSettled()
+      && (this.screw <= SCREW_MIN + 1e-9 || this.screw >= SCREW_MAX - 1e-9))) w.push('target');
     return w;
   }
 
@@ -2455,6 +2661,11 @@ export class StackSolver {
       sinceRound: this.sinceStep,
       warm: this.warmStart,
       converged: this.converged,
+      stalled: this.stalled !== null,
+      quietIters: this.iterations - this.bestMeritAt,
+      quietRounds: this.roundsRun - this.bestChangeRound,
+      quietSteps: this.screwSteps - this.bestScrewStep,
+      creeping: 3 * (this.iterations - this.bestMeritAt) >= STALL_ITERS && this.creeping(),
     };
   }
   wake(): void { this.converged = false; }

@@ -19,7 +19,7 @@
  * panel's switch turn it off, and without the bridge or fistr1 the pass is solved with the
  * model alone and the status line says why and what to do.
  */
-import type { StackSolver, Result3D } from '../sim3d/solver';
+import { stallText, type StackSolver, type Result3D } from '../sim3d/solver';
 import type { Params3D } from '../sim3d/stack';
 import { RollCoupling, modelRollSurface, interpolateProfile, type CouplingRound } from '../sim3d/coupling';
 import { FistrJob, type JobState } from './fistrjob';
@@ -554,12 +554,19 @@ export class CoupledRun {
       }
     } else if (F && ours) {
       const n = this.rounds.length;
+      // A solve given up, or stopped part way, is not steady: said so before the rounds' phase, which a
+      // give-up leaves at 'stopped' and a stop without the coupling never moves from 'idle'. Given up, the
+      // plate carries the reason, as the stage's note does in the other views (hidden under the contours).
+      const stall = this.host.solver.stall;
       const [state, text]: ['running' | 'steady' | 'stale', string] = s.running
         ? ['running', n ? `補正を入れて解き直し中（連成 ${n + 1} 回目の前）` : '反復中']
         : this.phase === 'fistr' ? ['running', `ロールの計算待ち（連成 ${n + 1} 回目）`]
           : this.phase === 'steady' ? ['steady', `定常（連成 ${n} 回）`]
-            : this.phase === 'stopped' || this.phase === 'failed' ? ['stale', `連成は ${n} 回目まで（${this.phase === 'failed' ? '失敗' : '停止'}）`]
-              : this.phase === 'app' ? ['running', '反復中'] : ['steady', this.enabled ? '収束' : '収束（ロールはモデルだけ）'];
+            : stall ? ['stale', `計算停止（解けない）: ${stallText(stall, p).why}`]
+              : this.phase === 'stopped' || this.phase === 'failed' ? ['stale', `連成は ${n} 回目まで（${this.phase === 'failed' ? '失敗' : '停止'}）`]
+                : this.phase === 'app' ? ['running', '反復中']
+                  : s.stale ? ['stale', '途中で停止（計算再開で続き）']
+                    : ['steady', this.enabled ? '収束' : '収束（ロールはモデルだけ）'];
       const key = `${state}|${text}`;
       if (F !== this.stripField || key !== this.stripKey) {
         if (F !== this.stripField) this.view.setPart({ name: 'strip', kind: 'strip', coords: F.coords, tris: F.tris, symmetry: { x: false, y: true, z: false } });

@@ -126,6 +126,8 @@ export class RemainingTime {
     this.last = { now, p };
 
     if (p.converged) return this.show(now, { kind: 'done' });
+    // the solver has given the solve up itself (`StackSolver.stall`)
+    if (p.stalled) return this.show(now, { kind: 'stalled' });
     const moving = p.stepMax >= 0.9 * C.stepClip;
     const noRoundComing = !p.usesFem || p.residual >= C.nearSettled || p.sinceRound > 2 * C.escapeIters;
     if (!moving && p.iterations - this.bestAt > STALL_ITERS && noRoundComing) return this.show(now, { kind: 'stalled' });
