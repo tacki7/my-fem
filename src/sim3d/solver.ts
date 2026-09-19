@@ -34,7 +34,7 @@
 import { BandMatrix, denseSolve, luFactor, luSolve } from './band';
 import { stationGrid, nearestStation, type StationGrid } from './grid';
 import { housingCompliance, halfStiffness, sideStiffness, housingPlan, housingInScope } from './housing';
-import { nonlocalOffsets } from './flatnl';
+import { nonlocalOffsets, nlCutoff, nlKernelIntegral } from './flatnl';
 import { makeContactLaw, loadAt, approach, approachParts, type ContactLaw } from './contact';
 import { ringInfluence, type RingInfluence } from './ring';
 import { StripFem, atNodes, type StripFemResult } from './stripfem';
@@ -563,6 +563,14 @@ export class StackSolver {
   /** the non-local flattening offsets are on the slices, and how far they moved at the last refresh [m] */
   private nlLive = false;
   private nlChange = 0;
+  /**
+   * With `flatNonlocalNewton`: ∂(offset_i)/∂q_j, slice by slice (m × m, zero past the kernel's reach),
+   * taken with the offsets (see `updateNonlocalFlattening`) and carried into the tangent by
+   * `prepareWoodbury`. Null when the share is only lagged.
+   */
+  private nlN: Float64Array | null = null;
+  /** with `nlN`: dq/dz through the tangent, P (D gain + Dσ T), as `nonlocalCore` last built it (for `targetGradient`) */
+  private nlX: Float64Array | null = null;
   /** the stack's response to a unit screw move, −∂(residual)/∂S, built with the tangent */
   private bScrew!: Float64Array;
   private x2!: Float64Array;
@@ -1146,7 +1154,7 @@ export class StackSolver {
     const merit0 = res0 + this.targetMerit(c0);
     if (!K.cholesky()) { this.residual = Infinity; this.converged = false; return; }
     K.solve(rhs, du);
-    const wb = USE_WOODBURY && this.tensionLive && this.slices.length > 0 ? this.prepareWoodbury() : null;
+    const wb = USE_WOODBURY && (this.tensionLive || this.nlN !== null) && this.slices.length > 0 ? this.prepareWoodbury() : null;
     if (wb) this.applyWoodbury(wb, du);
     const sw = this.seats.length > 0 ? this.prepareSeats(wb) : null;
     if (sw) this.applySeats(sw, du);
@@ -1183,12 +1191,28 @@ export class StackSolver {
     const base = this.uTrial;
     base.set(u);
     const baseS = this.screw;
+    // With the share in the tangent, a trial is judged with the offsets the step expects: those this
+    // iteration started with, moved by N dq for the loads the tangent predicts along the step,
+    // dq = X z (z the step at the slices). Held as they were, a trial saw its loads move without their
+    // offsets and the line search cut steps the tangent had right; refreshed from the trial's own
+    // loads, it took one step of the lagged loop, which next to a heavy pass's strip edge overshoots.
+    const offBase = this.nlN && this.nlX ? Float64Array.from(this.slices, (sl) => sl.nlOff ?? 0) : null;
+    const offStep = (step: Float64Array): Float64Array | null => {
+      if (!offBase) return null;
+      const m = this.slices.length, X = this.nlX!, N = this.nlN!;
+      const z = new Float64Array(m), dq = new Float64Array(m), d = new Float64Array(m);
+      this.slices.forEach((sl, j) => { const [iv, ivL] = this.sliceDofs(sl); z[j] = step[iv] + (ivL >= 0 ? step[ivL] : 0); });
+      for (let i = 0; i < m; i++) { let v = 0; for (let j = 0; j < m; j++) v += X[i * m + j] * z[j]; dq[i] = v; }
+      for (let i = 0; i < m; i++) { let v = 0; for (let j = 0; j < m; j++) v += N[i * m + j] * dq[j]; d[i] = v; }
+      return d;
+    };
     /**
      * Backtracking along (step, dS): the merit has to come down, or the step
      * is shortened (a contact opening or the strip lifting off is not
      * something a tangent knows about). Returns whether it came down.
      */
     const search = (step: Float64Array, ds: number) => {
+      const dOff = offStep(step);
       let mx = Math.abs(ds);
       for (let i = 0; i < step.length; i++) {
         // slopes are scaled by their station's cell so the clip means the same thing for them
@@ -1200,6 +1224,7 @@ export class StackSolver {
       for (let tries = 0; tries < 5; tries++) {
         for (let i = 0; i < u.length; i++) u[i] = base[i] + alpha * step[i];
         this.screw = baseS + alpha * ds;
+        if (offBase && dOff) this.slices.forEach((sl, i) => { sl.nlOff = offBase[i] + alpha * dOff[i]; });
         this.stripSolve(false);
         res = this.assemble(false);
         c = this.targetValue();
@@ -1240,6 +1265,7 @@ export class StackSolver {
   private targetGradient(): Float64Array {
     const p = this.p;
     const m = this.slices.length;
+    if (this.nlN && this.nlX && this.nlX.length === m * m) return this.targetGradientNonlocal();
     const a = new Float64Array(m);
     const T = this.T, live = this.tensionLive;
     let W = 0;
@@ -1257,6 +1283,37 @@ export class StackSolver {
         }
       }
       a[j] = p.mode === 'gauge' ? v / Math.max(W, 1e-12) : v;
+    }
+    return a;
+  }
+
+  /**
+   * `targetGradient` with the non-local flattening in the tangent (`flatNonlocalNewton`): the loads
+   * move by X = dq/dz (see `nonlocalCore`), and a slice's exit thickness with its own gap, its tension
+   * and twice its offset, which the loads move by N: dh₁/dz = Dh (gain I + 2 N X) + Dhσ T.
+   */
+  private targetGradientNonlocal(): Float64Array {
+    const p = this.p, m = this.slices.length, N = this.nlN!, X = this.nlX!;
+    const a = new Float64Array(m);
+    const T = this.T, live = this.tensionLive, gain = this.gapGain();
+    let W = 0;
+    for (const sl of this.slices) W += sl.weight;
+    if (p.mode !== 'gauge') {
+      for (let j = 0; j < m; j++) { let v = 0; for (let i = 0; i < m; i++) v += this.slices[i].weight * X[i * m + j]; a[j] = v; }
+      return a;
+    }
+    const NX = new Float64Array(m);
+    for (let j = 0; j < m; j++) {
+      // column j of N X
+      for (let i = 0; i < m; i++) { let v = 0; for (let k = 0; k < m; k++) v += N[i * m + k] * X[k * m + j]; NX[i] = v; }
+      let v = 0;
+      for (let i = 0; i < m; i++) {
+        const si = this.slices[i];
+        let dh = si.dh1dg * ((i === j ? gain : 0) + 2 * NX[i]);
+        if (live) dh += si.dh1ds * T[i * m + j];
+        v += si.weight * dh;
+      }
+      a[j] = v / Math.max(W, 1e-12);
     }
     return a;
   }
@@ -1291,9 +1348,12 @@ export class StackSolver {
     }
     this.yAge++;
     const M = new Float64Array(m * m), A = new Float64Array(m * m);
-    for (let i = 0; i < m; i++) {
-      const wi = -this.slices[i].weight * this.dqds[i];
-      for (let j = 0; j < m; j++) M[i * m + j] = wi * this.T[i * m + j];
+    if (this.nlN && this.nlN.length === m * m) this.nonlocalCore(M);
+    else {
+      for (let i = 0; i < m; i++) {
+        const wi = -this.slices[i].weight * this.dqds[i];
+        for (let j = 0; j < m; j++) M[i * m + j] = wi * this.T[i * m + j];
+      }
     }
     for (let i = 0; i < m; i++) {
       for (let j = 0; j < m; j++) {
@@ -1307,6 +1367,40 @@ export class StackSolver {
     const piv = new Int32Array(m);
     if (!luFactor(A, m, piv)) return null;
     return { Y, M, A, piv, cols, colsL, n, m };
+  }
+
+  /**
+   * The Woodbury core with the non-local flattening in the tangent (`flatNonlocalNewton`). A slice's
+   * load answers its gap and its tension through the slice's own tangents D = dq/dg, Dσ = dq/dσ, and
+   * the gap it sees carries twice its flattening offset, which the loads move by N = ∂offset/∂q:
+   * dq = D (dg + 2 N dq) + Dσ dσ, so dq = P (D dg + Dσ dσ) with P = (I − 2 D N)⁻¹, dg = gain·dz and
+   * dσ = T dz. The band already holds −w D gain on the diagonal; the core is the rest,
+   * M = −W [P (D gain + Dσ T) − D gain].
+   */
+  private nonlocalCore(M: Float64Array): void {
+    const m = this.slices.length, N = this.nlN!, gain = this.gapGain();
+    const D = Float64Array.from(this.slices, (sl) => (sl.q > 0 ? sl.dqdg : 0));
+    // (I − 2 D N) X = D gain + Dσ T, one LU and m back-substitutions
+    const S = new Float64Array(m * m);
+    for (let i = 0; i < m; i++) for (let j = 0; j < m; j++) S[i * m + j] = (i === j ? 1 : 0) - 2 * D[i] * N[i * m + j];
+    const piv = new Int32Array(m);
+    if (!luFactor(S, m, piv)) {
+      // no better tangent to be had: the lagged share, as without the mode
+      this.nlX = null;
+      for (let i = 0; i < m; i++) {
+        const wi = -this.slices[i].weight * this.dqds[i];
+        for (let j = 0; j < m; j++) M[i * m + j] = wi * this.T[i * m + j];
+      }
+      return;
+    }
+    const col = new Float64Array(m);
+    const live = this.tensionLive;
+    const X = this.nlX && this.nlX.length === m * m ? this.nlX : (this.nlX = new Float64Array(m * m));
+    for (let j = 0; j < m; j++) {
+      for (let i = 0; i < m; i++) col[i] = (i === j ? D[i] * gain : 0) + (live ? this.dqds[i] * this.T[i * m + j] : 0);
+      luSolve(S, m, piv, col);
+      for (let i = 0; i < m; i++) { X[i * m + j] = col[i]; M[i * m + j] = -this.slices[i].weight * (col[i] - (i === j ? D[i] * gain : 0)); }
+    }
   }
 
   private applyWoodbury(wb: { Y: Float64Array; M: Float64Array; A: Float64Array; piv: Int32Array; cols: Int32Array; colsL: Int32Array | null; n: number; m: number }, v: Float64Array): void {
@@ -1341,6 +1435,7 @@ export class StackSolver {
     const sl = this.slices, n = sl.length;
     if (!this.p.flatNonlocal) {
       if (this.nlLive) { for (const s of sl) s.nlOff = 0; this.nlLive = false; this.nlChange = 0; }
+      this.nlN = null;
       return;
     }
     if (n === 0) return;
@@ -1358,7 +1453,9 @@ export class StackSolver {
       // the half-width the contact law takes for this load (see `approach`)
       b[i] = Math.max(Math.sqrt(ws.bCoef * Math.max(s.q, 0)), s.arc / 2, 1e-9);
     }
-    const off = nonlocalOffsets(x, c0, c1, q, b, ws.A1, this.stack.rolls[this.stack.wr].D / 2);
+    const R = this.stack.rolls[this.stack.wr].D / 2;
+    const off = nonlocalOffsets(x, c0, c1, q, b, ws.A1, R);
+    this.nlN = this.p.flatNonlocalNewton ? nonlocalJacobian(x, c0, c1, q, b, ws.A1, R, this.nlN) : null;
     let change = this.nlLive ? 0 : Infinity;
     for (let i = 0; i < n; i++) {
       change = Math.max(change, Math.abs(off[i] - (sl[i].nlOff ?? 0)));
@@ -2712,4 +2809,27 @@ function geometryKey(p: Params3D): string {
     p.width, p.irShift, p.wrD, p.irD, p.ir2D, p.burD, p.bbD, p.angle1, p.mode,
     p.clearance, p.Eroll, p.nuRoll,
   ].join('|');
+}
+
+/**
+ * ∂(offset_i)/∂q_j of `nonlocalOffsets` at the contact half-widths b held (the offsets are linear in
+ * the loads there): A times the kernel's integral over slice j's cell seen from slice i, less the
+ * 2D value on the diagonal; an unloaded slice pushes nothing (its kernel is not cut off).
+ */
+function nonlocalJacobian(
+  x: ArrayLike<number>, c0: ArrayLike<number>, c1: ArrayLike<number>,
+  q: ArrayLike<number>, b: ArrayLike<number>, A: number, R: number, into: Float64Array | null,
+): Float64Array {
+  const n = x.length;
+  const N = into && into.length === n * n ? into : new Float64Array(n * n);
+  N.fill(0);
+  const L = new Float64Array(n);
+  let Lmax = 0;
+  for (let j = 0; j < n; j++) { L[j] = q[j] > 0 ? nlCutoff(R, b[j]) : 0; Lmax = Math.max(Lmax, L[j]); }
+  for (let i = 0; i < n; i++) {
+    for (let j = i; j >= 0 && x[i] - c1[j] < Lmax; j--) if (q[j] > 0) N[i * n + j] = A * nlKernelIntegral(c0[j] - x[i], c1[j] - x[i], b[j], L[j]);
+    for (let j = i + 1; j < n && c0[j] - x[i] < Lmax; j++) if (q[j] > 0) N[i * n + j] = A * nlKernelIntegral(c0[j] - x[i], c1[j] - x[i], b[j], L[j]);
+    if (q[i] > 0) N[i * n + i] -= A * (2 * Math.log((4 * R) / b[i]) - 1);
+  }
+  return N;
 }

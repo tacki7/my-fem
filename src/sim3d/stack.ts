@@ -248,6 +248,12 @@ export interface Params3D {
    * each slice flattens under its own load alone.
    */
   flatNonlocal: boolean;
+  /**
+   * With `flatNonlocal`: the neighbours' share of each slice's flattening is carried in the outer
+   * Newton's tangent (a Woodbury update beside the tension coupling's), not only lagged one iteration.
+   * Off (the default for now), the share follows the loads one iteration late, as it always has.
+   */
+  flatNonlocalNewton: boolean;
   /** ring FEM: circumferential divisions, rings through the wall, radial grading, hub radius as a fraction of R */
   ringNt: number;
   ringNr: number;
@@ -298,7 +304,7 @@ export function defaultParams(mill: MillType): Params3D {
     // The mills below override it where they need more.
     stations: 301, stripStations: 281,
     stripModel: 'fem', stripNz: 16, stripNy: 2,
-    flatModel: 'hertz', flatNonlocal: true, ringNt: 800, ringNr: 12, ringGrade: 2.5, ringHub: 0.3,
+    flatModel: 'hertz', flatNonlocal: true, flatNonlocalNewton: false, ringNt: 800, ringNr: 12, ringGrade: 2.5, ringHub: 0.3,
   };
   switch (mill) {
     case '2hi':
