@@ -1,7 +1,7 @@
 // The FrontISTR cross-check served to the app: a connect-style handler the Vite dev server
 // mounts (vite.config.ts) and serve.mjs runs on its own.
 //
-//   GET  /__frontistr/ping             → { ok, fistr1, busy }   fistr1: the solver binary was found
+//   GET  /__frontistr/ping             → { ok, fistr1, busy, solver }   fistr1: the solver binary was found; solver: its file name
 //   POST /__frontistr/solve  { mill, params }
 //        → the comparison (lib.mjs `compareStack`) as JSON, lengths in m, loads in N/m;
 //          409 while another solve runs, 400 for a mill it cannot do (lib.mjs MILLS: 2Hi,
@@ -29,6 +29,7 @@
 // a job's under run/jobs/<id>/.
 import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJobs } from './jobs.mjs';
 
@@ -180,7 +181,8 @@ export function frontistrHandler(opts = {}) {
     const url = new URL(req.url ?? '/', 'http://x');
     if (!url.pathname.startsWith('/__frontistr')) return next ? next() : json(res, 404, { error: 'not found' });
     const path = url.pathname.slice('/__frontistr'.length);
-    if (req.method === 'GET' && path === '/ping') return json(res, 200, { ok: true, fistr1: existsSync(fistr1), busy: busy || jobs.busy });
+    // `solver`: the program's file name - a harness makes sure it talks to the stand-in (fake-fistr1.mjs) before it starts jobs
+    if (req.method === 'GET' && path === '/ping') return json(res, 200, { ok: true, fistr1: existsSync(fistr1), busy: busy || jobs.busy, solver: basename(opts.jobFistr1 ?? fistr1) });
     if (path.startsWith('/jobs')) { if (await jobRoute(req, res, path)) return; }
     if (req.method !== 'POST' || path !== '/solve') return json(res, 404, { error: 'not found' });
     if (busy || jobs.busy) return json(res, 409, { error: 'busy' });

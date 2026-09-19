@@ -105,5 +105,52 @@ rAF を間引くことがあり（1 回の setTimeout が数十秒になった�
 | 計算中に条件を変えても止まらない（`view3d.ts` の `settingsChanged` から `running = false` を外す） | 状態: 5 件（ダイヤル・R・Space 2 回・ハウジング） |
 | 打ち込みの上下限を外す（`typedValue` の clamp） | 報告なし — 手前の `valueFromShown` が範囲の中の値しか返さないので、振る舞いが変わらない（壊したことにならない） |
 
+### 連成（`--only=coupled`）
+
+3D タブの計算開始は FrontISTR との連成を定常まで回す（`src/ui3d/coupled3d.ts`）。それを、**代わりの fistr1**（`tools/frontistr/fake-fistr1.mjs`、
+数秒で結果を書く）を使う dev サーバーの上で叩く。既定の実行（`--only` なし）には入らない。
+
+```bash
+Q=$(mktemp -d); echo '{"mode":"ok"}' > $Q/control.json
+FISTR1="$PWD/tools/frontistr/fake-fistr1.mjs" FAKE_FISTR1_CONTROL=$Q/control.json npm run dev -- --port 5182 --strictPort &
+CDP_PORT=9232 node tools/browser/qa3d.mjs http://localhost:5182 --only=coupled --control=$Q/control.json --out=$Q/report.json
+#   --cases=through,stop-resume,…   一部だけ。--real: 本物の fistr1 でも回す（1 回 数分、CPU ロックの中で）
+```
+
+橋渡しの `/ping` が返すプログラム名（`solver`）が `fake-fistr1.mjs` でなければ、`--real` なしでは始めない（本物の fistr1 を黙って回さない）。
+ハーネスはケースごとに `control.json` を書き換えて代わりの fistr1 の振る舞い（成功・失敗・NaN・止まる・1 段の時間）を選ぶ。橋渡しはジョブを 1 本ずつしか回さず、
+ページが変わってもジョブは残るので、ケースの前に橋渡しが空くのを待ち、ケースの後に残ったジョブを止める。
+
+| ケース | すること | 見るもの |
+|---|---|---|
+| `through` | 計算開始から定常まで | 計算前（板・ロールとも値 0、札「計算前」）→ アプリ → FrontISTR（回の途中で札「荷重 1/n」とロールの色）→ 補正を入れて解き直し → 定常。各段の状態の行・右パネル・ボタンの文言、チャートの重ね、**δ が代わりの fistr1 の山**（中央 −0.9 µm、0.8 × 半幅で +1.0 µm）— 答えの分かっている校正 |
+| `stop-resume` | FrontISTR 中に停止 → 計算開始 | 停止でジョブが cancelled・代わりの fistr1 が SIGTERM、ボタン「連成を続ける」、続けて定常 |
+| `dial`・`R`・`housing` | FrontISTR 中にダイヤル・R・ハウジングモード | ジョブが止まり、補正と回が消え、ボタン「計算開始」、ロールの札「計算前」。ダイヤルは続けて計算開始 → 1 回目から定常 |
+| `space` | FrontISTR 中に Space 2 回 | 止まって、続きが始まる |
+| `switch-off` | FrontISTR 中にロールの変形を「モデルだけ」→ 戻す | ジョブが止まり「連成なし」、戻すと待機 |
+| `tab-2d`・`stage`・`window` | 2D タブとの行き来、ステージの 3D／正面図／コンター、窓の幅 | 回が続く・コンターの部品が残る |
+| `reload` | FrontISTR 中にページを読み込み直す | 前のページのジョブが 60 s 以内に終わるか（代わりの fistr1 は止まったままなので、誰も止めなければ走り続ける）、新しいページの dry run（ロールの初期状態）と計算開始がジョブを得るか（409 の再試行中も段は FrontISTR なので、ジョブの id で見る） |
+| `fail`・`nan` | 代わりの fistr1 が失敗・NaN | 理由の表示、アプリの結果が残る、ボタン「連成を続ける」、ロールの札「古い値」 |
+| `nobridge` | `?fistr=` を閉じたポートに | 「連成できない」と理由、モデルだけの結果、問い合わせ 1 回の失敗のほかに console のエラー無し |
+| `dials-fast` | コンターのステージでダイヤルを 12 回すばやく | dry run が何本積まれるか・橋渡しが空くまでの時間 |
+| `slab` | 材料モデルがスラブ法（板の 3D の場が無い） | 定常まで行くか、板のコンターが何を出すか |
+
+ページの文言はアニメーションフレームで描き直されるので（ヘッドレスは間引く）、文言の検査は条件が満たされるのを最大 20 秒待ち、来なければ報告にする。
+**console の 409 の行**: 設定を変えた直後や読み込み直した直後は、前のジョブ（取り消し中・dry run）が橋渡しを持っている間にページの dry run や 1 回目が 409 を受け、
+Chrome がそれを console に 1 行書く（ページは設計どおり数秒おきに再試行する）。これはケースごとの失敗にせず、ケースごとの数を数えて最後に 1 件の報告にまとめる。
+ほかの例外・console のエラーはケースの失敗。
+
+**校正**（2026-09-19、代わりの fistr1、わざと壊したソースを dev サーバーに読ませて）:
+
+| 壊したもの | ハーネスの報告 |
+|---|---|
+| 条件を変えても FrontISTR のジョブを止めない（`coupled3d.ts` の `settingsChanged` の `dropJob()` を外す） | `dial`・`R`・`housing` で `the round's job was not cancelled` と `the stand-in was not stopped`（ダイヤルは続けて、残ったジョブが橋渡しを持つので 900 s たっても定常に届かない） |
+| 定常の判定を外す（`jobState` の `if (r.converged)` を偽に） | `through`: `the steady state did not come in 600 s`（55 回回った） |
+| 代わりの fistr1 がクラウンの積み上げの差（`stackOffset`）を足さない（橋渡しの読みは #95 からそれを引く） | `through`: `δ at the centre is not the stand-in's bump  -10.900 µm against -0.900` — 答えの分かっている δ で 10 µm のずれを見つけた |
+
+**通し**（2026-09-19、代わりの fistr1、#104 の後の main）: 14 ケース 7 分 25 秒、報告は 409 の行のまとめ 1 件だけ（`dial`・`housing`・`switch-off`・`reload` に 1 行ずつ）。
+δ 中央 −0.900 µm、`dials-fast` はジョブ 1 本で 2 s 後に空く。この節が見つけ、別の PR で直ったもの: 回の途中に dry run が網を覚えるとその回のロールが置かれない（間欠、#101 の後 `slab` 10 回で 0）、
+スラブ法の板の札が「計算前」のまま（#100）、#102 の後に再読み込みで前のページのジョブが残り新しいページが連成できない（#104 で `pagehide` に取り消し）。
+
 **最初の全体の実行**（2026-09-19、seed 20260919、24 パス、101 分（11:17〜12:59）、負荷平均 10〜60 の中）: ダイヤル 44 本 × 9 操作で報告 0。パス 24 本のうち 20 本が 66〜300 s で収束。
 4 本（#5・#8・#9・#13）は 300〜600 s たっても収束も断念もせず、画面は「反復中」のまま — 警告（`stone`・`wrTouch`）は出ていた（T100）。

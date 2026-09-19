@@ -173,6 +173,21 @@ BUR クラウン 0 → 300 µm でのモデルの WR 表面の変化 −111.6 µ
 制限: ロールのケースは z ≥ 0 の半分（ロール軸の面で対称）で、板の荷重はモデルと同じ Hertz の半楕円を接触の中心に載せる。
 実際の接触弧（入側だけ、摩擦丘の圧力）は載せていないので、出口での局所の扁平はモデルの近似（中心の接近量）と同じ扱い。
 
+
+### 代わりの fistr1（`fake-fistr1.mjs`）— 画面の確認用
+
+何も解かない。`roll-coupled` のケースで、FrontISTR と同じ形の結果ファイル（荷重 0 の `res.0.0` と荷重段ごと）を数秒で書く。
+WR 下面の変位は**ページがそのジョブに添えたモデルの表面**（`request.json` の `record`）＋ 小さな山 3 µm·((x/半幅)² − 0.3) なので、連成は 2 回で定常になり、
+δ はその山になる（答えの分かっている校正）。応力は接触線の下に山のある作り物。3D タブの連成の画面と `qa3d.mjs --only=coupled` のため。
+
+```bash
+FISTR1="$PWD/tools/frontistr/fake-fistr1.mjs" FAKE_FISTR1_CONTROL=/path/control.json npm run dev -- --port <dev> --strictPort
+```
+
+橋渡しはジョブのディレクトリで起動するので `FISTR1` は絶対パスで。振る舞いはジョブの始まりに `FAKE_FISTR1_CONTROL` の JSON を読んで決める（無ければ環境変数）:
+`mode`（`ok`・`fail` = `at` 番目の結果で exit 3・`nan` = `at` 番目の結果が NaN・`hang` = `at` 番目の後で止まる）、`at`（既定 1）、`stepMs`（1 段ごとの待ち、既定 1500）、
+`bump`（山、既定 3e-6 m）。したことはケースのディレクトリの `fake-fistr1.log` に（SIGTERM も）。`/ping` の `solver` がプログラム名を返すので、ハーネスは本物か代わりかを確かめてから始める。
+
 ## 結果 1: 2Hi 既定（ワークロール 1 本、2026-09-15、FrontISTR 5.9）
 
 | 位置 x [mm] | q [kN/mm] | たわみ 梁 [µm] | たわみ FEM [µm] | 差 | 扁平 近似式 [µm] | 扁平 FEM [µm] | 差 |
