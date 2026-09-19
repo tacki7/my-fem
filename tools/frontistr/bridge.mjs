@@ -17,15 +17,18 @@
 //   GET  /__frontistr/jobs/<id>/events       → server-sent events: state, mesh, frame { k }, progress
 //   GET  /__frontistr/jobs/<id>/mesh.bin     → the surface
 //   GET  /__frontistr/jobs/<id>/frames/<k>.bin → a result on it (k = 0 the initial state)
+//   GET  /__frontistr/jobs/<id>/result.json  → what the kind reads off the finished case (roll-coupled: the WR surface)
 //   POST /__frontistr/jobs/<id>/cancel       → stops the job's fistr1
 //   kind `roll-elastic`: the 4Hi's work and backup rolls as solids in contact under the strip
 //   load, on the coarser QUICK mesh, the load ramped over `substeps` (4) result files.
+//   kind `roll-coupled`: the rolls under the load the app posts ({ params, load: { q, arc, force } }),
+//   for the coupling; result.json holds the work roll's surface (rollcase.mjs).
 //
 // One solve at a time: fistr1 takes every core it can get. The case is written to
 // tools/frontistr/run/app-<mill>/ (git-ignored) and left there, so it can be re-run by hand;
 // a job's under run/jobs/<id>/.
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createJobs } from './jobs.mjs';
 
@@ -86,11 +89,48 @@ export function frontistrHandler(opts = {}) {
       };
     },
   };
+  /**
+   * `roll-coupled`: the rolls under the app's own converged load, for the coupling
+   * (src/sim3d/coupling.ts, rollcase.mjs). The body carries the 3D tab's whole parameters and
+   * `load: { q, arc, force }` per station of the solver those parameters build; the solver is
+   * built here for its geometry only (stations, rolls, the flattening law), not solved. The
+   * work roll's surface where the strip leaves it comes back as result.json { x, v }.
+   */
+  kinds['roll-coupled'] ??= async (body, dir) => {
+    await run(process.execPath, ['tools/build-esm.mjs', 'sim3d'], ROOT);
+    const v = Date.now();
+    const { StackSolver } = await import(new URL(`../sim3d/build/solver.js?v=${v}`, import.meta.url));
+    const { radiusProfile } = await import(new URL(`../sim3d/build/stack.js?v=${v}`, import.meta.url));
+    const { buildRollCase, readRollSurface } = await import(new URL(`./rollcase.mjs?v=${v}`, import.meta.url));
+    const { parseRes } = await import(new URL(`./lib.mjs?v=${v}`, import.meta.url));
+    const params = body.params && typeof body.params === 'object' ? body.params : null;
+    const load = body.load;
+    if (!params || !load || !Array.isArray(load.q) || !Array.isArray(load.arc)) throw new Error('roll-coupled: { params, load: { q, arc, force } } expected');
+    const sv = new StackSolver(params);
+    if (load.q.length !== sv.ns || load.arc.length !== sv.ns) throw new Error(`roll-coupled: ${load.q.length} loads for ${sv.ns} stations - the parameters are not the ones the load was solved on`);
+    const pass = {
+      p: sv.p, x: sv.x, ns: sv.ns, stack: sv.stack, upper: sv.upper, rolls: sv.rolls, wsLaw: sv.wsLaw,
+      result: { q: Float64Array.from(load.q, (q) => (q === null ? NaN : q)), arc: Float64Array.from(load.arc, (a) => (a === null ? NaN : a)), converged: true, force: Number(load.force) },
+    };
+    const ref = buildRollCase(pass, radiusProfile, dir, { substeps: Math.max(1, Math.min(20, Math.round(Number(body.substeps) || 2))), ...(body.mesh && typeof body.mesh === 'object' ? body.mesh : {}) });
+    const h1 = params.h0 * (1 - params.reduction);
+    return {
+      mesh: 'roll.msh', resPrefix: 'roll.res.0.', order: ['WR', 'BUR'], kinds: { WR: 'roll', BUR: 'roll' },
+      symmetry: { x: true, y: true, z: true }, translate: [0, ref.wr.D / 2 + h1 / 2, 0],
+      source: { case: 'roll-coupled', mill: sv.stack.type, force: ref.force, nodes: ref.nodes, loadRatio: ref.loadSumY / ref.quarterForce },
+      threads: 4,
+      finish: (d) => {
+        const f = readdirSync(d).filter((n) => /^roll\.res\.0\.\d+$/.test(n)).sort((a, b) => Number(a.split('.').pop()) - Number(b.split('.').pop())).pop();
+        const surf = readRollSurface(ref, parseRes(readFileSync(`${d}/${f}`, 'utf8')));
+        return { x: surf.x, v: surf.v, force: ref.force, nodes: ref.nodes, loadRatio: ref.loadSumY / ref.quarterForce };
+      },
+    };
+  };
   const jobs = createJobs({ fistr1: opts.jobFistr1 ?? fistr1, fistr1Args: opts.jobFistr1Args ?? [], runDir, kinds, pollMs: opts.pollMs });
 
   /** the jobs' routes; true when it answered */
   async function jobRoute(req, res, path) {
-    const m = /^\/jobs(?:\/([\w-]+)(?:\/(events|mesh\.bin|frames\/(\d+)\.bin|cancel))?)?$/.exec(path);
+    const m = /^\/jobs(?:\/([\w-]+)(?:\/(events|mesh\.bin|result\.json|frames\/(\d+)\.bin|cancel))?)?$/.exec(path);
     if (!m) return false;
     const [, id, sub, k] = m;
     if (!id) {
@@ -127,10 +167,10 @@ export function frontistrHandler(opts = {}) {
       req.on('close', () => { clearInterval(ping); off(); });
       return true;
     }
-    const file = jobs.file(id, sub === 'mesh.bin' ? 'mesh' : k);
+    const file = jobs.file(id, sub === 'mesh.bin' ? 'mesh' : sub === 'result.json' ? 'result' : k);
     if (!file) return json(res, 404, { error: 'not yet' }), true;
     res.statusCode = 200;
-    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Type', sub === 'result.json' ? 'application/json; charset=utf-8' : 'application/octet-stream');
     res.setHeader('Cache-Control', 'no-store');
     createReadStream(file).pipe(res);
     return true;
