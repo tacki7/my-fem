@@ -364,7 +364,8 @@ async function coupledSection() {
   /**
    * Console lines. A request the bridge answers 409 (busy: the initial state's dry run, or a
    * round, finding another job still on the bridge - after a settings change, a reload) is a line
-   * Chrome writes itself, and the page tries again by design. Those are counted apart and reported
+   * Chrome writes itself. The page asks /ping first and does not post while the bridge is busy, so
+   * one is a job slipping in between the two requests - rare. Those are counted apart and reported
    * once at the end with the cases they came in; anything else fails the case.
    */
   const busyLines = {};
@@ -554,7 +555,7 @@ async function coupledSection() {
     after.rollsIn = rolls ? (Date.now() - t1) / 1000 : null;
     if (!rolls) bad('after a reload the new page did not get the rolls\' initial state in 90 s', JSON.stringify(after));
     await c.evaluate('__v3.start()');
-    // a round with a job on the bridge - 'fistr' alone is also the page trying again on a 409
+    // a round with a job on the bridge - 'fistr' alone is also the page waiting for a busy bridge
     const got = await c.waitFor("(__qc.read().phase === 'fistr' && !!__qc.read().job) || __qc.read().phase === 'failed'", 300000, 500).then(() => c.evaluate('__qc.read()')).catch(() => null);
     after.newPage = got ? { phase: got.phase, job: got.job, note: got.note } : 'neither a round with a job nor a failure in 300 s';
     if (!got || got.phase !== 'fistr') bad('after a reload 計算開始 did not get a FrontISTR round', JSON.stringify(after.newPage));
@@ -634,7 +635,7 @@ async function coupledSection() {
   }
   if (Object.keys(busyLines).length) {
     caseName = 'all';
-    bad('requests answered 409 while the bridge was busy, each a line in the console (the page tries again, by design)', JSON.stringify(busyLines));
+    bad('requests answered 409, each a line in the console (a job slipped in between the page\'s ping and its post)', JSON.stringify(busyLines));
   }
   coupledLog.push({ case: 'busy-409-lines', ...busyLines });
   console.log(`coupled: ${((Date.now() - t0all) / 1000).toFixed(0)} s`);
