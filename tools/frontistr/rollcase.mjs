@@ -209,17 +209,31 @@ export function buildRollCase(sv, radiusProfile, out, o = {}) {
   writeFileSync(`${out}/hecmw_ctrl.dat`, ['!MESH, NAME=fstrMSH, TYPE=HECMW-ENTIRE', ' roll.msh', '!CONTROL, NAME=fstrCNT', ' roll.cnt', '!RESULT, NAME=fstrRES, IO=OUT', ' roll.res'].join('\n') + '\n');
 
   const nn = bodies.reduce((a, b) => a + b.mesh.nodes.length, 0);
+  // The solids are stacked touching at their crowned centres (`cy` above takes each barrel's
+  // radius at x = 0, crown included); the model stacks the nominal radii and carries the crowns
+  // in the contacts' gaps, so its work roll sits the crowns' overlap further from the bearings
+  // than the solids' does before any load. The surface is read against the model's stacking:
+  // this is how much lower, against the held bearings, the solids' work roll starts. (Without it
+  // a 300 µm BUR crown shifted the whole correction by 150 µm - a uniform offset the screw took
+  // up at a held gauge, but a wrong gap at a held screw or load.)
+  let stackOffset = 0;
+  for (let r = 1; r <= screwIdx; r++) stackOffset += radiusProfile(defs[r - 1], 0) + radiusProfile(defs[r], 0);
   const ref = {
     mill: st.type, halfW, force: R.force, quarterForce: R.force / 4, loadSumY: Fsum, nodes: nn, loadedNodes: loads.length,
-    wr: { x: W.xs, bottom: lists[0].bottom, D: wrDef.D },
+    wr: { x: W.xs, bottom: lists[0].bottom, D: wrDef.D }, stackOffset,
     mesh: bodies.map((b) => ({ name: b.name, nodes: b.mesh.nodes.length, stations: b.mesh.ni, layers: b.mesh.nr, angles: b.mesh.nk - 1 })),
   };
   writeFileSync(`${out}/case.json`, JSON.stringify(ref));
   return ref;
 }
 
-/** the work roll's bottom surface line, its vertical displacement per mesh station against the held bearings [m], + up (away from the strip) */
+/**
+ * The work roll's bottom surface line where the strip leaves it: its vertical displacement per
+ * mesh station against the held bearings [m], + up (away from the strip), on the model's stacking
+ * (less `stackOffset`, see above) - the quantity `modelRollSurface` gives for the model.
+ */
 export function readRollSurface(ref, res) {
   const lab = res.labels.find((l) => l.toUpperCase() === 'DISPLACEMENT');
-  return { x: ref.wr.x, v: ref.wr.bottom.map((n) => res.node.get(n)?.[lab]?.[1] ?? NaN) };
+  const off = ref.stackOffset ?? 0;
+  return { x: ref.wr.x, v: ref.wr.bottom.map((n) => (res.node.get(n)?.[lab]?.[1] ?? NaN) - off) };
 }
