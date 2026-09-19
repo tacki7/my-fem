@@ -2,7 +2,8 @@
  * Canvas 2D drawing for the 3D tab: profile charts across the strip width,
  * the front view of the roll stack, and the end view of the cluster.
  *
- * The same dark palette as the 2D tab's canvases, in every theme.
+ * The same dark palette as the 2D tab's canvases, in every theme; only the
+ * ground under it follows the look (`--v3-screen`, see `ground`).
  */
 
 import type { HousingResult, Result3D, RollState } from '../sim3d/solver';
@@ -13,7 +14,6 @@ import type { RingInfluence } from '../sim3d/ring';
 import { nearestStation, stationAbove, stationBelow } from '../sim3d/grid';
 
 const FONT = '11px ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
-const BG = '#070a12';
 const GRID = 'rgba(140, 170, 210, 0.10)';
 const AXIS = 'rgba(140, 170, 210, 0.35)';
 const TEXT = '#8ea0bd';
@@ -22,6 +22,24 @@ const TEXT_BRIGHT = '#dce6f5';
 /** the series colours, one per roll from the work roll outwards */
 export const ROLL_COLORS = ['#7fe4ff', '#ffb26e', '#96e6b4', '#a99bff', '#ff8fa8', '#ffe28a', '#7fb2ff', '#c8ff8f', '#ff9df0', '#8fffe6'];
 export const STRIP_COLOR = '#ffd166';
+
+/**
+ * The screens' ground: the look's `--v3-screen` as an `rgba()` at the opacity asked for - the
+ * whole ground at 1, the plates under a legend or a readout at less. Read from the stylesheet
+ * again only when the look changes (a `data-theme` on the root).
+ */
+export function ground(alpha = 1): string {
+  const look = document.documentElement.dataset.theme ?? 'classic';
+  if (look !== groundLook) {
+    groundLook = look;
+    const hex = getComputedStyle(document.documentElement).getPropertyValue('--v3-screen').trim();
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    groundRgb = m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [7, 10, 18];
+  }
+  return `rgba(${groundRgb[0]}, ${groundRgb[1]}, ${groundRgb[2]}, ${alpha})`;
+}
+let groundLook = '';
+let groundRgb: [number, number, number] = [7, 10, 18];
 
 export function fit(c: HTMLCanvasElement): CanvasRenderingContext2D {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -66,6 +84,29 @@ export interface LineChartOpts {
   strip?: number;
   /** horizontal marker lines with labels */
   marks?: { y: number; label: string; color?: string }[];
+  /**
+   * print the width axis's numbers under the plot (the default). Off for a chart with another
+   * on the same axis under it: the one at the foot of the stack prints them for all.
+   */
+  xLabels?: boolean;
+}
+
+/** a chart whose pointer readout follows the others' on a `HoverLink` */
+interface HoverMember {
+  /** show the readout at this width position [mm], or none */
+  setHover(xmm: number | null): void;
+}
+
+/**
+ * Charts on one width axis, one under the other: pointing at one shows the same position on
+ * all of them, each with its own values there, so what happens at a strip edge reads down the
+ * stack in one place. The position is in mm across the width, not in pixels, so charts that
+ * span different widths (the roll barrels against the strip) still meet at the same x.
+ */
+export class HoverLink {
+  private members: HoverMember[] = [];
+  add(m: HoverMember): void { this.members.push(m); }
+  set(xmm: number | null): void { for (const m of this.members) m.setHover(xmm); }
 }
 
 const nice = (v: number): string => {
@@ -95,22 +136,34 @@ function xTickLabel(ctx: CanvasRenderingContext2D, x: number, px: number, y: num
 }
 
 /** A profile chart: several series against the width coordinate. */
-export class LineChart {
+export class LineChart implements HoverMember {
   /** what was last drawn, so a hover can be painted over it without recomputing */
   private last: { series: XYSeries[]; o: LineChartOpts } | null = null;
-  /** the pointer's x on the canvas [css px], or null when it is off the chart */
-  private hoverX: number | null = null;
+  /** the width position the readout is at [mm] - this chart's pointer or a linked one's - or null for none */
+  private hoverMm: number | null = null;
+  /** the plot's horizontal placing as last drawn, to turn a pointer into a width position */
+  private plotX: { padL: number; pw: number; xr: number } | null = null;
+  /** print the unit in the plot's corner; off where the chart's own heading says it */
+  private unitInPlot: boolean;
 
-  constructor(private canvas: HTMLCanvasElement) {
+  constructor(private canvas: HTMLCanvasElement, opts: { link?: HoverLink; unitInPlot?: boolean } = {}) {
+    const link = opts.link;
+    this.unitInPlot = opts.unitInPlot !== false;
+    link?.add(this);
+    const point = (xmm: number | null) => (link ? link.set(xmm) : this.setHover(xmm));
     canvas.addEventListener('pointermove', (e) => {
-      const r = canvas.getBoundingClientRect();
-      this.hoverX = e.clientX - r.left;
-      if (this.last) this.draw(this.last.series, this.last.o);
+      const p = this.plotX;
+      if (!p) return;
+      const hx = e.clientX - canvas.getBoundingClientRect().left;
+      point(hx < p.padL || hx > p.padL + p.pw ? null : -p.xr + ((hx - p.padL) / p.pw) * 2 * p.xr);
     });
-    canvas.addEventListener('pointerleave', () => {
-      this.hoverX = null;
-      if (this.last) this.draw(this.last.series, this.last.o);
-    });
+    canvas.addEventListener('pointerleave', () => point(null));
+  }
+
+  setHover(xmm: number | null): void {
+    if (xmm === this.hoverMm) return;
+    this.hoverMm = xmm;
+    if (this.last) this.draw(this.last.series, this.last.o);
   }
 
   draw(series: XYSeries[], o: LineChartOpts): void {
@@ -118,9 +171,10 @@ export class LineChart {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
-    const padL = 46, padR = 10, padT = 8, padB = 20;
+    const xLabels = o.xLabels !== false;
+    const padL = 46, padR = 10, padT = 8, padB = xLabels ? 20 : 6;
     const pw = W - padL - padR, ph = H - padT - padB;
     if (pw < 10 || ph < 10) return;
 
@@ -142,6 +196,7 @@ export class LineChart {
     lo -= span * 0.08; hi += span * 0.08;
 
     const xr = o.halfWidth * 1e3;
+    this.plotX = { padL, pw, xr };
     const sx = (x: number) => padL + ((x + xr) / (2 * xr)) * pw;
     const sy = (y: number) => padT + ((hi - y) / (hi - lo)) * ph;
 
@@ -157,7 +212,8 @@ export class LineChart {
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    const ny = 4;
+    // as many value lines as the height holds with room between their numbers
+    const ny = ph >= 64 ? 4 : ph >= 30 ? 2 : 1;
     for (let i = 0; i <= ny; i++) {
       const y = lo + ((hi - lo) * i) / ny;
       const py = Math.round(sy(y)) + 0.5;
@@ -172,7 +228,7 @@ export class LineChart {
       const x = -xr + (2 * xr * i) / nx;
       const px = Math.round(sx(x)) + 0.5;
       ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + ph); ctx.stroke();
-      if (i % every === 0) xTickLabel(ctx, x, px, padT + ph + 4, W);
+      if (xLabels && i % every === 0) xTickLabel(ctx, x, px, padT + ph + 4, W);
     }
     // zero line
     if (lo < 0 && hi > 0) {
@@ -183,7 +239,7 @@ export class LineChart {
     // unit
     ctx.textAlign = 'left';
     ctx.fillStyle = TEXT;
-    ctx.fillText(o.unit, padL + 4, padT + 2);
+    if (this.unitInPlot) ctx.fillText(o.unit, padL + 4, padT + 2);
     // marks
     for (const m of o.marks ?? []) {
       ctx.strokeStyle = m.color ?? AXIS;
@@ -238,12 +294,12 @@ export class LineChart {
       ctx.font = FONT;
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
-      let lx = padL + 4, ly = padT + 14;
+      let lx = padL + 4, ly = padT + (this.unitInPlot ? 14 : 3);
       for (const s of series) {
         const tw = ctx.measureText(s.label).width;
         if (lx + tw + 22 > W - padR) { lx = padL + 4; ly += 13; }
         // a dark plate under each entry, so a curve running through the legend does not hide it
-        ctx.fillStyle = 'rgba(7, 10, 18, 0.72)';
+        ctx.fillStyle = ground(0.72);
         ctx.fillRect(lx - 3, ly - 1, tw + 24, 14);
         ctx.strokeStyle = s.color;
         ctx.lineWidth = 2;
@@ -258,9 +314,8 @@ export class LineChart {
 
     // hover readout: a crosshair at the nearest sample and every series'
     // value there
-    const hx = this.hoverX;
-    if (hx === null || hx < padL || hx > W - padR || series.length === 0) return;
-    const xmm = -xr + ((hx - padL) / pw) * 2 * xr;
+    const xmm = this.hoverMm;
+    if (xmm === null || xmm < -xr || xmm > xr || series.length === 0) return;
     // the nearest grid x of the first series (they all share the grid)
     const gx = series[0].x;
     let best = 0, bd = Infinity;
@@ -292,7 +347,7 @@ export class LineChart {
     let bx = px + 8;
     if (bx + bw > W - padR) bx = px - 8 - bw;
     const by = padT + 2;
-    ctx.fillStyle = 'rgba(7, 10, 18, 0.9)';
+    ctx.fillStyle = ground(0.9);
     ctx.strokeStyle = 'rgba(140, 170, 210, 0.3)';
     ctx.beginPath();
     ctx.roundRect(bx, by, bw, bh, 4);
@@ -342,7 +397,7 @@ export class FrontView {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
     const rolls = R.rolls;
     if (!rolls.length) return;
@@ -504,7 +559,7 @@ export class FrontView {
     ctx.textBaseline = 'middle';
     for (const l of labels) {
       const tw = ctx.measureText(l.text).width + 10;
-      ctx.fillStyle = 'rgba(7, 10, 18, 0.8)';
+      ctx.fillStyle = ground(0.8);
       ctx.fillRect(l.x - tw / 2, l.y - 8, tw, 16);
       ctx.fillStyle = TEXT_BRIGHT;
       ctx.fillText(l.text, l.x, l.y);
@@ -570,7 +625,7 @@ export class EndView {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
     const rolls = stack.rolls;
     if (!rolls.length) return;
@@ -701,7 +756,7 @@ export class SideView {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
     const rolls = stack.rolls;
     if (!rolls.length) return;
@@ -927,7 +982,7 @@ export class SectionView {
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
     ctx.font = FONT;
     ctx.fillStyle = TEXT;
@@ -983,24 +1038,51 @@ export class SectionView {
 }
 
 /** a scalar field on the bite's (x, z) grid as a heat map: columns across the width, rows entry → exit */
-export class HeatChart {
-  constructor(private canvas: HTMLCanvasElement) {}
+export class HeatChart implements HoverMember {
+  /** what was last drawn, so a linked chart's pointer can be shown without the caller */
+  private last: Parameters<HeatChart['draw']> | null = null;
+  /** the width position a linked chart points at [mm], or null */
+  private hoverMm: number | null = null;
+  /** the plot's horizontal placing as last drawn, to turn a pointer into a width position */
+  private plotX: { padL: number; pw: number; xr: number } | null = null;
+
+  constructor(private canvas: HTMLCanvasElement, opts: { link?: HoverLink } = {}) {
+    const link = opts.link;
+    link?.add(this);
+    const point = (xmm: number | null) => (link ? link.set(xmm) : this.setHover(xmm));
+    canvas.addEventListener('pointermove', (e) => {
+      const p = this.plotX;
+      if (!p) return;
+      const hx = e.clientX - canvas.getBoundingClientRect().left;
+      point(hx < p.padL || hx > p.padL + p.pw ? null : -p.xr + ((hx - p.padL) / p.pw) * 2 * p.xr);
+    });
+    canvas.addEventListener('pointerleave', () => point(null));
+  }
+
+  setHover(xmm: number | null): void {
+    if (xmm === this.hoverMm) return;
+    this.hoverMm = xmm;
+    if (this.last) this.draw(...this.last);
+  }
 
   draw(
     field: Float64Array | null, ncol: number, nrow: number, x: ArrayLike<number>, arc: ArrayLike<number>,
-    o: { unit: string; scale: number; halfWidth: number; symmetric?: boolean; note?: string },
+    o: { unit: string; scale: number; halfWidth: number; symmetric?: boolean; note?: string; xLabels?: boolean },
   ): void {
+    this.last = [field, ncol, nrow, x, arc, o];
+    this.plotX = null;
     const ctx = fit(this.canvas);
     const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
     if (!hasRoom(W, H)) return;
-    ctx.fillStyle = BG;
+    ctx.fillStyle = ground();
     ctx.fillRect(0, 0, W, H);
     ctx.font = FONT;
     ctx.fillStyle = TEXT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     if (!field || ncol < 1 || nrow < 1) { ctx.fillText(o.note ?? '材料モデルが平面 FEM のときに表示', 8, 8); return; }
-    const padL = 46, padR = 62, padT = 8, padB = 20;
+    const xLabels = o.xLabels !== false;
+    const padL = 46, padR = 62, padT = 8, padB = xLabels ? 20 : 6;
     const pw = W - padL - padR, ph = H - padT - padB;
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < field.length; i++) { const v = field[i] * o.scale; if (v < lo) lo = v; if (v > hi) hi = v; }
@@ -1008,6 +1090,7 @@ export class HeatChart {
     if (o.symmetric) { const m = Math.max(Math.abs(lo), Math.abs(hi), 1e-12); lo = -m; hi = m; }
     if (hi - lo < 1e-12) hi = lo + 1;
     const xr = o.halfWidth * 1e3;
+    this.plotX = { padL, pw, xr };
     const sx = (xx: number) => padL + ((xx + xr) / (2 * xr)) * pw;
     const ramp = (t: number): string => {
       const c = Math.max(0, Math.min(1, t));
@@ -1041,7 +1124,7 @@ export class HeatChart {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const every = xTickEvery(ctx, xr, pw / 4);
-    for (let i = 0; i <= 4; i += every) { const xx = -xr + (2 * xr * i) / 4; xTickLabel(ctx, xx, sx(xx), padT + ph + 4, W); }
+    if (xLabels) for (let i = 0; i <= 4; i += every) { const xx = -xr + (2 * xr * i) / 4; xTickLabel(ctx, xx, sx(xx), padT + ph + 4, W); }
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillText('入側', padL - 5, padT + ph * 0.06);
@@ -1061,5 +1144,25 @@ export class HeatChart {
     ctx.fillText(nice(lo), bx + bw + 4, padT + ph);
     ctx.textBaseline = 'middle';
     ctx.fillText(o.unit, bx + bw + 4, padT + ph / 2);
+    // a linked chart's pointer: the same width position down this map, with its x
+    const xmm = this.hoverMm;
+    if (xmm === null || xmm < -xr || xmm > xr) return;
+    const px = Math.round(sx(xmm)) + 0.5;
+    ctx.strokeStyle = 'rgba(220, 230, 245, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    const head = `x = ${xmm.toFixed(0)} mm`;
+    const tw = ctx.measureText(head).width + 12;
+    let tx = px + 8;
+    if (tx + tw > padL + pw) tx = px - 8 - tw;
+    ctx.fillStyle = ground(0.9);
+    ctx.strokeStyle = 'rgba(140, 170, 210, 0.3)';
+    ctx.beginPath(); ctx.roundRect(tx, padT + 2, tw, 18, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(head, tx + 6, padT + 6);
   }
 }

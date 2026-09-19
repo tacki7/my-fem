@@ -15,8 +15,8 @@
 import { StackSolver, WARNING_TEXT, SETTINGS_WARNINGS, type Warning3D } from '../sim3d/solver';
 import { RemainingTime, type Eta } from '../sim3d/eta';
 import { defaultParams, MILL_LABEL, type Params3D } from '../sim3d/stack';
-import { el, section, slider, select, toggle, buttonRow, StatGrid } from '../ui/controls';
-import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
+import { el, section, slider, select, toggle, buttonRow, helpMark, StatGrid, type SectionHandle } from '../ui/controls';
+import { LineChart, FrontView, EndView, SideView, SectionView, HeatChart, HoverLink, ROLL_COLORS, STRIP_COLOR, type XYSeries } from './charts3d';
 import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '../sim3d/housing';
@@ -109,25 +109,39 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   right.id = 'v3-right';
   root.append(left, centre, right);
 
-  const cell = (id: string, title: string, sub: string) => {
-    const c = el('div', 'chart-cell v3-cell');
+  /** a chart in the sheet: its name (a zero-width space where it may break) and unit, a marker holding what it shows, and its canvas */
+  const cell = (id: string, title: string, unit: string, hint: string) => {
+    const c = el('div', 'v3-chart');
     c.id = id;
-    const head = el('div', 'chart-head');
-    head.append(el('span', 'chart-title', title), el('span', 'chart-sub', sub));
+    const head = el('div', 'v3-chart-head');
+    head.append(el('span', 'v3-chart-title', title), el('span', 'v3-chart-unit', unit), helpMark(hint));
     const canvas = el('canvas');
     c.append(head, canvas);
     return { root: c, canvas };
   };
 
-  const front = cell('v3-front', 'ロールスタック', '3D: ドラッグ=回転 ／ ホイール=ズーム ／ ダブルクリック=視点リセット ／ 上半分を表示 ／ 胴の色 = 接触線荷重 ／ 板は厚さ偏差を倍率表示');
-  // the stack is drawn either in 3D (WebGL, the default) or as the flat
-  // front view; the cell holds both canvases and a label layer for the 3D one
+  // The stage: the stack in 3D (WebGL, the default) or as the flat front view, one shown at a
+  // time, and what floats over them. `data-view` on the stage says which; everything over the
+  // picture is a `.v3-overlay`, so a view that brings its own overlays (the contours) hides
+  // these by setting a view of its own (see the stylesheet).
+  const front = el('div', 'v3-stage-cell');
+  // the layout's handle for the stage's height sits under this box
+  front.id = 'v3-front';
+  const stageHead = el('div', 'v3-stage-head');
+  stageHead.append(
+    el('span', 'v3-stage-title', 'ロールスタック'), el('span', 'v3-stage-mill', MILL_LABEL[params.mill]),
+    helpMark('3D はドラッグで回転、ホイールでズーム、ダブルクリックで視点を戻す。上半分だけを描く。'
+      + '胴の色は「荷重」で接触線荷重、「応力」で曲げ縁応力（青 圧縮／赤 引張）と接触線の Hertz 面圧。板は厚さの偏差を倍率で表示する。'
+      + '正面図は撓みを「解析・表示 ▸ 撓み表示倍率」で拡大して描く。'),
+  );
   const stage = el('div', 'v3-stage');
   const glCanvas = el('canvas');
   glCanvas.className = 'v3-gl';
-  const labelBox = el('div', 'v3-labels');
-  front.canvas.replaceWith(stage);
-  stage.append(glCanvas, labelBox, front.canvas);
+  const labelBox = el('div', 'v3-labels v3-overlay');
+  const flatCanvas = el('canvas');
+  flatCanvas.className = 'v3-flat';
+  stage.append(glCanvas, labelBox, flatCanvas);
+  front.append(stageHead, stage);
   let frontMode: '3d' | '2d' = (() => { try { return localStorage.getItem('rollfem.v3.front') === '2d' ? '2d' : '3d'; } catch { return '3d'; } })();
   let stack3d: StackView3D | null = null;
   try { stack3d = new StackView3D(glCanvas, labelBox); } catch { frontMode = '2d'; }
@@ -149,55 +163,91 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     dirty = true;
   };
   setColor(colorBy);
-  const legendBox = el('div', 'v3-legend');
-  stage.append(legendBox);
-  // over the stack while its colours and deflections are not the current settings' solution
-  const staleTag = el('div', 'v3-stale-tag', '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）');
-  // the discretisation at a glance, for the settings as they are now (not the last solve's):
-  // the stations every roll is solved on, with the flattening's ring mesh when that model is
-  // on, and the strip's slices, with the FEM's rows and layers when a FEM solves it
+  // the switches, one group at the head's right end (a view added later joins `modeBtns`)
+  const views = el('div', 'v3-views');
+  views.append(colorBtns, modeBtns);
+  stageHead.append(views);
+  // the colour bars, bottom left
+  const legendBox = el('div', 'v3-legend v3-overlay');
+  // top right, while the colours and deflections are not the current settings' solution
+  const staleTag = el('div', 'v3-stale-tag v3-overlay', '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）');
+  // the discretisation at a glance, bottom right, for the settings as they are now (not the last
+  // solve's): the stations every roll is solved on, with the flattening's ring mesh when that
+  // model is on, and the strip's slices, with the FEM's rows and layers when a FEM solves it
   const gridRoll = el('span'), gridStrip = el('span');
-  const gridTag = el('div', 'v3-grid-tag');
+  const gridTag = el('div', 'v3-grid-tag v3-overlay');
   gridTag.append(el('span', 'v3-grid-title', '分割数'), el('span', '', 'ロール'), gridRoll, el('span', '', '材料'), gridStrip);
-  // both along the stack's top edge; a narrow stage wraps the stale note under the counts
-  const stageTop = el('div', 'v3-stage-top');
-  stageTop.append(gridTag, staleTag);
-  stage.append(stageTop);
-  front.root.querySelector('.chart-head')!.append(colorBtns, modeBtns);
+  stage.append(legendBox, staleTag, gridTag);
   const setFrontMode = (m: '3d' | '2d') => {
     if (m === '3d' && !stack3d) m = '2d';
     frontMode = m;
-    stage.classList.toggle('flat', m === '2d');
+    stage.dataset.view = m === '3d' ? '3d' : 'flat';
     [...modeBtns.children].forEach((b, i) => b.classList.toggle('active', (i === 0) === (m === '3d')));
     try { localStorage.setItem('rollfem.v3.front', m); } catch { /* private mode */ }
     dirty = true;
   };
   setFrontMode(frontMode);
-  const chartGrid = el('div', 'v3-charts');
-  const cDefl = cell('v3-defl', 'ロール撓み', '各ロール軸の鉛直たわみ v(x)（支持点基準ではなく絶対値：スクリュー分の沈み込みを含む）');
-  const cFlat = cell('v3-flat', '扁平量', '接触ごとの相互接近量（両ロールの弾性扁平の和）／ WR–板は WR 側の扁平');
-  const cLoad = cell('v3-load', '接触線荷重', '接触ごとの単位幅荷重 q(x)');
-  const cGauge = cell('v3-gauge', '板厚プロファイル', '板幅中央を 0 とした偏差');
-  const cCrown = cell('v3-crown', 'クラウン比率', '板厚プロファイル ÷ 中央の板厚');
-  const cCrownChange = cell('v3-crown-change', 'クラウン比率変化', '入側 − 出側 ／ 正 = 板端側が伸びる');
-  const cEps = cell('v3-eps', '伸び率分布', '幅方向の伸び差 Δε（最も伸びの小さい位置を 0 とした値）／ 実線 = 潜在形状（張力で押さえ込まれる分を含む）／ 塗り = 顕在化（波）');
-  const cSig = cell('v3-sig', '前方張力分布', '各スライスの張力 σf(x) ／ 破線 = 設定平均 ／ 下限 = 座屈、上限 = 降伏で頭打ち');
-  const cPress = cell('v3-press', '噛み込み域の圧力 p(x, z)', '材料 FEM ／ 横 = 幅方向、縦 = 接触弧（上 = 入側、下 = 出側、弧長は列ごと）／ 摩擦丘が幅方向にどう変わるか');
-  const cFlow = cell('v3-flow', '横流れ速度 u_x(x, z)', '材料 FEM ／ ロール周速比 [%] ／ 正 = +x 側へ（板端へ広がる流れ）');
-  chartGrid.append(cDefl.root, cFlat.root, cLoad.root, cGauge.root, cCrown.root, cEps.root, cSig.root, cPress.root, cFlow.root, cCrownChange.root);
 
-  // the headline numbers as chips over the front view, like the 2D top bar
+  // The sheet: every chart is a profile across the width, so they are drawn wide and shallow
+  // and stacked on a shared width axis, a group to an axis - only the foot of a group prints
+  // its numbers, and the same x lies at the same place down a column. Pointing at one chart
+  // shows that x on every chart in its column (`HoverLink`).
+  const cDefl = cell('v3-defl', '撓み', 'µm', '各ロール軸の鉛直たわみ v(x)。支持点基準ではなく絶対値で、スクリュー分の沈み込みを含む。');
+  const cFlat = cell('v3-flat', '扁平量', 'µm', '接触ごとの相互接近量（両ロールの弾性扁平の和）。WR–板は WR 側の扁平。');
+  const cLoad = cell('v3-load', '接触線\u200b荷重', 'kN/mm', '接触ごとの単位幅荷重 q(x)。');
+  const cGauge = cell('v3-gauge', '板厚\u200bプロファイル', 'µm', '板幅中央を 0 とした板厚の偏差。破線が入側、実線が出側。');
+  const cCrown = cell('v3-crown', 'クラウン比率', '%', '板厚プロファイル ÷ 中央の板厚。');
+  const cCrownChange = cell('v3-crown-change', 'クラウン比率\u200b変化', '%', '入側 − 出側。正のところは板端側が中央より伸びる（耳波の側）。');
+  const cEps = cell('v3-eps', '伸び率\u200b分布', 'I-unit', '幅方向の伸び差 Δε。最も伸びの小さい位置を 0 とした値。実線は潜在形状（張力で押さえ込まれる分を含む）、塗りは顕在化した分（波）。');
+  const cSig = cell('v3-sig', '前方張力\u200b分布', 'MPa', '各スライスの張力 σf(x)。破線は設定平均。下限は座屈、上限は降伏で頭打ち。');
+  const cPress = cell('v3-press', '圧力 p(x, z)', 'MPa', '材料 FEM の噛み込み域の圧力。横が幅方向、縦が接触弧（上が入側、下が出側、弧長は列ごと）。摩擦丘が幅方向にどう変わるか。');
+  const cFlow = cell('v3-flow', '横流れ速度\u200bu_x(x, z)', '%', '材料 FEM の横流れ速度。ロール周速に対する比 [%]。正は +x 側へ（板端へ広がる流れ）。');
+  const sheet = el('div', 'v3-sheet');
+  /** a column of the sheet: its groups, each a head (name, what its axis is) and its charts */
+  const column = (groups: [string, string, { root: HTMLElement }[]][]) => {
+    const col = el('div', 'v3-sheet-col');
+    for (const [name, axis, cells] of groups) {
+      const head = el('div', 'v3-group-head');
+      head.append(el('span', 'v3-group-name', name), el('span', 'v3-group-axis', axis));
+      col.append(head, ...cells.map((c) => c.root));
+    }
+    return col;
+  };
+  sheet.append(
+    column([
+      ['ロール', '横軸は胴長方向の位置 mm', [cDefl, cFlat, cLoad]],
+      ['噛み込み域', '横軸は板幅方向の位置 mm', [cPress, cFlow]],
+    ]),
+    column([
+      ['板プロフィル', '横軸は板幅方向の位置 mm', [cGauge, cCrown, cCrownChange]],
+      ['形状と張力', '横軸は板幅方向の位置 mm', [cEps, cSig]],
+    ]),
+  );
+
+  // The status: the run button and the solve's state in one place on the left (a coupled
+  // solve adds its own rows to `state`), the four numbers a pass is judged by on the right.
   const status = el('div', 'v3-status');
-  const chip = (unit: string, label?: string) => {
-    const b = el('div', 'badge');
-    b.innerHTML = `${label ? `<i>${label}</i>` : ''}<b>—</b><span>${unit}</span>`;
-    return b;
+  const runBtn = el('button', 'btn btn-primary v3-run', '▶ 計算開始');
+  runBtn.type = 'button';
+  runBtn.title = '今の条件で収束まで解く（Space でも同じ）。計算中に押すと止まる。条件を変えると計算は止まり、結果は「未計算」になる（上の 3D 図と右の端面図・側面図は条件どおりにすぐ描き変わる）。';
+  /** a small reading after the state: a label, the number, a unit */
+  const detail = (label: string, unit = '') => {
+    const d = el('span', 'v3-detail');
+    d.innerHTML = `<i>${label}</i><b>—</b>${unit ? `<span>${unit}</span>` : ''}`;
+    return d;
+  };
+  /** one of the four numbers; `strip` marks the ones about the strip with the strip's colour */
+  const figure = (label: string, unit: string, strip: boolean) => {
+    const f = el('div', strip ? 'v3-fig v3-fig-strip' : 'v3-fig');
+    f.innerHTML = `<span class="v3-fig-label">${label}</span><span class="v3-fig-value"><b>—</b><span>${unit}</span></span>`;
+    return f;
   };
   const chips = {
-    mill: chip('', 'ミル'), force: chip('tonf', '荷重'), h1: chip('mm', '平均板厚'),
-    crown: chip('µm', 'C25'), manifest: chip('I-unit', '顕在形状'), conv: chip('', ''),
-    res: chip('', '残差'), ms: chip('ms', '解法'), fistr: chip('', 'FrontISTR'),
+    force: figure('荷重', 'tonf', false), h1: figure('出側板厚 平均', 'mm', true),
+    crown: figure('クラウン C25', 'µm', true), manifest: figure('顕在形状', 'I-unit', true),
+    conv: el('span', 'v3-conv'), res: detail('残差'), ms: detail('解法', 'ms'), fistr: el('div', 'badge v3-fistr'),
   };
+  chips.fistr.innerHTML = '<i>FrontISTR</i><b>—</b>';
   chips.fistr.hidden = true;
   chips.fistr.title = 'ソリッド要素の FEM（FrontISTR）で解いた撓み・接触線荷重の、このモデルとの差（板中央の差と、最大差のモデル最大値に対する比）。計算が収束するたびに解き直す（粗い網で数分）。';
   chips.conv.innerHTML = '<i class="v3-dot"></i><b>—</b>';
@@ -208,26 +258,34 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     '「推定中」はまだ手がかりが無いとき、「不明」は残差が 80 反復下がらず補正ラウンドにも進めないとき（収束しない可能性が高い）。',
   ].join('\n');
   chips.res.title = '外側 Newton の相対残差（力の不釣り合い ÷ 最大の力、収束判定 2e-6）／ 材料 FEM のときはその補正の変化量（荷重比、収束判定 2e-3）';
-  const runBtn = el('button', 'btn btn-primary v3-run', '▶ 計算開始');
-  runBtn.type = 'button';
-  runBtn.title = '今の条件で収束まで解く（Space でも同じ）。計算中に押すと止まる。条件を変えると計算は止まり、結果は「未計算」になる（上の 3D 図と右の端面図・側面図は条件どおりにすぐ描き変わる）。';
-  status.append(runBtn, chips.mill, chips.force, chips.h1, chips.crown, chips.manifest, chips.conv, chips.res, chips.ms, chips.fistr);
+  const runBox = el('div', 'v3-run-box');
+  const state = el('div', 'v3-state');
+  const stateDetail = el('div', 'v3-state-detail');
+  stateDetail.append(chips.res, chips.ms);
+  state.append(chips.conv, stateDetail);
+  runBox.append(runBtn, state);
+  const readout = el('div', 'v3-readout');
+  readout.append(chips.force, chips.h1, chips.crown, chips.manifest, chips.fistr);
   const warnBox = el('div', 'v3-warnings');
-  status.append(warnBox);
+  status.append(runBox, readout, warnBox);
   const setChip = (c: HTMLElement, text: string, tone?: 'ok' | 'warn' | 'bad') => {
     const b = c.querySelector('b')!;
     if (b.textContent !== text) b.textContent = text;
     // the tone only: 'busy' and 'v3-stale' are set by their own owners
     for (const t of ['ok', 'warn', 'bad'] as const) c.classList.toggle(t, t === tone);
   };
-  const hint = el('div', 'v3-hint', 'Space=計算開始／停止 ／ R=再初期化 ／ チャート上にポインタで数値読み取り');
-  centre.append(status, front.root, chartGrid, hint);
+  const hint = el('div', 'v3-hint', 'Space で計算の開始・停止、R で最初から。チャートを指すと、同じ列のチャート全部に同じ位置の値が出る。');
+  centre.append(status, front, sheet, hint);
 
-  const frontView = new FrontView(front.canvas);
+  const frontView = new FrontView(flatCanvas);
+  const hoverRolls = new HoverLink(), hoverStrip = new HoverLink();
+  // the unit is in each chart's heading, beside its name
+  const line = (c: { canvas: HTMLCanvasElement }, link: HoverLink) => new LineChart(c.canvas, { link, unitInPlot: false });
   const charts = {
-    defl: new LineChart(cDefl.canvas), flat: new LineChart(cFlat.canvas), load: new LineChart(cLoad.canvas),
-    gauge: new LineChart(cGauge.canvas), crown: new LineChart(cCrown.canvas), eps: new LineChart(cEps.canvas), sig: new LineChart(cSig.canvas),
-    press: new HeatChart(cPress.canvas), flow: new HeatChart(cFlow.canvas), crownChange: new LineChart(cCrownChange.canvas),
+    defl: line(cDefl, hoverRolls), flat: line(cFlat, hoverRolls), load: line(cLoad, hoverRolls),
+    press: new HeatChart(cPress.canvas, { link: hoverRolls }), flow: new HeatChart(cFlow.canvas, { link: hoverRolls }),
+    gauge: line(cGauge, hoverStrip), crown: line(cCrown, hoverStrip), crownChange: line(cCrownChange, hoverStrip),
+    eps: line(cEps, hoverStrip), sig: line(cSig, hoverStrip),
   };
 
   /* ── right panel: results ── */
@@ -468,8 +526,46 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     return h.root;
   };
 
+  /** each folded input section's line under its head: the box, and what it says */
+  let summaries: { box: HTMLElement; items: () => [string, string][] }[] = [];
+  /** the text a dial or a choice in the left panel shows, exactly as the panel prints it */
+  const shown = (key: string): string => {
+    const r = left.querySelector(`[data-key="${key}"]`);
+    const v = r?.querySelector<HTMLInputElement>('input.ctrl-value');
+    if (v) return v.value;
+    return r?.querySelector<HTMLSelectElement>('select.ctrl-select')?.selectedOptions[0]?.textContent ?? '';
+  };
+  /**
+   * The settings a folded section holds, on a line under its head, so the pass reads without
+   * opening anything: each item a name and the dial's own text (the same digits and unit).
+   * The stylesheet shows it only while the section is folded; a click on it opens the section.
+   */
+  const summarise = (sec: SectionHandle, items: () => [string, string][]) => {
+    const box = el('div', 'v3-sum');
+    box.addEventListener('click', () => sec.root.querySelector<HTMLButtonElement>('.panel-head-btn')?.click());
+    sec.root.insertBefore(box, sec.body);
+    summaries.push({ box, items });
+  };
+  /** the lines, rewritten only where their text changed */
+  const drawSummaries = () => {
+    for (const s of summaries) {
+      const items = s.items();
+      const sig = items.map((i) => i.join('\u0002')).join('\u0001');
+      if (s.box.dataset.sig === sig) continue;
+      s.box.dataset.sig = sig;
+      s.box.replaceChildren(...items.map(([label, value]) => {
+        // a setting that is a choice (the model, the mode) is its own value
+        const item = el('span', 'v3-sum-item');
+        if (value) item.append(el('i', '', label), value); else item.append(label);
+        return item;
+      }));
+    }
+  };
+  const STRIP_MODEL_SHORT = { fem3d: '3 次元 FEM', fem: '平面 FEM', slab: 'スラブ法' } as const;
+
   const buildLeft = () => {
     left.replaceChildren();
+    summaries = [];
     // control
     const ctlSec = section('制御・目標', { remember: false, open: false });
     ctlSec.body.append(select<'gauge' | 'force' | 'screw'>('制御モード', [
@@ -490,11 +586,15 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     ctlSec.body.append(num('screw', '圧下位置 S', 'mm', -2, 8, 0.005, 1e-3, '無負荷でロールが板に触れる位置を 0 とした締め込み量。負は開き（クラウンや AS-U でスタックが予圧されていると必要になる）。出側板厚一定／荷重一定のときは解いた S を表示し（灰色）、「圧下位置 手動」に切り替えるとその値から始まる（ダイヤルの範囲 −2〜8 mm に丸める）。'));
     ctlSec.body.append(num('leveling', 'レベリング ΔS', 'µm', -300, 300, 5, 1e-6, '駆動側と作業側のスクリュー差。正で +x 側が締まる。'));
     ctlSec.body.append(num('housingK', 'ハウジング剛性', 'MN/mm', 1, 30, 0.5, 1e9, '支持点（チョックまたはサドル）1 点あたりの剛性。ロールの曲げ・扁平はモデルが計算するので、ここはハウジングとチョックだけ。'));
+    summarise(ctlSec, () => (params.mode === 'gauge' ? [['出側板厚一定', ''], ['圧下率', shown('reduction')]]
+      : params.mode === 'force' ? [['荷重一定', ''], ['目標', shown('targetForce')]]
+        : [['圧下位置 手動', ''], ['S', shown('screw')]]));
     left.append(ctlSec.root);
 
     // actuators
     const actSec = section('アクチュエータ', { remember: false, open: false });
     actSec.body.append(num('wrBender', 'WR ベンダー', 'tonf/chock', -60, 200, 2, TONF, 'チョック 1 個あたりの力 [tonf/チョック]。正で上 WR のチョックを持ち上げる（インクリーズベンド）。等価的にロールクラウンを増やす。'));
+    summarise(actSec, () => [['WR ベンダー', shown('wrBender')]]);
     left.append(actSec.root);
 
     // housing deformation mode
@@ -527,6 +627,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     };
     refreshHousingHint();
     hSec.body.append(derived);
+    summarise(hSec, () => [['変形考慮', params.housingMode ? 'ON' : 'OFF']]);
     left.append(hSec.root);
 
     // profiles
@@ -534,6 +635,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     profSec.body.append(num('wrCrown', 'WR 研削クラウン', 'µm', -400, 400, 5, 1e-6, '直径クラウン: 中央と胴端の直径差。正で中央が太い（放物線）。'));
     profSec.body.append(num('wrThermal', 'WR サーマルクラウン', 'µm', 0, 200, 5, 1e-6, '熱膨張による直径クラウン（入力値。温度分布は解かない）。'));
     profSec.body.append(num('burCrown', 'BUR クラウン', 'µm', -600, 1000, 10, 1e-6, '直径クラウン。'));
+    summarise(profSec, () => [['WR クラウン', shown('wrCrown')], ['サーマル', shown('wrThermal')], ['BUR クラウン', shown('burCrown')]]);
     left.append(profSec.root);
 
     // strip
@@ -555,7 +657,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     stripSec.body.append(num('h0', '入側板厚 h₀', 'mm', 0.05, 6, 0.01, 1e-3, undefined, true));
     stripSec.body.append(num('entryCrown', '入側クラウン', 'µm', -100, 200, 2, 1e-6, '入側板厚の中央と板端の差（放物線）。板端だけが急に薄くなる分は下の「入側エッジドロップ」で足す。出側クラウン比が入側と一致すれば平坦。入側の板厚は板幅のどこでも h₀ の 25 % で頭打ち（下回ると警告）。'));
     stripSec.body.append(num('entryEdgeDrop', '入側エッジドロップ', 'µm', -100, 200, 2, 1e-6, '板端での落ち込み: 板端が放物線（入側クラウン）よりどれだけ薄いか。板端から「エッジドロップ 範囲」の内側で 0、そこから板端へ距離の 2 乗で深くなる（範囲の内端で傾き 0、板端で最も急）。負は板端が厚い（エッジアップ）。出側と同じ読み方（板端から 100 mm と 15 mm の板厚の差、放物線の分を含む）の入側の値は右の「板形状 ▸ 入側 C25 / エッジドロップ」。入側の板厚は板幅のどこでも h₀ の 25 % で頭打ち（下回ると警告）。'));
-    stripSec.body.append(num('entryEdgeDropWidth', 'エッジドロップ 範囲', 'mm', 5, 300, 5, 1e-3, '入側エッジドロップが始まる位置の板端からの距離（板幅の半分まで）。狭いほど板端で急に落ちる。板上の節点間隔（3D 図の左上「分割数」の材料の括弧内）の数倍はないと、落ち込みが数点でしか表せない。'));
+    stripSec.body.append(num('entryEdgeDropWidth', 'エッジドロップ 範囲', 'mm', 5, 300, 5, 1e-3, '入側エッジドロップが始まる位置の板端からの距離（板幅の半分まで）。狭いほど板端で急に落ちる。板上の節点間隔（3D 図の右下「分割数」の材料の括弧内）の数倍はないと、落ち込みが数点でしか表せない。'));
     stripSec.body.append(num('backTension', '後方張力', 'MPa', 0, 300, 5, 1e6));
     stripSec.body.append(num('frontTension', '前方張力', 'MPa', 0, 300, 5, 1e6, '幅方向の平均値。分布は伸び差から決まる。'));
     stripSec.body.append(num('mu', '摩擦係数 μ', '', 0.01, 0.3, 0.005, 1));
@@ -591,6 +693,10 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     } else {
       stripSec.body.append(num('postBucklingStiffness', '座屈後の剛性比 β', '', 0, 1, 0.01, 1, '0 で座屈限界の頭打ち（超過した伸びは全部波）。1 で座屈しない板と同じ。目安 0.01〜0.1（有効幅の式 ½√(σcr/σ) からの概算。片側が自由縁の板端ではさらに小さいはずで、実測との照合はしていない）。4Hi・301 点・局所扁平・前後の平均の張力で潜在形状 1481 → β 0.02: 972、0.05: 681、0.1: 478 I-unit、壁（座屈域の立ち上がり）1375 → 883 / 590 / 383。'));
     }
+    summarise(stripSec, () => [
+      [STRIP_MODEL_SHORT[params.stripModel], ''], ['幅', shown('width')], ['入側', shown('h0')], ['μ', shown('mu')],
+      ['後方', shown('backTension')], ['前方', shown('frontTension')],
+    ]);
     left.append(stripSec.root);
 
     // roll geometry
@@ -604,6 +710,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     geoSec.body.append(num('burLs', 'BUR 支持スパン', 'mm', 600, 3200, 10, 1e-3, SPAN_HINT));
     geoSec.body.append(num('burDn', 'BUR ネック径', 'mm', 200, 1400, 10, 1e-3, NECK_HINT));
     geoSec.body.append(num('Eroll', 'ロール ヤング率', 'GPa', 100, 300, 1, 1e9));
+    summarise(geoSec, () => [['WR', shown('wrD')], ['BUR', shown('burD')], ['胴長', shown('wrLb')]]);
     left.append(geoSec.root);
 
     // numerics / display
@@ -637,6 +744,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     }
     numSec.body.append(slider({ label: '撓み表示倍率', min: 10, max: 2000, step: 10, log: true, value: magnify, onInput: (v) => { magnify = v; dirty = true; } }).root);
     numSec.body.append(slider({ label: '断面変形 表示倍率', min: 10, max: 5000, step: 10, log: true, value: sectionMagnify, onInput: (v) => { sectionMagnify = v; dirty = true; } }).root);
+    summarise(numSec, () => [['幅方向 分割数', shown('stations')], ['扁平', params.flatModel === 'ring' ? '断面 FEM' : 'Hertz 式']]);
     left.append(numSec.root);
 
     syncModeDials();
@@ -666,6 +774,16 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   buildLeft();
 
   /* ── drawing ── */
+  /** the look the 3D stage's backdrop was last set for */
+  let groundLook = '';
+  /** the stage's backdrop from the look's tokens, when the look has changed */
+  const syncGround = () => {
+    const look = document.documentElement.dataset.theme ?? 'classic';
+    if (!stack3d || look === groundLook) return;
+    groundLook = look;
+    const css = getComputedStyle(document.documentElement);
+    stack3d.setGround(css.getPropertyValue('--v3-stage-top'), css.getPropertyValue('--v3-stage-bot'));
+  };
   /** the screw position the greyed dial last showed [m] */
   let screwShown = NaN;
   const drawAll = () => {
@@ -673,6 +791,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     const st = solver.stack;
     const halfWidth = -R.x[0];
     const strip = params.width / 2;
+    syncGround();
     if (frontMode === '3d' && stack3d) {
       const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
       const mpa = (v: number) => `${(v / 1e6).toFixed(0)} MPa`;
@@ -730,7 +849,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
         deflSeries.push({ label: `${r.id} FrontISTR`, color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, r.x, r.vFem.map((v) => v + onBearing), 1e6) });
       }
     }
-    charts.defl.draw(deflSeries, { unit: 'µm', halfWidth, strip, zero: true });
+    charts.defl.draw(deflSeries, { unit: 'µm', halfWidth, strip, zero: true, xLabels: false });
 
     const contactLabel = (c: { a: number; b: number }) => `${st.rolls[c.a].id}–${st.rolls[c.b].id}`;
     // an open gap is no flattening: zero where the contact carries no load,
@@ -747,7 +866,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       const on = fl.fem.map((v, i) => ((fistrShown!.q[i] ?? 0) > 0 ? v : null));
       flatSeries.push({ label: 'WR–板 FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, fistrShown.x, on, 1e6) });
     }
-    charts.flat.draw(flatSeries, { unit: 'µm', halfWidth, strip, zero: true });
+    charts.flat.draw(flatSeries, { unit: 'µm', halfWidth, strip, zero: true, xLabels: false });
 
     const kn = (a: Float64Array) => Float64Array.from(a, (v) => v / 1e6);
     const onBarrels = (c: { q: Float64Array; weight: Float64Array }) =>
@@ -786,7 +905,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       const on = ex.fem.map((v, i) => (ex.model[i] === null ? null : v));
       gaugeSeries.push({ label: '出側 h₁ FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, fistrShown.x, on, 2e6) });
     }
-    charts.gauge.draw(gaugeSeries, { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true });
+    charts.gauge.draw(gaugeSeries, { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true, xLabels: false });
     // The same profiles over their centre thickness, the crown ratio. Where the exit's
     // follows the entry's the pass kept the shape; before lateral flow, entry minus
     // exit is the elongation relative to the centre (1 % = 1000 I-units).
@@ -794,7 +913,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     charts.crown.draw([
       { label: '入側 h₀', color: '#7fb2ff', x: R.x, y: r0, dash: true, width: 2 },
       { label: '出側 h₁', color: STRIP_COLOR, x: R.x, y: r1, width: 2 },
-    ], { unit: '%', halfWidth: strip * 1.05, strip, zero: true });
+    ], { unit: '%', halfWidth: strip * 1.05, strip, zero: true, xLabels: false });
     // How far the pass moved the crown ratio, entry less exit: zero where the shape was
     // kept, positive where the edge was rolled thinner relative to the centre than it
     // came in - there the edge is the longer fibre (edge waves), negative the centre.
@@ -816,7 +935,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     charts.eps.draw([
       { label: '潜在 Δε', color: '#7fe4ff', x: R.profile.x, y: iuFromMin(R.profile.latent) },
       { label: '顕在（波）', color: '#ff6b81', x: R.profile.x, y: iuFromMin(R.profile.wave), fill: true },
-    ], { unit: 'I-unit', halfWidth: strip * 1.05, strip, zero: true, symmetric: false });
+    ], { unit: 'I-unit', halfWidth: strip * 1.05, strip, zero: true, symmetric: false, xLabels: false });
 
     charts.sig.draw([
       { label: 'σf', color: '#96e6b4', x: R.x, y: Float64Array.from(R.sigmaF, (v) => v / 1e6), width: 2 },
@@ -829,12 +948,12 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       const f = R.fem;
       // the FEM's own grid: a column per slice, its node columns on the slices' edges
       if (f) {
-        charts.press.draw(f.p, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05 });
+        charts.press.draw(f.p, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: 'MPa', scale: 1e-6, halfWidth: strip * 1.05, xLabels: false });
         charts.flow.draw(f.ux, f.ncol, f.nrow, f.xNode, f.arcNode, { unit: '%', scale: 100, halfWidth: strip * 1.05, symmetric: true });
       } else {
         // no field to draw: the slab model has none; a FEM has none until a solve has run its first correction round
         const note = params.stripModel === 'slab' ? '材料モデルが平面 FEM／3 次元 FEM のときに表示' : '「計算開始」で解くと表示';
-        charts.press.draw(null, 0, 0, R.x, R.arc, { unit: 'MPa', scale: 1, halfWidth: strip, note });
+        charts.press.draw(null, 0, 0, R.x, R.arc, { unit: 'MPa', scale: 1, halfWidth: strip, note, xLabels: false });
         charts.flow.draw(null, 0, 0, R.x, R.arc, { unit: '%', scale: 1, halfWidth: strip, note });
       }
     }
@@ -924,7 +1043,6 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     }
 
     // chips: nothing to show before the first iteration on this mesh, faded while not the current solution
-    setChip(chips.mill, MILL_LABEL[params.mill]);
     setChip(chips.force, none ? '—' : (R.force / TONF).toFixed(0));
     setChip(chips.h1, none ? '—' : (R.h1Mean * 1e3).toFixed(3));
     setChip(chips.crown, none ? '—' : (R.crown * 1e6).toFixed(0));
@@ -943,7 +1061,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
         : R.iterations === 0 ? '未計算: 条件どおりの形状を表示中（「計算開始」で解く）'
           : '未計算: 形状は今の条件、変形と荷重は前回の計算（「計算開始」で解く）';
       if (staleTag.textContent !== tagText) staleTag.textContent = tagText;
-      for (const e of [chartGrid, loadSec.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
+      for (const e of [sheet, loadSec.root, contactSec.root, housingSec.root]) e.classList.toggle('v3-stale', faded);
       // 板形状 and 解析 hold rows the settings decide as well: only the result rows fade
       for (const [key, row] of rowFade) row.classList.toggle('v3-stale', faded && !SETTING_ROWS.has(key));
     }
@@ -1036,6 +1154,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       contactGrid = fresh;
       contactKeys = keys;
     }
+    drawSummaries();
     R.contacts.forEach((c) => contactGrid.set(`c:${c.a}-${c.b}`, dash((c.total / TONF).toFixed(1))));
     R.rolls.forEach((r) => {
       if (r.def.support !== 'free') contactGrid.set(`r:${r.def.id}`, dash(r.reactions.map((v) => (v / TONF).toFixed(0)).join(' / ')));
