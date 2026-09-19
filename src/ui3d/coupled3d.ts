@@ -32,8 +32,13 @@ import type { XYSeries } from './charts3d';
 import './coupled3d.css';
 
 const TONF = 9.80665e3;
-/** FrontISTR's load steps per round (the bridge's default for `roll-coupled`) */
-const SUBSTEPS = 2;
+/**
+ * FrontISTR's load steps per round: the rolls' contour moves once a step. Four against two (T105,
+ * 4Hi default, one round): the same answer (δ within 0.01 µm), 1.55 times the solver's work, and the
+ * rolls redrawn four times a round instead of twice - the longest wait between redraws 125 s
+ * instead of 173 s at a light load. Three spaces them unevenly for the work of four.
+ */
+const SUBSTEPS = 4;
 /** the strip's material model, as the contour's status plate names where the strip's values come from */
 const STRIP_SOURCE: Record<string, string> = { fem: '平面 FEM', fem3d: '3 次元 FEM', slab: 'スラブ法' };
 /** the coupling's thresholds, as RollCoupling holds them (shown beside the moves) */
@@ -145,7 +150,7 @@ export class CoupledRun {
       open: true,
       hint: 'ロールの変形を FrontISTR のソリッド（WR と BUR、ロール同士は接触）で解き、アプリの板の FEM と定常まで連成する。'
         + '1 回ごとに、収束した板の荷重をソリッドに載せて解き、その WR 表面とこのモデルの WR 表面（軸の撓み＋扁平）の差 δ(x) をモデルのロールギャップに足して解き直す。'
-        + `δ の動きが ${TOL_SURFACE * 1e6} µm 以下、荷重の変化が ${TOL_FORCE * 100} % 以下になったら定常。1 回 数分（4Hi 既定で 1 回 5〜7 分、3 回ほど）。`
+        + `δ の動きが ${TOL_SURFACE * 1e6} µm 以下、荷重の変化が ${TOL_FORCE * 100} % 以下になったら定常。1 回 数分（4Hi 既定で 1 回 7〜11 分、荷重 4 段で 3 回ほど）。`
         + '「連成なし」は最初の収束（モデルだけ）の値。npm run dev の橋渡しと手元の fistr1 が要る。',
     });
     this.stats = new StatGrid();
