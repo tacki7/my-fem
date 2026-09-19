@@ -25,7 +25,7 @@ import { RollCoupling, modelRollSurface, interpolateProfile, type CouplingRound 
 import { FistrJob, type JobState } from './fistrjob';
 import { pingFrontistr, FistrError } from './frontistr';
 import { ContourView3D } from './contour3d';
-import { decodeMesh, decodeFrame, partValues, type DecodedMesh } from './fieldframe';
+import { decodeMesh, decodeFrame, partValues, type DecodedMesh, type FieldValues } from './fieldframe';
 import { synthStrip } from './fieldsynth';
 import { el, section, select, StatGrid } from '../ui/controls';
 import type { XYSeries } from './charts3d';
@@ -34,6 +34,8 @@ import './coupled3d.css';
 const TONF = 9.80665e3;
 /** FrontISTR's load steps per round (the bridge's default for `roll-coupled`) */
 const SUBSTEPS = 2;
+/** the strip's material model, as the contour's status plate names where the strip's values come from */
+const STRIP_SOURCE: Record<string, string> = { fem: '平面 FEM', fem3d: '3 次元 FEM', slab: 'スラブ法' };
 /** the coupling's thresholds, as RollCoupling holds them (shown beside the moves) */
 const TOL_SURFACE = 0.25e-6;
 const TOL_FORCE = 1e-3;
@@ -513,10 +515,24 @@ export class CoupledRun {
   frame(R: Result3D, s: { running: boolean; stale: boolean; iterated: boolean }): void {
     this.render();
     if (!this.view || !this.shown) return;
+    const p = this.host.params();
+    this.view.setSource('strip', STRIP_SOURCE[p.stripModel] ?? '材料 FEM');
+    // the rolls' stresses are FrontISTR's: without the coupling there are none to draw, and the plate says why
+    this.view.setNote(!this.enabled ? 'ロールの応力は「ロールの変形」を FrontISTR と連成にすると描く'
+      : this.phase === 'model' ? `ロールの応力は描けない: ${this.note}` : '');
     const F = R.fem?.field3d ?? null;
-    // a field of these settings: made since they last changed (by a running solve, or one stopped part way)
-    const ours = !!F && F !== this.fieldAtChange && (s.running || s.iterated || !s.stale);
-    if (F && ours) {
+    // a solve has run on these settings (running now, stopped part way, or converged)
+    const solved = s.running || s.iterated || !s.stale;
+    // a field of these settings: made since they last changed
+    const ours = !!F && F !== this.fieldAtChange && solved;
+    if (!F && p.stripModel === 'slab' && solved) {
+      // the slab model makes no field of the strip: the initial block, its values none (grey), and why
+      if (this.stripKey !== 'absent') {
+        if (this.stripKey !== 'initial') this.placeInitialStrip();
+        this.view.update('strip', { disp: null, fields: {}, label: { state: 'absent', text: 'スラブ法には板の場が無い。「材料の変形計算」を FEM にすると描く' } });
+        this.stripField = null; this.stripKey = 'absent';
+      }
+    } else if (F && ours) {
       const n = this.rounds.length;
       const [state, text]: ['running' | 'steady' | 'stale', string] = s.running
         ? ['running', n ? `補正を入れて解き直し中（連成 ${n + 1} 回目の前）` : '反復中']
@@ -532,15 +548,21 @@ export class CoupledRun {
       }
     } else if (this.stripKey !== 'initial') {
       // before a solve on these settings: the rigid-roll gap, nothing strained or stressed
-      const p = this.host.params();
-      const st = synthStrip(-1, {
-        wrR: p.wrD / 2, wrLb: p.wrLb, wrLs: p.wrLs, wrRn: p.wrDn / 2, burR: p.burD / 2, burLb: p.burLb, burLs: p.burLs, burRn: p.burDn / 2,
-        width: p.width, h0: p.h0, h1: p.h0 * (1 - p.reduction), backTension: p.backTension, frontTension: p.frontTension, v1: 1,
-      }, { arc: 8, barrel: 4, neck: 2, cut: 4, ring: 2, nx: 41, rows: 13, lay: 3 });
-      this.view.setPart(st.part);
-      this.view.update('strip', { ...st.values, label: { state: 'initial', text: '計算前' } });
+      const values = this.placeInitialStrip();
+      this.view.update('strip', { ...values, label: { state: 'initial', text: '計算前' } });
       this.stripField = null; this.stripKey = 'initial';
     }
+  }
+
+  /** the strip before a solve - the rigid-roll gap's block - placed on the view; its values all zero */
+  private placeInitialStrip(): Omit<FieldValues, 'label'> {
+    const p = this.host.params();
+    const st = synthStrip(-1, {
+      wrR: p.wrD / 2, wrLb: p.wrLb, wrLs: p.wrLs, wrRn: p.wrDn / 2, burR: p.burD / 2, burLb: p.burLb, burLs: p.burLs, burRn: p.burDn / 2,
+      width: p.width, h0: p.h0, h1: p.h0 * (1 - p.reduction), backTension: p.backTension, frontTension: p.frontTension, v1: 1,
+    }, { arc: 8, barrel: 4, neck: 2, cut: 4, ring: 2, nx: 41, rows: 13, lay: 3 });
+    this.view!.setPart(st.part);
+    return st.values;
   }
 
   // ── what is shown ──────────────────────────────────────────────────────

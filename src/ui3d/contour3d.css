@@ -89,6 +89,7 @@
 .ct3-status[data-state="initial"] .ct3-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ct3-dim); }
 .ct3-status[data-state="steady"] .ct3-dot { background: var(--ct3-green); }
 .ct3-status[data-state="stale"] .ct3-dot { background: var(--ct3-amber); }
+.ct3-status[data-state="absent"] .ct3-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ct3-faint); }
 .ct3-status-rows { border-collapse: collapse; }
 .ct3-status-rows th, .ct3-status-rows td { padding: 1px 10px 1px 0; text-align: left; white-space: nowrap; font-weight: 400; }
 .ct3-status-rows th { color: var(--ct3-ink); font-weight: 600; }
@@ -98,6 +99,9 @@
 .ct3-status-rows tr[data-state="steady"] .ct3-state { color: var(--ct3-green); }
 .ct3-status-rows tr[data-state="stale"] .ct3-state { color: var(--ct3-amber); }
 .ct3-status-rows .ct3-text { color: var(--ct3-ink); padding-right: 0; }
+.ct3-status-rows tr[data-state="absent"] .ct3-state { color: var(--ct3-faint); }
+.ct3-status-rows tr[data-state="absent"] .ct3-text { color: var(--ct3-dim); }
+.ct3-status-note { margin-top: 5px; max-width: 36em; color: var(--ct3-dim); font-size: 11.5px; line-height: 1.45; }
 
 /* views and legends, right */
 .ct3-right { position: absolute; top: 12px; right: 12px; bottom: 56px; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none; }
