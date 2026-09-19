@@ -48,7 +48,8 @@ try {
 
   // --- 3D ---------------------------------------------------------------------
   const before = c.errors.length;
-  await c.navigate(`${base}/?tab=3d`);
+  // coupling=off: 計算開始 would otherwise start FrontISTR through the bridge (minutes of fistr1)
+  await c.navigate(`${base}/?tab=3d&coupling=off`);
   // a boolean, not the solver: returned by value the solver is 0.9 MB at 81 stations and 8.5 MB at
   // 301 (4Hi), and at 301 the DevTools socket closed (1006) before it arrived - the run then ended on
   // the unsettled await with no FAIL line

@@ -29,6 +29,8 @@ export interface JobBody {
   substeps?: number;
   /** the surface and the initial state only, no solve */
   dryRun?: boolean;
+  /** kept with the job (request.json) and not used by the case: what the page compares the answer with */
+  record?: object;
 }
 
 export interface JobHandlers {
@@ -93,6 +95,11 @@ export class FistrJob {
 
   /** frame k (0 the initial state) */
   frame(k: number): Promise<ArrayBuffer> { return this.bytes(`frames/${k}.bin`); }
+
+  /** what the kind read off the finished case (result.json; `roll-coupled`: the work roll's surface) */
+  async result<T = unknown>(): Promise<T> {
+    return JSON.parse(new TextDecoder().decode(await this.bytes('result.json'))) as T;
+  }
 
   /** the job's state now */
   async status(): Promise<JobStatus> {

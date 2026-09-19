@@ -44,7 +44,8 @@ const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return
 const findings = [];
 const found = (area, what, detail) => { findings.push({ area, what, detail }); console.log(`FIND  [${area}] ${what}  ${detail ?? ''}`); };
 const c = await connect(process.env.CDP_PORT);
-const URL3D = `${base}/?tab=3d`;
+// coupling=off: 計算開始 would otherwise start FrontISTR through the bridge (minutes of fistr1 a pass)
+const URL3D = `${base}/?tab=3d&coupling=off`;
 const fresh = async () => {
   c.errors.length = 0;
   await c.navigate(URL3D);

@@ -173,6 +173,28 @@
   .ct3-legend { width: 200px; }
 }
 
+/* short: the stage of a page with charts under it (the 3D tab's is 300-400 px). The legends
+   side by side with short bars, the notes out; the readout and the switches stay. */
+@container (max-height: 600px) {
+  .ct3-right { bottom: auto; }
+  .ct3-legends { flex-direction: row; align-items: flex-start; overflow: visible; }
+  .ct3-legend { width: 204px; padding: 7px 9px; }
+  .ct3-legend-head { margin-bottom: 4px; }
+  .ct3-scale { height: clamp(52px, 17cqh, 110px); margin: 6px 0 6px; }
+  .ct3-tick { font-size: 10px; }
+  .ct3-note { display: none; }
+  .ct3-status { padding: 6px 9px 5px; }
+  .ct3-status-rows { font-size: 11px; }
+}
+@container (max-height: 420px) {
+  .ct3-legend-foot .ct3-ramp { display: none; }
+  .ct3-scale { height: 48px; }
+  .ct3-toolbar { padding: 4px 6px; gap: 4px 6px; }
+  .ct3-btn { padding: 4px 7px; }
+  .ct3-readout { padding: 5px 9px; min-width: 0; }
+  .ct3-read-pos { display: none; }
+}
+
 /* the looks */
 :root[data-theme="modern"] .ct3 { --ct3-plate: rgba(20, 23, 29, 0.84); --ct3-plate-line: rgba(255, 255, 255, 0.09); }
 :root[data-theme="chic"] .ct3 { --ct3-plate: rgba(26, 22, 20, 0.84); --ct3-plate-line: rgba(214, 190, 150, 0.16); --ct3-ink: #ece4d8; --ct3-dim: #b5a993; --ct3-faint: #7d7365; }

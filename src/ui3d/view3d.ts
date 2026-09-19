@@ -21,6 +21,7 @@ import { StackView3D } from './stack3d';
 import { ringCompliance } from '../sim3d/ring';
 import { housingCompliance, halfStiffness, housingPlan, housingInScope } from '../sim3d/housing';
 import { pingFrontistr, solveFrontistr, FistrError, type FistrResult } from './frontistr';
+import { CoupledRun } from './coupled3d';
 
 const TONF = 9.80665e3;
 /** the screw dial's travel [m]; the solver itself allows −10 to 20 mm */
@@ -100,6 +101,14 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   let fistrShown: FistrResult | null = null;
   /** why there is no answer: the bridge's error, or nothing at the other end */
   let fistrNote = '';
+  /* ── the rolls from FrontISTR, coupled to the steady state, and the contours (coupled3d.ts):
+     it runs its rounds between this loop's solves; here only the connections ── */
+  const coupled = new CoupledRun({
+    solver, params: () => params,
+    resume: () => { running = true; stale = true; iterated = true; dirty = true; },
+    changed: () => { dirty = true; },
+    enabledChanged: (on) => { if (on && fistrOn) setFistr(false); syncModeDials(); },
+  });
 
   /* ── DOM ── */
   const left = el('aside', 'panel v3-panel');
@@ -140,14 +149,17 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   const labelBox = el('div', 'v3-labels v3-overlay');
   const flatCanvas = el('canvas');
   flatCanvas.className = 'v3-flat';
-  stage.append(glCanvas, labelBox, flatCanvas);
+  stage.append(glCanvas, labelBox, flatCanvas, coupled.contourBox);
   front.append(stageHead, stage);
-  let frontMode: '3d' | '2d' = (() => { try { return localStorage.getItem('rollfem.v3.front') === '2d' ? '2d' : '3d'; } catch { return '3d'; } })();
+  type FrontMode = '3d' | '2d' | 'contour';
+  const FRONT_MODES: FrontMode[] = ['3d', '2d', 'contour'];
+  let frontMode: FrontMode = (() => { try { const v = localStorage.getItem('rollfem.v3.front'); return v === '2d' || v === 'contour' ? v : '3d'; } catch { return '3d'; } })();
   let stack3d: StackView3D | null = null;
   try { stack3d = new StackView3D(glCanvas, labelBox); } catch { frontMode = '2d'; }
   const modeBtns = buttonRow([
     { text: '3D', onClick: () => setFrontMode('3d') },
     { text: '正面図', onClick: () => setFrontMode('2d') },
+    { text: 'コンター', title: '板（材料 FEM）とロール（FrontISTR）の応力・ひずみのコンター図。計算開始前は初期状態、計算とともに描き変わる', onClick: () => setFrontMode('contour') },
   ]);
   modeBtns.classList.add('v3-front-mode');
   let colorBy: 'load' | 'stress' = (() => { try { return localStorage.getItem('rollfem.v3.color') === 'stress' ? 'stress' : 'load'; } catch { return 'load'; } })();
@@ -178,11 +190,14 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   const gridTag = el('div', 'v3-grid-tag v3-overlay');
   gridTag.append(el('span', 'v3-grid-title', '分割数'), el('span', '', 'ロール'), gridRoll, el('span', '', '材料'), gridStrip);
   stage.append(legendBox, staleTag, gridTag);
-  const setFrontMode = (m: '3d' | '2d') => {
+  const setFrontMode = (m: FrontMode) => {
     if (m === '3d' && !stack3d) m = '2d';
     frontMode = m;
-    stage.dataset.view = m === '3d' ? '3d' : 'flat';
-    [...modeBtns.children].forEach((b, i) => b.classList.toggle('active', (i === 0) === (m === '3d')));
+    // the contours bring their own picture and overlays: a view of their own hides the stack's
+    stage.dataset.view = m === '3d' ? '3d' : m === '2d' ? 'flat' : 'contour';
+    colorBtns.hidden = m === 'contour';
+    coupled.setShown(m === 'contour');
+    [...modeBtns.children].forEach((b, i) => b.classList.toggle('active', FRONT_MODES[i] === m));
     try { localStorage.setItem('rollfem.v3.front', m); } catch { /* private mode */ }
     dirty = true;
   };
@@ -262,7 +277,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   const state = el('div', 'v3-state');
   const stateDetail = el('div', 'v3-state-detail');
   stateDetail.append(chips.res, chips.ms);
-  state.append(chips.conv, stateDetail);
+  state.append(chips.conv, stateDetail, coupled.row);
   runBox.append(runBtn, state);
   const readout = el('div', 'v3-readout');
   readout.append(chips.force, chips.h1, chips.crown, chips.manifest, chips.fistr);
@@ -383,7 +398,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     .add('hTilt', '圧下ロールの傾き（駆動側 − 操作側）', 'µm')
     .add('hModulus', 'ミル剛性（荷重 ÷ 窓の開き）', 'MN/mm');
   housingSec.body.append(housingStats.root);
-  right.append(loadSec.root, fistrSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
+  right.append(loadSec.root, coupled.panel, fistrSec.root, shapeSec.root, endSec.root, sideSec.root, contactSec.root, secSec.root, numSec2.root);
 
   /* ── left panel: inputs ── */
   const dials = new Map<string, Dial>();
@@ -443,6 +458,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     iterated = false;
     dirty = true;
     dropFistr();
+    coupled.settingsChanged();
   };
   /** the check's answer and any request in flight go with the settings they were for */
   const dropFistr = () => {
@@ -452,7 +468,8 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
   };
   /** a converged solve with the check on: ask the bridge (nothing while one is running) */
   const maybeRunFistr = () => {
-    if (!fistrOn || stale || running || fistrBusy) return;
+    // the coupling's rounds use the bridge (one job at a time) and answer the same question
+    if (!fistrOn || coupled.enabled || stale || running || fistrBusy) return;
     const ctl = new AbortController();
     fistrBusy = ctl;
     fistrT0 = performance.now();
@@ -498,17 +515,21 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     settingsChanged();
   };
   const startSolve = () => {
-    if (running || !stale) return;
+    if (running || coupled.busy) return;
+    // converged, the coupling's rounds not finished (stopped or failed): on with the next round
+    if (!stale) { coupled.resume(); dirty = true; return; }
     running = true;
+    coupled.begin();
     dirty = true;
   };
   const stopSolve = () => {
-    if (!running) return;
+    if (!running && !coupled.busy) return;
     running = false;
+    coupled.stop();
     dirty = true;
   };
   runBtn.addEventListener('click', () => {
-    if (running) stopSolve(); else startSolve();
+    if (running || coupled.busy) stopSolve(); else startSolve();
     // the key handler below owns Space; a focused button would take it as a click as well
     runBtn.blur();
   });
@@ -734,7 +755,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       '収束のたびに、同じ板の荷重を上半分の WR と BUR（ソリッド要素、ロール同士は接触解析）に載せて FrontISTR で解き、撓み・線荷重・出側プロファイルをグラフに白の破線で重ね、右の「FrontISTR 照合」に並べる。'
         + 'npm run dev の橋渡し（tools/frontistr/bridge.mjs）と手元の fistr1 が要る。1 回 数分（粗い網）。');
       fs.root.dataset.key = 'fistr';
-      numSec.body.append(fs.root);
+      numSec.body.append(coupled.control(), fs.root);
     }
     if (params.flatModel === 'ring') {
       numSec.body.append(num('ringNt', 'ロール 周方向 分割 nt', '', 32, 1600, 16, 1, '断面リングの周方向分割。既定 800 × 半径方向 12。接触半幅（数 mm）を数節点で解像するには 400 以上。潜在形状が収束値から 2 % 以内に入るのは 800 × 12 から（400 × 8 では 5 % 大きい。旧既定の局所扁平で測定）。'));
@@ -769,6 +790,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     on('postBucklingModel', params.tensionFeedback);
     on('postBucklingStiffness', params.tensionFeedback);
     on('housingK', !housingOn);
+    on('fistr', !coupled.enabled);
   };
 
   buildLeft();
@@ -792,7 +814,12 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     const halfWidth = -R.x[0];
     const strip = params.width / 2;
     syncGround();
-    if (frontMode === '3d' && stack3d) {
+    // the coupling's FrontISTR values and the uncoupled pass, over the charts below
+    const ov = coupled.overlays(R);
+    coupled.frame(R, { running, stale, iterated });
+    if (frontMode === 'contour') {
+      // the contour view draws itself (coupled3d.ts)
+    } else if (frontMode === '3d' && stack3d) {
       const um = (v: number) => `${(v * 1e6).toFixed(0)} µm`;
       const mpa = (v: number) => `${(v / 1e6).toFixed(0)} MPa`;
       stack3d.draw(R, st, {
@@ -849,6 +876,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
         deflSeries.push({ label: `${r.id} FrontISTR`, color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, r.x, r.vFem.map((v) => v + onBearing), 1e6) });
       }
     }
+    deflSeries.push(...ov.defl);
     charts.defl.draw(deflSeries, { unit: 'µm', halfWidth, strip, zero: true, xLabels: false });
 
     const contactLabel = (c: { a: number; b: number }) => `${st.rolls[c.a].id}–${st.rolls[c.b].id}`;
@@ -866,6 +894,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       const on = fl.fem.map((v, i) => ((fistrShown!.q[i] ?? 0) > 0 ? v : null));
       flatSeries.push({ label: 'WR–板 FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, fistrShown.x, on, 1e6) });
     }
+    flatSeries.push(...ov.flat);
     charts.flat.draw(flatSeries, { unit: 'µm', halfWidth, strip, zero: true, xLabels: false });
 
     const kn = (a: Float64Array) => Float64Array.from(a, (v) => v / 1e6);
@@ -905,6 +934,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       const on = ex.fem.map((v, i) => (ex.model[i] === null ? null : v));
       gaugeSeries.push({ label: '出側 h₁ FrontISTR', color: FISTR_COLOR, dash: true, width: 2, ...fistrXY(fistrShown, fistrShown.x, on, 2e6) });
     }
+    gaugeSeries.push(...ov.gauge);
     charts.gauge.draw(gaugeSeries, { unit: 'µm', halfWidth: strip * 1.05, strip, zero: true, xLabels: false });
     // The same profiles over their centre thickness, the crown ratio. Where the exit's
     // follows the entry's the pass kept the shape; before lateral flow, entry minus
@@ -1047,13 +1077,16 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     setChip(chips.h1, none ? '—' : (R.h1Mean * 1e3).toFixed(3));
     setChip(chips.crown, none ? '—' : (R.crown * 1e6).toFixed(0));
     setChip(chips.manifest, none ? '—' : R.manifestIU.toFixed(0), none ? undefined : R.manifestIU < 5 ? 'ok' : R.manifestIU < 40 ? 'warn' : 'bad');
-    setChip(chips.conv, running ? `反復中 ${etaText(eta)}` : !stale ? '収束' : iterated ? '停止' : '未計算', running ? 'warn' : !stale ? 'ok' : undefined);
-    chips.conv.classList.toggle('busy', running);
+    setChip(chips.conv, running ? `反復中 ${etaText(eta)}` : coupled.busy ? 'ロールを計算中（FrontISTR）' : !stale ? '収束' : iterated ? '停止' : '未計算',
+      running || coupled.busy ? 'warn' : !stale ? 'ok' : undefined);
+    chips.conv.classList.toggle('busy', running || coupled.busy);
     {
-      const label = running ? '■ 停止' : !stale ? '✓ 計算済み' : iterated ? '▶ 計算再開' : '▶ 計算開始';
+      // a coupled calculation is busy through its FrontISTR rounds as well as the app's solves
+      const busy = running || coupled.busy;
+      const label = busy ? '■ 停止' : coupled.resumable ? '▶ 連成を続ける' : !stale ? '✓ 計算済み' : iterated ? '▶ 計算再開' : '▶ 計算開始';
       if (runBtn.textContent !== label) runBtn.textContent = label;
-      runBtn.disabled = !running && !stale;
-      runBtn.classList.toggle('running', running);
+      runBtn.disabled = !busy && !stale && !coupled.resumable;
+      runBtn.classList.toggle('running', busy);
       // results that are not this setting's solution are faded until a solve has run on it
       const faded = stale && !running;
       staleTag.hidden = !faded;
@@ -1207,7 +1240,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
       eta = remaining.update(etaClock, solver.progress(), etaKey());
       iterated = true;
       // converged: the results are this setting's, and the solve waits for the next 計算開始
-      if (solver.isConverged) { running = false; stale = false; dirty = true; maybeRunFistr(); }
+      if (solver.isConverged) { running = false; stale = false; dirty = true; coupled.converged(); maybeRunFistr(); }
     } else {
       lastSolveEnd = 0;
     }
@@ -1246,7 +1279,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     if (!focusByPointer && pressable(e.target)) return;
     if (e.code === 'Space') {
       e.preventDefault();
-      if (running) stopSolve(); else startSolve();
+      if (running || coupled.busy) stopSolve(); else startSolve();
     } else if (e.key === 'r' || e.key === 'R') {
       e.preventDefault();
       solver.reset();
@@ -1259,6 +1292,7 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     solver, get params() { return params; }, get eta() { return eta; }, handle,
     // the 計算開始 button's actions and state, for checks that drive the page as a user would
     start: startSolve, stop: stopSolve, get running() { return running; }, get stale() { return stale; },
+    coupled, setFrontMode,
   };
   return handle;
 }
