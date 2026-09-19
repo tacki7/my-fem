@@ -30,7 +30,8 @@ const newId = () => `${Date.now().toString(36)}-${(seq++).toString(36)}`;
 
 /**
  * kinds: { name: async (body, dir) => ({ mesh: 'roll.msh', resPrefix: 'roll.res.0.',
- *          order: ['WR', 'BUR'], kinds: { WR: 'roll' }, symmetry, source, translate, threads, env }) }
+ *          order: ['WR', 'BUR'], kinds: { WR: 'roll' }, symmetry, source, translate, threads, env,
+ *          finish?: (dir) => JSON-able }) } - `finish` reads the finished case into result.json
  * where body is what the app posted ({ params, load, substeps, dryRun, ... }).
  */
 export function createJobs({ fistr1, fistr1Args = [], runDir, kinds, pollMs = 250 }) {
@@ -118,7 +119,19 @@ export function createJobs({ fistr1, fistr1Args = [], runDir, kinds, pollMs = 25
           if (job.cancelled) setState(job, 'cancelled');
           else if (code !== 0) setState(job, 'failed', `fistr1 exited ${code}`);
           else if (job.nonFinite) setState(job, 'failed', 'a result holds NaN or infinite values');
-          else setState(job, 'done');
+          else {
+            // what the kind reads off the finished case (the coupling's surface), as result.json
+            if (spec.finish) {
+              try {
+                writeFileSync(`${job.dir}/result.json`, JSON.stringify(spec.finish(job.dir)));
+                emit(job, 'result', { ready: true });
+              } catch (e) {
+                setState(job, 'failed', `reading the result: ${e.message}`);
+                return resolve();
+              }
+            }
+            setState(job, 'done');
+          }
           resolve();
         });
         child.on('error', (e) => { job.logTail = String(e.message); });
@@ -161,7 +174,7 @@ export function createJobs({ fistr1, fistr1Args = [], runDir, kinds, pollMs = 25
     file(id, name) {
       const j = jobs.get(id);
       if (!j) return null;
-      const p = name === 'mesh' ? `${j.dir}/mesh.bin` : `${j.dir}/frames/${name}.bin`;
+      const p = name === 'mesh' ? `${j.dir}/mesh.bin` : name === 'result' ? `${j.dir}/result.json` : `${j.dir}/frames/${name}.bin`;
       return existsSync(p) ? p : null;
     },
     /** stop the job's own fistr1 (its process group) */

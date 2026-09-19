@@ -435,6 +435,11 @@ export class StackSolver {
   private seats: { iv: number; ib: number; k: number; active: boolean; force: number }[] = [];
   /** the lower work roll in `rolls`, or -1 when the lower half is the upper one's mirror image */
   wrLower = -1;
+  /**
+   * A correction of the work roll's surface per station [m], + where the surface stands further
+   * from the strip than this model puts it (see `setRollCorrection`). null: none.
+   */
+  private rollCorr: Float64Array | null = null;
   /** rolls whose supports the screw moves, both halves */
   private screwRolls: number[] = [];
   /**
@@ -539,6 +544,8 @@ export class StackSolver {
 
   private rebuild(): void {
     const p = this.p;
+    // a correction is per station of the mesh it was made for
+    this.rollCorr = null;
     const previousType = this.stack?.type;
     this.geomKey = geometryKey(p);
     // A new mesh starts the strip FEM over (see `setParams`): its last solution is the old
@@ -735,9 +742,30 @@ export class StackSolver {
   private gapAt(s: number): number {
     const u = this.u, wr = this.stack.wr;
     const up = u[this.idx(s, wr, 0)] - this.rolls[wr].prof[s];
-    if (this.wrLower < 0) return this.p.h0 + 2 * up;
-    return this.p.h0 + up + u[this.idx(s, this.wrLower, 0)] - this.rolls[this.wrLower].prof[s];
+    const g = this.wrLower < 0 ? this.p.h0 + 2 * up : this.p.h0 + up + u[this.idx(s, this.wrLower, 0)] - this.rolls[this.wrLower].prof[s];
+    // the correction moves the work roll's surface, on both rolls where the lower is the upper's mirror
+    return this.rollCorr ? g + this.gapGain() * this.rollCorr[s] : g;
   }
+
+  /**
+   * Correct the work roll's surface by δ per station [m] (+ = further from the strip), or take the
+   * correction away (null). A constant, on top of what the roll model gives - the difference a
+   * finer model of the rolls finds under the same load (FrontISTR's solids, see
+   * tools/frontistr/couple.mjs). It enters the gap and nothing else: the tangent is the model's
+   * own. Where the lower half is the upper one's mirror, both work rolls move by it; where the
+   * lower half is solved (a shifted 6Hi), only the upper one does. The solve starts again from
+   * where it stands; a new mesh drops the correction.
+   */
+  setRollCorrection(delta: ArrayLike<number> | null): void {
+    if (delta && delta.length !== this.ns) throw new Error(`roll correction: ${delta.length} values for ${this.ns} stations`);
+    this.rollCorr = delta ? Float64Array.from(delta, (v) => (Number.isFinite(v) ? v : 0)) : null;
+    this.converged = false;
+    this.yAge = -1;
+    this.iterations = 0;
+  }
+
+  /** the correction in force, per station [m], or null */
+  get rollCorrection(): Float64Array | null { return this.rollCorr; }
 
   /**
    * dg/dz, z the work-roll coordinate the strip terms are written in: the
