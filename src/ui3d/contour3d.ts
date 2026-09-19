@@ -307,6 +307,8 @@ export class ContourView3D {
   // DOM
   private overlay: HTMLElement;
   private statusBox!: HTMLElement;
+  /** a line under the status plate's rows (what is not drawn and why), '' for none */
+  private statusNote = '';
   private legendBox!: HTMLElement;
   private toolbar!: HTMLElement;
   private readout!: HTMLElement;
@@ -1217,6 +1219,20 @@ export class ContourView3D {
     L.root.classList.toggle('has-under', grp.mode === 'fixed' && c.below > 0);
   }
 
+  /** where a group's values come from, as the status plate names it (the strip's material model) */
+  setSource(kind: PartKind, text: string): void {
+    if (this.opts.sources[kind] === text) return;
+    this.opts.sources[kind] = text;
+    this.drawStatus();
+  }
+
+  /** a line under the status plate's rows - what is not drawn and how to have it ('' for none) */
+  setNote(text: string): void {
+    if (this.statusNote === text) return;
+    this.statusNote = text;
+    this.drawStatus();
+  }
+
   private drawStatus(): void {
     const rows: { name: string; src: string; state: LabelState; text: string }[] = [];
     for (const k of ['strip', 'roll'] as PartKind[]) {
@@ -1225,11 +1241,13 @@ export class ContourView3D {
       const state: LabelState = lab?.state ?? 'initial';
       rows.push({ name: GROUP_NAME[k], src: this.opts.sources[k], state, text: lab?.text ?? (state === 'initial' ? '計算前' : '') });
     }
-    const all = (s: LabelState) => rows.length > 0 && rows.every((r) => r.state === s);
-    const head = all('initial') ? '初期状態' : all('steady') ? '定常' : rows.some((r) => r.state === 'running') ? '計算中' : rows.some((r) => r.state === 'stale') ? '古い値あり' : '計算中';
-    const overall = all('initial') ? 'initial' : all('steady') ? 'steady' : rows.some((r) => r.state === 'running') ? 'running' : 'stale';
+    // a body with no field under these settings says so on its row, and leaves the heading to the others
+    const live = rows.filter((r) => r.state !== 'absent');
+    const all = (s: LabelState) => live.length > 0 && live.every((r) => r.state === s);
+    const head = !live.length ? '場なし' : all('initial') ? '初期状態' : all('steady') ? '定常' : live.some((r) => r.state === 'running') ? '計算中' : live.some((r) => r.state === 'stale') ? '古い値あり' : '計算中';
+    const overall = !live.length ? 'absent' : all('initial') ? 'initial' : all('steady') ? 'steady' : live.some((r) => r.state === 'running') ? 'running' : 'stale';
     const box = this.statusBox;
-    box.hidden = rows.length === 0;
+    box.hidden = rows.length === 0 && !this.statusNote;
     box.dataset.state = overall;
     const h = el('div', 'ct3-status-head');
     h.append(el('span', 'ct3-dot'), el('span', 'ct3-status-title', head));
@@ -1238,11 +1256,12 @@ export class ContourView3D {
     for (const r of rows) {
       const tr = el('tr');
       tr.dataset.state = r.state;
-      const stateText = { initial: '計算前', running: '計算中', steady: '定常', stale: '古い値' }[r.state];
+      const stateText = { initial: '計算前', running: '計算中', steady: '定常', stale: '古い値', absent: '場なし' }[r.state];
       tr.append(el('th', undefined, r.name), el('td', 'ct3-src', r.src), el('td', 'ct3-state', stateText), el('td', 'ct3-text', r.text === stateText ? '' : r.text));
       table.append(tr);
     }
     box.replaceChildren(h, table);
+    if (this.statusNote) box.append(el('div', 'ct3-status-note', this.statusNote));
   }
 
   private syncToolbar(): void {

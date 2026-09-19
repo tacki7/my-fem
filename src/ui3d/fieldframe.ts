@@ -39,7 +39,8 @@ export interface FieldPart {
   symmetry: Symmetry;
 }
 
-export type LabelState = 'initial' | 'running' | 'steady' | 'stale';
+/** where a body's values stand; `absent`: these settings make no such field for it (the slab model's strip) */
+export type LabelState = 'initial' | 'running' | 'steady' | 'stale' | 'absent';
 
 export interface FieldValues {
   /** 3 × nodes from `coords`; null when the coordinates are already the current shape */
