@@ -32,8 +32,9 @@ out vec2 vUv;
 void main() { vUv = P[gl_VertexID] * 0.5 + 0.5; gl_Position = vec4(P[gl_VertexID], 0.999, 1.0); }`;
 const BG_FS = `${HDR}
 in vec2 vUv; out vec4 o;
+uniform vec3 uTop, uBot;
 void main() {
-  vec3 top = vec3(0.075, 0.10, 0.155), bot = vec3(0.022, 0.03, 0.05);
+  vec3 top = uTop, bot = uBot;
   float r = length(vUv - vec2(0.5, 0.62));
   vec3 c = mix(top, bot, smoothstep(0.0, 0.95, r));
   o = vec4(c, 1.0);
@@ -211,6 +212,10 @@ export class StackView3D {
   private lineCount = 0;
   private uMesh: Record<string, WebGLUniformLocation | null> = {};
   private uLine: Record<string, WebGLUniformLocation | null> = {};
+  private uBg: Record<string, WebGLUniformLocation | null> = {};
+  /** the backdrop's glow at the centre and its dark rim, linear 0-1 (the look's; see `setGround`) */
+  private groundTop = new Float32Array([0.075, 0.10, 0.155]);
+  private groundBottom = new Float32Array([0.022, 0.03, 0.05]);
   /** orbit */
   yaw = 0.42;
   pitch = 0.3;
@@ -246,6 +251,7 @@ export class StackView3D {
     this.progLine = link(LINE_VS, LINE_FS, 'stack3d line');
     for (const n of ['uProj', 'uView', 'uEye', 'uKey', 'uFill']) this.uMesh[n] = gl.getUniformLocation(this.progMesh, n);
     for (const n of ['uProj', 'uView', 'uCol']) this.uLine[n] = gl.getUniformLocation(this.progLine, n);
+    for (const n of ['uTop', 'uBot']) this.uBg[n] = gl.getUniformLocation(this.progBg, n);
 
     this.vao = gl.createVertexArray()!;
     this.vbo = gl.createBuffer()!;
@@ -635,6 +641,20 @@ export class StackView3D {
     this.render();
   }
 
+  /**
+   * The backdrop's two colours as `#rrggbb` - the glow behind the stack and the rim it darkens
+   * to - so the stage sits on the look's own ground. A colour that does not parse is left as it was.
+   */
+  setGround(top: string, bottom: string): void {
+    const put = (hex: string, into: Float32Array) => {
+      const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+      if (m) for (let i = 0; i < 3; i++) into[i] = parseInt(m[i + 1], 16) / 255;
+    };
+    put(top, this.groundTop);
+    put(bottom, this.groundBottom);
+    this.render();
+  }
+
   render(): void {
     const gl = this.gl, c = this.canvas;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -644,6 +664,8 @@ export class StackView3D {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
     gl.useProgram(this.progBg);
+    gl.uniform3fv(this.uBg.uTop, this.groundTop);
+    gl.uniform3fv(this.uBg.uBot, this.groundBottom);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.clear(gl.DEPTH_BUFFER_BIT);
     if (!this.count) return;
