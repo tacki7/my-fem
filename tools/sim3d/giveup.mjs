@@ -10,7 +10,7 @@
 // 2. A target out of reach - 4000 tonf on a 300 mm strip, the slab model - is given up as
 //    `target` (the screw steps and the load does not follow), and says `target`.
 // 3. Solves that converge are not given up: the 4Hi default, the 4Hi at μ 0.215 with the housing
-//    frame, which takes 14 correction rounds and 334 iterations to get there - the slowest of the
+//    frame, which takes 14 correction rounds and 344 iterations to get there - the slowest of the
 //    cases the rule was set on that still converges on this grid - and, on the app's own grid, a
 //    WR crown of −400 µm: its first round runs on the untouched stack (a change of 0) and the
 //    screw then steps, which once held the round count to that 0 and gave a solve up three

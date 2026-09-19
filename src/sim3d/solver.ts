@@ -471,6 +471,28 @@ export interface HousingResult {
   millModulus: number;
 }
 
+/**
+ * The slices' warm starts (load and arc) and the strip's tension where an
+ * outer iteration started, for its line search to start every trial from
+ * (see `iterate`).
+ */
+class TrialStart {
+  private q = new Float64Array(0);
+  private arc = new Float64Array(0);
+  private sigma = new Float64Array(0);
+  save(slices: Slice[], sigmaF: Float64Array): void {
+    const n = slices.length;
+    if (this.q.length !== n) { this.q = new Float64Array(n); this.arc = new Float64Array(n); }
+    if (this.sigma.length !== sigmaF.length) this.sigma = new Float64Array(sigmaF.length);
+    slices.forEach((sl, i) => { this.q[i] = sl.q; this.arc[i] = sl.arc; });
+    this.sigma.set(sigmaF);
+  }
+  restore(slices: Slice[], sigmaF: Float64Array): void {
+    slices.forEach((sl, i) => { sl.q = this.q[i]; sl.arc = this.arc[i]; });
+    sigmaF.set(this.sigma);
+  }
+}
+
 interface SliceState {
   q: number;
   h1: number;
@@ -567,6 +589,7 @@ export class StackSolver {
   private bScrew!: Float64Array;
   private x2!: Float64Array;
   private duPlain!: Float64Array;
+  private warmTrial = new TrialStart();
   /** the Anderson history of the FEM correction: scaled iterates and their residuals */
   private aaX: Float64Array[] = [];
   private aaF: Float64Array[] = [];
@@ -1183,6 +1206,23 @@ export class StackSolver {
     const base = this.uTrial;
     base.set(u);
     const baseS = this.screw;
+    // Every trial starts its slices and its tension from where this
+    // iteration started, not from the trial before it. A slice solve is
+    // warm-started, and a slice can have two roots: at a heavy pass's edge
+    // under a compressive front tension the slab load is not monotone in
+    // the exit thickness, and next to the rolled root (1.20 mm at 71 kN/mm
+    // on a 4Hi at μ 0.215 with the housing frame) sits a collapsed one
+    // (0.31 mm at 22 kN/mm) that the tension then holds (the thin edge
+    // over-elongates, and its compression puts every thicker exit past
+    // Stone's limit). A full step that jumped a slice onto the collapsed
+    // root left it there for the shortened trials, none of which could
+    // bring the merit down, and the iteration ended on it.
+    const warm = this.warmTrial;
+    let trials = 0;
+    const startTrial = () => {
+      if (trials++ === 0) { warm.save(this.slices, this.sigmaF); return; }
+      warm.restore(this.slices, this.sigmaF);
+    };
     /**
      * Backtracking along (step, dS): the merit has to come down, or the step
      * is shortened (a contact opening or the strip lifting off is not
@@ -1200,6 +1240,7 @@ export class StackSolver {
       for (let tries = 0; tries < 5; tries++) {
         for (let i = 0; i < u.length; i++) u[i] = base[i] + alpha * step[i];
         this.screw = baseS + alpha * ds;
+        startTrial();
         this.stripSolve(false);
         res = this.assemble(false);
         c = this.targetValue();
