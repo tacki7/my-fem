@@ -47,7 +47,8 @@ export const MILLS = { '2hi': { full: false }, '4hi': { full: false }, '6hi': { 
  * its bearing cross-section held. 4Hi / 6Hi: the rolls touching on the centre line, in contact
  * (the lower roll's top nodes on the upper roll's bottom faces, augmented Lagrange, no
  * friction); the screw roll's bearing sections held, the chocked rolls' chock sections on a
- * spring as soft as the roll model's (K_CHOCK_Y) with their bender forces, the strip load
+ * spring as soft as the roll model's (K_CHOCK_Y) with their bender forces (both halved: the
+ * section is the z ≥ 0 half of the chock's), the strip load
  * ramped in substeps. 2Hi and 4Hi are symmetric about x = 0 and model the x ≥ 0 half; the 6Hi's
  * shifted intermediate roll is not, so its case spans the whole length. All model the z ≥ 0
  * half (symmetry about the plane of the roll axes).
@@ -193,14 +194,19 @@ export async function buildCase(mill, patch, out, opts = {}) {
   // the section: a plane section held in x cannot rotate, and that would clamp the bearing
   // and stop a chocked roll tilting.
   if (full) ng.XHOLD = M.map((m, r) => m.id(S[r].iSupports[0], 0, 0));
+  // A chock section here is the z ≥ 0 half of the roll's: it takes half the chock's spring and
+  // half its bender force, as the half arc takes half the strip load (q/2). The whole force on
+  // the half section bent the solid with twice the model's bender (60 tonf/chock: 7.5 % more
+  // load through the held bearing than the strip and the bender put in, T101).
   const springs = [], benders = [];
+  let benderSumY = 0;
   for (let r = 0; r < up; r++) {
     if (defs[r].support !== 'chock') continue;
     const name = up === 2 ? 'CHOCK' : `CHOCK_${defs[r].id}`;
     ng[name] = lists[r].support.flat();
     for (const sec of lists[r].support) {
-      for (const n of sec) springs.push([n, K_CHOCK / sec.length]);
-      if (defs[r].benderForce) for (const n of sec) benders.push([n, defs[r].benderForce / sec.length]);
+      for (const n of sec) springs.push([n, K_CHOCK / 2 / sec.length]);
+      if (defs[r].benderForce) for (const n of sec) { benders.push([n, defs[r].benderForce / 2 / sec.length]); benderSumY += defs[r].benderForce / 2 / sec.length; }
     }
   }
   // the contact zones: the lower roll's top within 40 mm of its top line, the upper roll's
@@ -268,7 +274,7 @@ export async function buildCase(mill, patch, out, opts = {}) {
     dx: S[r].xs.map((x, i, xs) => (i === 0 ? (full ? xs[1] - xs[0] : 0.5 * xs[1]) : i + 1 < xs.length ? 0.5 * (xs[i + 1] - xs[i - 1]) : xs[i] - xs[i - 1])),
   }));
   const ref = {
-    mill, full, params: patch, iterations: it, force: R.force, screw: R.screw, quarterForce: R.force / (full ? 2 : 4), loadSumY: Fsum,
+    mill, full, params: patch, iterations: it, force: R.force, screw: R.screw, quarterForce: R.force / (full ? 2 : 4), loadSumY: Fsum, benderSumY,
     screwRoll: screwIdx,
     rolls: refRolls,
     WR: {
