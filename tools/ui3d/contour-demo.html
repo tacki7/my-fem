@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>コンター描画 — 試験台</title>
+<link rel="icon" href="data:,">
+<!--
+  The contour view (src/ui3d/contour3d.ts) on synthetic data (src/ui3d/fieldsynth.ts): the
+  strip updated every animation frame as the coupled solve would, the rolls' FrontISTR frames
+  every 1.2 s through the same binary format and decoding as the bridge's. Dev server only
+  (not an input of `vite build`):
+
+    npm run dev  →  http://localhost:<port>/tools/ui3d/contour-demo.html
+
+  Query: nodes=<n> (the synthetic mesh's size, default 40000), theme=classic|modern|chic|hmi,
+  run (start at once), and the real things in place of the made-up ones:
+    strip=real  the app's material FEM on the 4Hi default, solved here, its field (StripField3D)
+                drawn after every solve until the coupled solve converges
+    rolls=real  a FrontISTR `roll-elastic` job's mesh.bin and frames/0.bin (a dryRun), copied
+                into tools/ui3d/build/real/ (git-ignored); the frames after 0 are made-up values
+                on that mesh
+  `window.__demo`: start(), reset(), seek(progress, k), bench(), selfTest().
+-->
+<style>
+  .demo-top { height: 44px; display: flex; align-items: center; gap: 14px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--top-grad); }
+  .demo-top h1 { font: 600 13px var(--display); margin: 0; letter-spacing: .02em; }
+  .demo-top p { margin: 0; color: var(--fg-dim); font-size: 12px; }
+  .demo-top .grow { flex: 1; }
+  .demo-top button, .demo-top select { font: inherit; font-size: 12px; color: var(--fg); background: var(--bg-raise); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .demo-top button.primary { border-color: var(--accent); }
+  #view { position: absolute; top: 44px; left: 0; right: 0; bottom: 0; }
+</style>
+</head>
+<body>
+<header class="demo-top">
+  <h1>コンター描画の試験台</h1>
+  <p id="demo-note">合成データ（解析結果ではない）</p>
+  <span class="grow"></span>
+  <button id="demo-run" class="primary" type="button">計算開始</button>
+  <button id="demo-reset" type="button">初期状態に戻す</button>
+  <select id="demo-theme" aria-label="見た目">
+    <option value="classic">現在</option><option value="modern">モダン</option><option value="chic">シック</option><option value="hmi">計器</option>
+  </select>
+</header>
+<div id="view"></div>
+<script type="module">
+import '/src/style.css';
+import { ContourView3D } from '/src/ui3d/contour3d.ts';
+import { rampTexels } from '/src/gfx/colormap.ts';
+import { bandOf, bandCentre, rampCoord, RAMP_FLOOR } from '/src/ui3d/contourmath.ts';
+import { encodeMesh, decodeMesh, encodeFrame, decodeFrame, partValues } from '/src/ui3d/fieldframe.ts';
+import { synthRolls, synthRollValues, synthStrip, synthGrid, countNodes, settle, MILL_4HI } from '/src/ui3d/fieldsynth.ts';
+
+const q = new URLSearchParams(location.search);
+const theme = q.get('theme');
+if (theme && theme !== 'classic') document.documentElement.dataset.theme = theme;
+document.getElementById('demo-theme').value = theme || 'classic';
+document.getElementById('demo-theme').addEventListener('change', (e) => {
+  if (e.target.value === 'classic') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = e.target.value;
+});
+
+const grid = synthGrid(Number(q.get('nodes')) || 40000);
+const realRolls = q.get('rolls') === 'real', realStrip = q.get('strip') === 'real';
+const FRAMES = 6;             // FrontISTR's substeps up to the full load
+const ROLL_EVERY = 1200;      // ms between roll frames
+const STRIP_SECONDS = 6;      // the strip's solve settling
+const view = new ContourView3D(document.getElementById('view'));
+
+// the rolls as the bridge would send them: one mesh.bin, a frame per substep
+const bytes = async (path) => { const r = await fetch(path, { cache: 'no-store' }); if (!r.ok) throw new Error(`${path}: HTTP ${r.status}（tools/ui3d/build/real/ に FrontISTR のジョブの mesh.bin と frames/0.bin を置く）`); return r.arrayBuffer(); };
+const mesh = realRolls ? decodeMesh(await bytes('/tools/ui3d/build/real/mesh.bin'))
+  : decodeMesh(encodeMesh(synthRolls(MILL_4HI, grid), { x: true, y: true, z: true }, { case: 'synthetic', mill: '4hi' }));
+const frame0 = realRolls ? decodeFrame(await bytes('/tools/ui3d/build/real/frames/0.bin'), mesh.header.nodeCount) : null;
+const rollFrame = (k) => {
+  if (k === 0 && frame0) return frame0;
+  const vals = synthRollValues(mesh.parts, k / FRAMES);
+  const n = mesh.header.nodeCount;
+  const disp = new Float32Array(3 * n), mises = new Float32Array(n), cpress = new Float32Array(n);
+  for (const h of mesh.header.parts) {
+    disp.set(vals[h.name].disp, 3 * h.nodeStart); mises.set(vals[h.name].fields.mises, h.nodeStart); cpress.set(vals[h.name].fields.cpress, h.nodeStart);
+  }
+  const buf = encodeFrame({ k, increment: k * 120, time: k / FRAMES, travel: k ? 0.0021 * k : 0, metrics: { steady: k === FRAMES } }, disp, { mises, cpress });
+  return decodeFrame(buf, n);
+};
+for (const p of mesh.parts) view.setPart(p);
+
+// the real strip: the app's solver, stepped a little every frame; its field after every material FEM solve
+let solver = null, lastField = null, solverIters = 0;
+const solverMod = realStrip ? await Promise.all([import('/src/sim3d/solver.ts'), import('/src/sim3d/stack.ts')]) : null;
+const stepSolver = () => {
+  solver.advance(12, 2);
+  const R = solver.result, F = R.fem?.field3d;
+  solverIters += R.iterations;
+  if (F && F !== lastField) {
+    lastField = F;
+    view.setPart({ name: 'strip', kind: 'strip', coords: F.coords, tris: F.tris, symmetry: { x: false, y: true, z: false } });
+    view.update('strip', { disp: null, fields: F.fields, label: { state: solver.isConverged ? 'steady' : 'running', text: `反復 ${solverIters}　材料 FEM ${F.nx}×${F.rows}×${F.lay}` } });
+  }
+  return solver.isConverged;
+};
+
+const showStrip = (progress) => {
+  const s = synthStrip(progress, MILL_4HI, grid);
+  view.setPart(s.part);
+  const initial = progress < 0, steady = progress >= 1.25;
+  const iter = Math.round(Math.max(0, progress) * 60);
+  const resid = initial ? 0 : Math.max(1e-6, 0.3 * Math.exp(-6 * progress));
+  view.update('strip', { ...s.values, label: initial ? { state: 'initial', text: '計算前' } : { state: steady ? 'steady' : 'running', text: `補正 ${iter} 回　残差 ${resid.toExponential(1)}` } });
+};
+const showRolls = (k) => {
+  const f = rollFrame(k);
+  for (const h of mesh.header.parts) view.update(h.name, partValues(mesh, f, h.name));
+};
+
+let run = null;
+function reset() {
+  if (run) cancelAnimationFrame(run.raf);
+  run = null;
+  solver = null; lastField = null; solverIters = 0;
+  showStrip(-1); showRolls(0);
+  document.getElementById('demo-run').textContent = '計算開始';
+}
+function start() {
+  if (run) return;
+  const t0 = performance.now();
+  run = { t0, k: 0, raf: 0, done: false };
+  document.getElementById('demo-run').textContent = '計算中…';
+  if (realStrip) solver = new solverMod[0].StackSolver({ ...solverMod[1].defaultParams('4hi'), mill: '4hi' });
+  let stripDone = false;
+  const tick = () => {
+    const t = (performance.now() - t0) / 1000;
+    const p = t / STRIP_SECONDS;
+    if (realStrip) { if (!stripDone) stripDone = stepSolver(); }
+    else { if (p <= 1.3) showStrip(p); stripDone = p > 1.3; }
+    const k = Math.min(FRAMES, Math.floor((performance.now() - t0) / ROLL_EVERY) + 1);
+    if (k !== run.k) { run.k = k; showRolls(k); }
+    if (stripDone && run.k === FRAMES) { run.done = true; document.getElementById('demo-run').textContent = '定常（もう一度: 初期状態に戻す）'; return; }
+    run.raf = requestAnimationFrame(tick);
+  };
+  run.raf = requestAnimationFrame(tick);
+}
+/** a fixed state, for pictures: the strip's progress (< 0 initial) and the rolls' frame */
+function seek(progress, k) {
+  if (run) cancelAnimationFrame(run.raf);
+  run = null;
+  showStrip(progress); showRolls(k);
+}
+/**
+ * Frame swap timings on this mesh [ms]: a roll frame decoded, then its values and displacement
+ * into both rolls (update + the groups' colouring, `flush`) with the GPU made to finish the
+ * uploads (a 1-pixel readPixels waits for them); the same with the displacement magnified
+ * × 1000 (the normals remade from the displaced shape); the strip's new shape and values; and
+ * one frame drawn (on a software renderer this is the CPU drawing every triangle, not the swap).
+ */
+function bench(n = 5) {
+  const out = { nodes: countNodes(grid), decode: [], swap: [], swapDeformed: [], normalsDeformed: [], strip: [], draw: [] };
+  const gl = view.canvas.getContext('webgl2');
+  const px = new Uint8Array(4);
+  const sync = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const frames = [];
+  for (let k = 1; k <= FRAMES; k++) frames.push(encodeFrame({ k }, ...(() => {
+    const vals = synthRollValues(mesh.parts, k / FRAMES), dn = mesh.header.nodeCount;
+    const disp = new Float32Array(3 * dn), mises = new Float32Array(dn), cpress = new Float32Array(dn);
+    for (const h of mesh.header.parts) { disp.set(vals[h.name].disp, 3 * h.nodeStart); mises.set(vals[h.name].fields.mises, h.nodeStart); cpress.set(vals[h.name].fields.cpress, h.nodeStart); }
+    return [disp, { mises, cpress }];
+  })()));
+  const swap = (buf) => {
+    let t = performance.now();
+    const f = decodeFrame(buf, mesh.header.nodeCount);
+    out.decode.push(performance.now() - t);
+    t = performance.now();
+    let normals = 0;
+    for (const h of mesh.header.parts) { view.update(h.name, partValues(mesh, f, h.name)); normals += view.stats.normalsMs; }
+    view.flush();
+    sync();
+    return [performance.now() - t, normals];
+  };
+  sync();
+  for (let i = 0; i < n; i++) out.swap.push(swap(frames[i % FRAMES])[0]);
+  view.setOptions({ deform: 1000 });
+  view.flush(); sync();
+  for (let i = 0; i < n; i++) { const [t, nm] = swap(frames[(i + 1) % FRAMES]); out.swapDeformed.push(t); out.normalsDeformed.push(nm); }
+  view.setOptions({ deform: 1 });
+  for (let i = 0; i < n; i++) {
+    const s = synthStrip(0.2 * i, MILL_4HI, grid);
+    const t = performance.now();
+    view.setPart(s.part); view.update('strip', { ...s.values, label: { state: 'running' } }); view.flush();
+    sync();
+    out.strip.push(performance.now() - t);
+  }
+  for (let i = 0; i < Math.min(n, 3); i++) {
+    const t = performance.now();
+    view.render(); sync();
+    out.draw.push(performance.now() - t);
+  }
+  const med = (a) => +[...a].sort((x, y) => x - y)[Math.floor(a.length / 2)].toFixed(1);
+  const median = {};
+  for (const k of ['decode', 'swap', 'swapDeformed', 'normalsDeformed', 'strip', 'draw']) median[k] = med(out[k]);
+  return { nodes: out.nodes, median, drawn: { vertices: view.stats.vertices, triangles: view.stats.triangles }, all: out };
+}
+
+/**
+ * The shader's colours against the legend's arithmetic: flat quads, one value each, drawn unlit
+ * over a fixed range 0 … 1 in 10 bands, each read back from the canvas and compared with the ramp
+ * texel pair the band's centre falls between (LINEAR filtering), to 3/255. The ends of the range,
+ * both sides of a band edge (0.0999 and 0.1001 of 0 … 1), a value on the edge itself (either
+ * neighbour: the interpolated t is the edge only to a float's rounding), NaN (grey hatch), and
+ * beyond the range (the end colour, striped). `sep` is how far apart neighbouring bands' colours are: a band off by
+ * one would miss by that much.
+ */
+async function selfTest() {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;left:0;top:0;width:900px;height:260px';
+  document.body.append(box);
+  const v = new ContourView3D(box, { controls: false, shading: false, extremes: false, bands: 10 });
+  const cases = [['lo', 0], ['quarter', 0.25], ['just under an edge', 0.0999], ['on an edge', 0.1], ['just over an edge', 0.1001], ['hi', 1], ['NaN', NaN], ['above', 1.5], ['below', -0.5]];
+  const coords = [], tris = [], vals = [];
+  cases.forEach(([, val], i) => {
+    const x0 = i * 1.25, n = coords.length / 3;
+    coords.push(x0, 0, 0, x0 + 1, 0, 0, x0 + 1, 1, 0, x0, 1, 0);
+    tris.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    vals.push(val, val, val, val);
+  });
+  v.setPart({ name: 'probe', kind: 'strip', coords: Float32Array.from(coords), tris: Uint32Array.from(tris), symmetry: { x: false, y: false, z: false } });
+  v.update('probe', { disp: null, fields: { eq: Float32Array.from(vals) }, label: { state: 'steady' } });
+  v.setField('strip', 'eq');
+  v.setRange('strip', 'fixed', { lo: 0, hi: 1 });
+  v.setView('front');
+  v.render();
+  const gl = v.canvas.getContext('webgl2');
+  const tex = rampTexels('ember');
+  const texel = (c) => { const x = c * 256 - 0.5, i = Math.max(0, Math.min(254, Math.floor(x))), f = Math.max(0, Math.min(1, x - i)); return [0, 1, 2].map((k) => tex[4 * i + k] * (1 - f) + tex[4 * (i + 1) + k] * f); };
+  const bandCol = (b) => texel(rampCoord(bandCentre(b, 10), RAMP_FLOOR));
+  const dist = (a, b) => Math.max(...a.map((x, k) => Math.abs(x - b[k])));
+  const grey = [[0.19, 0.21, 0.25], [0.29, 0.32, 0.38]].map((g) => g.map((x) => x * 255));
+  const dpr = v.canvas.width / v.canvas.clientWidth;
+  const out = [];
+  cases.forEach(([name, val], i) => {
+    const p = v.project([i * 1.25 + 0.5, 0.5, 0]);
+    // a 3 × 3 patch: the hatches are a few pixels wide, so the patch holds both of a hatched colour's shades
+    const px = new Uint8Array(4 * 9);
+    gl.readPixels(Math.round(p.x * dpr) - 1, v.canvas.height - Math.round(p.y * dpr) - 2, 3, 3, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const got = [...Array(9)].map((_, k) => [px[4 * k], px[4 * k + 1], px[4 * k + 2]]);
+    let want, ok;
+    if (Number.isNaN(val)) { want = grey; ok = got.every((g) => grey.some((w) => dist(g, w) <= 3)); }
+    else if (val > 1) { const top = bandCol(9); want = [top, top.map((x) => x + (255 - x) * 0.6)]; ok = got.every((g) => want.some((w) => dist(g, w) <= 3)) && got.some((g) => dist(g, top) <= 3); }
+    else if (val < 0) { const b0 = bandCol(0); want = [b0, b0.map((x) => x * 0.35)]; ok = got.every((g) => want.some((w) => dist(g, w) <= 3)) && got.some((g) => dist(g, b0) <= 3); }
+    // exactly on an edge the interpolated t is the edge to a float's rounding either way: either neighbour will do
+    else if (name === 'on an edge') { const b = bandOf(Math.fround(val), 10); want = [bandCol(b), bandCol(b - 1)]; ok = got.every((g) => want.some((w) => dist(g, w) <= 3)); }
+    else { const b = bandOf(Math.fround(val), 10); want = [bandCol(b)]; ok = got.every((g) => dist(g, want[0]) <= 3); }
+    out.push({ name, value: val, band: Number.isFinite(val) ? bandOf(Math.fround(val), 10) : null, ok, got: got[4], want: want.map((w) => w.map((x) => Math.round(x))) });
+  });
+  let sep = Infinity;
+  for (let b = 0; b < 9; b++) sep = Math.min(sep, dist(bandCol(b), bandCol(b + 1)));
+  v.destroy();
+  box.remove();
+  return { pass: out.every((o) => o.ok), sep: Math.round(sep), cases: out };
+}
+
+document.getElementById('demo-run').addEventListener('click', () => (run?.done ? null : start()));
+document.getElementById('demo-reset').addEventListener('click', reset);
+document.getElementById('demo-note').textContent = realRolls || realStrip
+  ? `板: ${realStrip ? 'アプリの材料 FEM（実物）' : '合成'}　ロール: ${realRolls ? 'FrontISTR の網（実物）、値は frame 0 のほか合成' : '合成'}`
+  : `合成データ（解析結果ではない）　節点 ${countNodes(grid).toLocaleString()}`;
+reset();
+window.__demo = { view, start, reset, seek, bench, selfTest, get state() { return run ? (run.done ? 'steady' : 'running') : 'initial'; }, settle };
+if (q.has('run')) start();
+</script>
+</body>
+</html>
