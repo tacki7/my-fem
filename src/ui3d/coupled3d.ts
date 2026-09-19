@@ -122,6 +122,8 @@ export class CoupledRun {
   private shown = false;
   private mesh: DecodedMesh | null = null;
   private meshKey = '';
+  /** the settings whose rolls' mesh is placed on the view ('' for none) - see `placeRolls` */
+  private placedKey = '';
   private stripField: unknown = null;
   /** the strip field there was when the settings last changed: not one of these settings' */
   private fieldAtChange: unknown = null;
@@ -400,7 +402,8 @@ export class CoupledRun {
         return;
       }
       this.stripKey = '';
-      if (this.mesh) { for (const p of this.mesh.parts) this.view.setPart(p); this.labelRolls(); }
+      this.placedKey = '';
+      if (this.mesh) { this.placeRolls(); this.labelRolls(); }
       this.scheduleDryRun(0);
     }
     this.host.changed();
@@ -408,24 +411,37 @@ export class CoupledRun {
 
   /** the rolls' mesh of a job (the same settings keep the one they have) */
   private async loadMesh(job: FistrJob, key: string): Promise<void> {
-    if (this.mesh && this.meshKey === key) return;
-    try {
-      const m = decodeMesh(await job.mesh());
-      this.mesh = m; this.meshKey = key;
-      if (this.view) for (const p of m.parts) this.view.setPart(p);
-      if (this.view) this.labelRolls();
-    } catch (e) {
-      console.warn('contour: rolls mesh', e);
+    if (!this.mesh || this.meshKey !== key) {
+      try {
+        const m = decodeMesh(await job.mesh());
+        this.mesh = m; this.meshKey = key;
+      } catch (e) {
+        console.warn('contour: rolls mesh', e);
+        return;
+      }
     }
+    // the mesh at hand may not be the one on the view: a dry run of these settings that ended while
+    // a round waited for the bridge keeps its mesh without placing it (the round's frames come next)
+    if (this.placedKey !== this.meshKey) { this.placeRolls(); this.labelRolls(); }
+  }
+
+  /** the rolls' mesh at hand on the view (once for each settings' mesh) */
+  private placeRolls(): void {
+    const m = this.mesh, v = this.view;
+    if (!m || !v) return;
+    const placed = v.partNames();
+    if (this.placedKey === this.meshKey && m.parts.every((p) => placed.includes(p.name))) return;
+    for (const p of m.parts) v.setPart(p);
+    this.placedKey = this.meshKey;
   }
 
   /** a substep's result on the rolls */
   private async loadFrame(job: FistrJob, key: string, k: number, round: number): Promise<void> {
     this.substep = Math.max(this.substep, k);
     this.render();
-    if (!this.mesh || this.meshKey !== key) await this.loadMesh(job, key);
+    await this.loadMesh(job, key);
     const m = this.mesh;
-    if (!m || !this.view) return;
+    if (!m || !this.view || this.meshKey !== key) return;
     try {
       const f = decodeFrame(await job.frame(k), m.header.nodeCount);
       // (the round may have ended while the frame was on its way: the label is the rounds' as they stand)
@@ -440,8 +456,7 @@ export class CoupledRun {
   private unloadRolls(): void {
     const m = this.mesh, v = this.view;
     if (!m || !v) return;
-    const placed = v.partNames();
-    m.header.parts.forEach((h, i) => { if (!placed.includes(h.name)) v.setPart(m.parts[i]); });
+    this.placeRolls();
     for (const h of m.header.parts) {
       const n = h.nodeCount, zero = new Float32Array(n);
       v.update(h.name, { disp: new Float32Array(3 * n), fields: { mises: zero, cpress: zero }, label: { state: 'initial', text: '計算前' } });
@@ -492,8 +507,9 @@ export class CoupledRun {
               const m = decodeMesh(await job.mesh());
               const f0 = decodeFrame(await job.frame(0), m.header.nodeCount);
               this.mesh = m; this.meshKey = key;
+              // a round has the rolls now: it places this mesh with its first frame (`loadMesh`)
               if (this.phase === 'fistr' || this.rounds.length) return;
-              for (const p of m.parts) this.view.setPart(p);
+              this.placeRolls();
               for (const h of m.header.parts) this.view.update(h.name, { ...partValues(m, f0, h.name), label: { state: 'initial', text: '計算前' } });
             } catch (e) {
               console.warn('contour: dry run', e);
