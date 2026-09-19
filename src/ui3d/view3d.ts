@@ -1287,6 +1287,9 @@ export function installView3D(root: HTMLElement, opts: { onMesh?: (text: string,
     }
   });
   void idleFrames;
+  // a calculation under way keeps its page when the dev server's socket comes back after a sleep
+  // (vite.config.ts `holdReloadWhileComputing`): the app's own solve, or a FrontISTR round
+  (window as unknown as { __rollfemHoldReload?: () => boolean }).__rollfemHoldReload = () => running || coupled.busy;
   // a hook for headless checks, like the 2D tab's
   (window as unknown as { __v3: unknown }).__v3 = {
     solver, get params() { return params; }, get eta() { return eta; }, handle,
