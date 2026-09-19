@@ -7,10 +7,11 @@
 //    share are dropped, every other one faces outwards (the divergence theorem over the surface
 //    gives the body's volume, positive).
 // 2. The binary format: the header, its padding to 4 bytes, the arrays read back as written.
-// 3. Which result files may be read: none still growing.
+// 3. Which result files may be read: none still growing, and the newest only once it is whole.
 // 4. A job end to end through the bridge's HTTP routes: 409 for a second one, server-sent events
-//    in order, a frame per result file with the values the stand-in wrote, a cancel that stops
-//    the stand-in.
+//    in order, a frame per result file with the values the stand-in wrote (none read while it was
+//    half-written, or with its last number cut), the newest one's frame before the next file
+//    starts (a load step on the coupled rolls takes minutes), a cancel that stops the stand-in.
 //
 // @check
 import { createServer } from 'node:http';
@@ -18,7 +19,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseMsh, extractSurface, encodeMesh, encodeFrame, readHeader } from './fieldframe.mjs';
-import { finishedResults } from './jobs.mjs';
+import { finishedResults, completeResult } from './jobs.mjs';
 import { frontistrHandler } from './bridge.mjs';
 
 let failed = 0;
@@ -90,13 +91,23 @@ check('frame header, padding and arrays', fs % 4 === 0 && fh.k === 7 && fh.field
 const files = ['roll.res.0.0', 'roll.res.0.1', 'roll.res.0.10', 'roll.res.0.2', 'roll.msh', 'roll.res.0.x'];
 check('running: all but the newest', finishedResults(files, 'roll.res.0.', false).join() === '0,1,2', finishedResults(files, 'roll.res.0.', false).join());
 check('exited: all of them, in order', finishedResults(files, 'roll.res.0.', true).join() === '0,1,2,10');
+const RES = ['*fstrresult 2.0', '*comment', 'static_result', '*global', '1', '1 ', 'TOTALTIME', '0.5', '*data', '2 1', '2 0', '3 1 ', 'DISPLACEMENT', 'NodalMISES',
+  '1 ', '0.0 1.0E-04 0.0 2.5E+06', '2 ', '0.0 2.0E-04 0.0 3.5E+06'].join('\n') + '\n';
+const whole = completeResult(RES);
+check('a whole result file: read', whole?.node.size === 2 && whole.node.get(2).NodalMISES[0] === 3.5e6);
+const cuts = [['cut in its last number', RES.length - 5], ['its last line not ended', RES.length - 1], ['cut after a node number', RES.indexOf('2 \n') + 3], ['cut at a line end amid the records', RES.indexOf('\n2 \n') + 1]];
+const cutRead = cuts.filter(([, at]) => completeResult(RES.slice(0, at)) !== null).map(([name]) => name);
+check('a result file not written in full: not read', cutRead.length === 0, cutRead.join(', ') || cuts.map(([n]) => n).join(', '));
 
 // ── a job end to end, with a stand-in for fistr1 ──
 const dir = mkdtempSync(join(tmpdir(), 'jobscheck-'));
 const fake = join(dir, 'fake-fistr1.mjs');
 // Writes res.0.0 … res.0.3 (displacement y = 1e-4·N at every node, NodalMISES = N·1e6), each after a
-// pause, the file itself in two halves 150 ms apart - a reader that took the newest file would read
-// half of it. With STALL set it hangs after the first file (for the cancel).
+// pause, the file itself in three parts 150 ms apart: half of it, then all but the tail of its last
+// number (NodalMISES N.00000 for N.000000e+6), then the rest - a reader that took the newest file
+// while it grew would read half of it, or the last node's stress a million times too small. After
+// res.0.1 it pauses 1.5 s, as fistr1 does for minutes between the coupled rolls' load steps; it says
+// when it starts each file. With STALL set it hangs after res.0.1 (for the cancel).
 writeFileSync(fake, `
 import { writeFileSync, appendFileSync } from 'node:fs';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -107,12 +118,15 @@ const res = (N) => {
   return L.join('\\n') + '\\n';
 };
 for (let N = 0; N <= 3; N++) {
-  const t = res(N), h = Math.floor(t.length / 2);
+  const t = res(N), h = Math.floor(t.length / 2), tail = t.length - 5;
+  console.log('start ' + N + ' ' + Date.now());
   writeFileSync('roll.res.0.' + N, t.slice(0, h));
   await sleep(150);
-  appendFileSync('roll.res.0.' + N, t.slice(h));
+  appendFileSync('roll.res.0.' + N, t.slice(h, tail));
+  await sleep(150);
+  appendFileSync('roll.res.0.' + N, t.slice(tail));
   if (process.env.STALL && N === 1) await sleep(60000);
-  await sleep(100);
+  await sleep(N === 1 ? 1500 : 100);
 }
 console.log('FAKE done');
 `);
@@ -146,7 +160,7 @@ async function events(id, until = ['done', 'failed', 'cancelled'], ms = 30000) {
         const type = /event: (.*)/.exec(block)?.[1], data = /data: (.*)/.exec(block)?.[1];
         if (!type) continue;
         const d = JSON.parse(data);
-        out.push([type, d]);
+        out.push([type, d, Date.now()]);
         if (type === 'state' && until.includes(d.state)) { ctl.abort(); return out; }
       }
     }
@@ -173,6 +187,9 @@ for (const k of [1, 2, 3]) {
   if (!ok) { valuesOk = false; detail = `frame ${k}: dy ${a[1]}, mises ${m[0]}`; }
 }
 check('every frame holds the whole result it names (none read half-written)', valuesOk, detail);
+const log1 = readFileSync(join(dir, (await (await fetch(`${base}/jobs/${job.id}`)).json()).dir, 'fistr.log'), 'utf8');
+const start2 = Number(/start 2 (\d+)/.exec(log1)?.[1]), got1 = evs.find(([t, d]) => t === 'frame' && d.k === 1)?.[2];
+check('the newest file read once whole, before the next one starts', got1 < start2, `frame 1 ${Math.abs(got1 - start2)} ms ${got1 < start2 ? 'before' : 'after'} res.0.2 started`);
 const meshB = Buffer.from(await (await fetch(`${base}/jobs/${job.id}/mesh.bin`)).arrayBuffer());
 const { header: mh2, start: ms2 } = readHeader(meshB);
 const y0 = new Float32Array(meshB.buffer.slice(meshB.byteOffset + ms2, meshB.byteOffset + ms2 + 12))[1];
