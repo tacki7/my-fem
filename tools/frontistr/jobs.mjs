@@ -6,11 +6,14 @@
 // frames/<N>.bin, and every change of state or new frame is told to whoever listens (the
 // bridge's server-sent events). One job at a time - fistr1 takes every core it can get.
 //
-// A result file is read only once it is finished: once the next one has appeared, or fistr1
-// has exited. fistr1 writes a file over several hundred milliseconds; reading the newest one
-// while it grows gives a truncated record.
+// A result file is read only once it is finished: once the next one has appeared, once fistr1
+// has exited, or - the newest one while fistr1 runs - once it has stopped growing between two
+// scans and holds every node's record, its last line ended. fistr1 writes a file over several
+// hundred milliseconds; reading one while it grows gives a truncated record. Waiting for the
+// next file instead would show each load step only when the next one is done - on the coupled
+// rolls a step takes minutes, and the last one would show only at the end.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { parseRes } from './lib.mjs';
 import { parseMsh, extractSurface, encodeMesh, encodeFrame, nodalAreas, frameFromResult } from './fieldframe.mjs';
 
@@ -23,6 +26,22 @@ export function finishedResults(files, prefix, exited) {
   const ns = files.filter((f) => f.startsWith(prefix) && /^\d+$/.test(f.slice(prefix.length)))
     .map((f) => Number(f.slice(prefix.length))).sort((a, b) => a - b);
   return exited ? ns : ns.slice(0, -1);
+}
+
+/**
+ * A result file's content, parsed, if it is written in full: every node's record the header
+ * counts, the last line ended. Else null - a file cut at a line end amid the records fails to
+ * parse, one cut in the middle of its last number would read as a shorter number. (Exported
+ * for the gate.)
+ */
+export function completeResult(text) {
+  if (!text.endsWith('\n')) return null;
+  try {
+    const res = parseRes(text);
+    const i = text.indexOf('\n*data\n');
+    const nn = Number(text.slice(i + 7, text.indexOf('\n', i + 7)).trim().split(/\s+/)[0]);
+    return i >= 0 && res.node.size === nn ? res : null;
+  } catch { return null; }
 }
 
 let seq = 0;
@@ -83,6 +102,18 @@ export function createJobs({ fistr1, fistr1Args = [], runDir, kinds, pollMs = 25
         child.stdout.on('data', keep); child.stderr.on('data', keep);
         let exited = false, exitCode = null;
         const seen = new Set([0]);
+        const frame = (N, text, res) => {
+          const time = Number(/TOTALTIME\s*\n\s*(\S+)/.exec(text.slice(0, 400))?.[1] ?? NaN);
+          const f = frameFromResult(surface, res, job.areas);
+          writeFileSync(`${job.dir}/frames/${N}.bin`, encodeFrame({ k: N, increment: N, time, metrics: f.metrics }, f.disp, f.fields));
+          job.frames = Math.max(job.frames, N + 1);
+          seen.add(N);
+          emit(job, 'frame', { k: N, time, metrics: f.metrics });
+          if (f.metrics.nonFinite > 0) job.nonFinite = true;
+        };
+        // the newest file's size at the last scan, and the size it failed to read at (read again
+        // only once it has changed: a file stuck half-written is not parsed every scan)
+        const lastSize = new Map(), failedSize = new Map();
         const scan = () => {
           let files = [];
           try { files = readdirSync(job.dir); } catch { return; }
@@ -90,17 +121,26 @@ export function createJobs({ fistr1, fistr1Args = [], runDir, kinds, pollMs = 25
             if (seen.has(N)) continue;
             try {
               const text = readFileSync(`${job.dir}/${spec.resPrefix}${N}`, 'utf8');
-              const res = parseRes(text);
-              const time = Number(/TOTALTIME\s*\n\s*(\S+)/.exec(text.slice(0, 400))?.[1] ?? NaN);
-              const f = frameFromResult(surface, res, job.areas);
-              writeFileSync(`${job.dir}/frames/${N}.bin`, encodeFrame({ k: N, increment: N, time, metrics: f.metrics }, f.disp, f.fields));
-              job.frames = Math.max(job.frames, N + 1);
-              seen.add(N);
-              emit(job, 'frame', { k: N, time, metrics: f.metrics });
-              if (f.metrics.nonFinite > 0) job.nonFinite = true;
+              frame(N, text, parseRes(text));
             } catch (e) {
               // read again on the next scan; once fistr1 has exited there is no next scan
               if (exited) { seen.add(N); emit(job, 'progress', { warning: `result ${N} unreadable: ${e.message}` }); }
+            }
+          }
+          // the newest one while fistr1 runs: once it has stopped growing and is whole
+          const N = exited ? undefined : finishedResults(files, spec.resPrefix, true).pop();
+          if (N !== undefined && !seen.has(N)) {
+            const path = `${job.dir}/${spec.resPrefix}${N}`;
+            let size = 0;
+            try { size = statSync(path).size; } catch { /* not there any more */ }
+            const still = size > 0 && size === lastSize.get(N) && size !== failedSize.get(N);
+            lastSize.set(N, size);
+            if (still) {
+              try {
+                const text = readFileSync(path, 'utf8'), res = completeResult(text);
+                if (!res) throw new Error('not written in full');
+                frame(N, text, res);
+              } catch { failedSize.set(N, size); /* again once it changes, or with the rest once fistr1 exits */ }
             }
           }
           // progress: the status table fistr1 keeps (FSTR.sta), its last line
