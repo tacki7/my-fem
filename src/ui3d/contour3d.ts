@@ -311,7 +311,7 @@ export class ContourView3D {
   private toolbar!: HTMLElement;
   private readout!: HTMLElement;
   private markBox!: HTMLElement;
-  private legends = new Map<PartKind, { root: HTMLElement; select: HTMLSelectElement; ramp: HTMLSelectElement; bar: HTMLElement; ticks: HTMLElement; note: HTMLElement; mode: HTMLSelectElement; lo: HTMLInputElement; hi: HTMLInputElement; unit: HTMLElement; body: HTMLElement }>();
+  private legends = new Map<PartKind, { root: HTMLElement; select: HTMLSelectElement; ramp: HTMLSelectElement; scale: HTMLElement; bar: HTMLElement; ticks: HTMLElement; note: HTMLElement; mode: HTMLSelectElement; lo: HTMLInputElement; hi: HTMLInputElement; unit: HTMLElement; body: HTMLElement }>();
   private partButtons = new Map<string, HTMLButtonElement>();
   private partRow!: HTMLElement;
   private marks: HTMLElement[] = [];
@@ -364,7 +364,8 @@ export class ContourView3D {
     host.append(this.overlay);
     this.buildOverlay();
     this.bindPointer();
-    this.ro = new ResizeObserver(() => this.requestRender());
+    // a new size may change the legends' room for labels too
+    this.ro = new ResizeObserver(() => { for (const k of GROUPS) this.dirty.add(k); this.requestRender(); });
     this.ro.observe(host);
     this.requestRender();
   }
@@ -484,6 +485,16 @@ export class ContourView3D {
     this.dirty.add(g.part.kind);
     this.stats.updateMs = performance.now() - t0;
     this.requestRender();
+  }
+
+  /** a body's status label changed with no new values (a calculation reached another stage) */
+  relabel(name: string, label: FieldValues['label']): void {
+    const g = this.parts.get(name);
+    if (!g?.values) return;
+    g.values = { ...g.values, label };
+    const grp = this.groups[g.part.kind];
+    grp.label = label; grp.labelAt = performance.now();
+    this.drawStatus();
   }
 
   /** take a body away */
@@ -670,13 +681,13 @@ export class ContourView3D {
   setView(v: ViewPreset): void {
     if (!this.sceneBounds()) { this.autoPreset = v; this.autoView = true; this.syncViewButtons(v); return; }
     this.autoView = false;
-    // the strip lies between the rolls: seen only with the mirror copies out of the way
-    const mirror = v !== 'bite';
-    if (mirror !== this.opts.mirror) { this.opts.mirror = mirror; this.syncToolbar(); }
     this.fit(v);
   }
 
   private fit(v: ViewPreset): void {
+    // the strip lies between the rolls: seen only with the mirror copies out of the way
+    const mirror = v !== 'bite';
+    if (mirror !== this.opts.mirror) { this.opts.mirror = mirror; this.syncToolbar(); }
     const b = this.sceneBounds();
     if (!b) return;
     const c: V3 = [(b.lo[0] + b.hi[0]) / 2, (b.lo[1] + b.hi[1]) / 2, (b.lo[2] + b.hi[2]) / 2];
@@ -1067,6 +1078,8 @@ export class ContourView3D {
   private buildLegend(kind: PartKind) {
     const root = el('section', 'ct3-legend ct3-plate');
     root.dataset.group = kind;
+    // shown once a body of the group is placed
+    root.hidden = true;
     const head = el('div', 'ct3-legend-head');
     const body = el('span', 'ct3-legend-body', GROUP_NAME[kind]);
     const select = el('select', 'ct3-select ct3-legend-field');
@@ -1111,7 +1124,7 @@ export class ContourView3D {
     const note = el('div', 'ct3-note');
     root.append(head, scale, foot, note);
     this.legendBox.append(root);
-    return { root, select, ramp, bar, ticks, note, mode, lo, hi, unit, body };
+    return { root, select, ramp, scale, bar, ticks, note, mode, lo, hi, unit, body };
   }
 
   private drawLegend(kind: PartKind): void {
@@ -1155,7 +1168,9 @@ export class ContourView3D {
     L.unit.textContent = unitText;
     const r = grp.range;
     const nT = bands > 0 ? bands : 4;
-    const every = bands > 12 ? 2 : 1;
+    // a label every 13 px at least: a short bar (a small stage) labels every other edge or fewer
+    const px = L.scale.clientHeight || 190;
+    const every = Math.max(bands > 12 ? 2 : 1, Math.ceil(nT / Math.max(1, Math.floor(px / 13))));
     L.ticks.replaceChildren();
     if (has && !r.uniform) {
       // a label at every band edge (every other one on a tall stack), the top always
