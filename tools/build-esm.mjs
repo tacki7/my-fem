@@ -14,9 +14,14 @@
 // which a bundler resolves but node does not. Every emitted file gets them
 // rewritten to the file that was actually emitted ('./slab.js', or
 // './dir/index.js' for a directory import).
+//
+// `<outdir>/.stamp.json` records what the build was made from: the entries, a
+// hash of every source file it compiled, this script's and TypeScript's own.
+// tools/frontistr/sim3dbuild.mjs reads it to build again only when one changed.
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -112,3 +117,18 @@ if (flatten) {
     writeFileSync(shim, `export * from './${flatten}/${name}';\n`);
   }
 }
+
+// every emitted module back to the source it came from (`<out>/sim3d/solver.js` → src/sim3d/solver.ts)
+const sha1 = (file) => createHash('sha1').update(readFileSync(file)).digest('hex');
+const sources = {};
+for (const file of emitted.filter((f) => f.endsWith('.js'))) {
+  const rel = relative(out, file).replace(/\.js$/, '');
+  const src = ['.ts', '.tsx', '.mts'].map((e) => join(ROOT, 'src', rel + e)).find(isFile);
+  if (src) sources[relative(ROOT, src)] = sha1(src);
+}
+writeFileSync(join(out, '.stamp.json'), JSON.stringify({
+  tool: sha1(fileURLToPath(import.meta.url)),
+  typescript: JSON.parse(readFileSync(join(ROOT, 'node_modules', 'typescript', 'package.json'), 'utf8')).version,
+  entries: entries.map((e) => relative(ROOT, e)),
+  sources,
+}, null, 1) + '\n');
